@@ -386,6 +386,14 @@ pub const EVENT_KIND_EML_SAVED: &str = "eml.saved";
 /// EML model loaded event.
 pub const EVENT_KIND_EML_LOADED: &str = "eml.loaded";
 
+/// LeWM per-frame observational tuple attestation (WEFT-533).
+///
+/// Emitted by `clawft-worldmodel-service` (or a daemon bridge) for every
+/// processed frame. Payload is a version-tagged SIGReg manifold reference
+/// plus `(a_t, z_t, z_{t+1}, surprise)`. Kind string matches
+/// `weftos_worldmodel_core::EVENT_KIND_LEWM_FRAME_ATTESTATION`.
+pub const EVENT_KIND_LEWM_FRAME_ATTESTATION: &str = "lewm.frame.attestation";
+
 /// Auth credential registration event.
 ///
 /// Emitted when a new credential is registered with the AuthService.

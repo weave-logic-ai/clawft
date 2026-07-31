@@ -48,6 +48,13 @@ pub const EVENT_KIND_TOOL_REGISTER: &str = "tool.register";
 /// chain bridge and plugin host share a vocabulary.
 pub const EVENT_KIND_PLUGIN_WASM_INVOKE: &str = "plugin.wasm.invoke";
 
+/// LeWM per-frame observational tuple attestation (WEFT-533).
+///
+/// Payload is a version-tagged SIGReg manifold reference plus
+/// `(a_t, z_t, z_{t+1}, surprise)`. Mirrors
+/// `weftos_worldmodel_core::EVENT_KIND_LEWM_FRAME_ATTESTATION`.
+pub const EVENT_KIND_LEWM_FRAME_ATTESTATION: &str = "lewm.frame.attestation";
+
 /// A pending chain event record for the tracing-to-ChainManager bridge.
 ///
 /// Non-kernel crates cannot call `ChainManager::append()` directly.
@@ -146,6 +153,10 @@ mod tests {
         assert_eq!(EVENT_KIND_WORKSPACE_CONFIG, "workspace.config");
         assert_eq!(EVENT_KIND_TOOL_REGISTER, "tool.register");
         assert_eq!(EVENT_KIND_PLUGIN_WASM_INVOKE, "plugin.wasm.invoke");
+        assert_eq!(
+            EVENT_KIND_LEWM_FRAME_ATTESTATION,
+            "lewm.frame.attestation"
+        );
     }
 
     #[test]

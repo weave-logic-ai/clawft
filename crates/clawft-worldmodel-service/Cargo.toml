@@ -1,0 +1,28 @@
+[package]
+name = "clawft-worldmodel-service"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LeWM WorldModelService binary — single / hot-standby / peer-to-peer topologies (WEFT-524) with per-frame ExoChain attestation (WEFT-533)."
+keywords = ["weftos", "lewm", "world-model", "service"]
+categories = ["science", "command-line-utilities"]
+
+[[bin]]
+name = "clawft-worldmodel-service"
+path = "src/main.rs"
+
+[dependencies]
+weftos-worldmodel = { workspace = true, default-features = false, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+weftos-worldmodel = { workspace = true, default-features = false, features = ["std"] }

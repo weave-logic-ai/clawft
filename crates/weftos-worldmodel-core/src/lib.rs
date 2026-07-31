@@ -34,6 +34,7 @@
 
 extern crate alloc;
 
+pub mod attestation;
 pub mod encoder;
 pub mod error;
 pub mod lattice;
@@ -43,6 +44,9 @@ pub mod predictor;
 pub mod sigreg;
 pub mod types;
 
+pub use attestation::{
+    surprise_voe, ObservationTuple, ATTESTATION_SOURCE, EVENT_KIND_LEWM_FRAME_ATTESTATION,
+};
 pub use encoder::Encoder;
 pub use error::{WorldModelError, WorldModelResult};
 pub use lattice::{LatticeApi, LatticeMethod, LATTICE_METHOD_COUNT, LATTICE_METHODS};

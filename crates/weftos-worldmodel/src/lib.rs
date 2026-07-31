@@ -45,10 +45,17 @@
 //! let _ = lattice.plan(&z, 4).expect("plan");
 //! ```
 //!
+//! # ExoChain attestation (WEFT-533)
+//!
+//! With `feature = "std"`, [`attestation`] serializes
+//! [`ObservationTuple`] `(a_t, z_t, z_{t+1}, surprise)` with a
+//! version-tagged SIGReg manifold reference for append onto a
+//! [`ChainSink`] (in-memory or kernel ExoChain bridge).
+//!
 //! # Feature flags
 //!
 //! - **default** — stub path, `no_std` + `alloc`
-//! - **std** — host marker forwarded to core + impls
+//! - **std** — host marker + JSON attestation encode/decode
 //! - **candle** — experimental ML skeleton (implies `std`); no trained weights
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -63,13 +70,27 @@ pub use weftos_worldmodel_core as core;
 /// Concrete stubs and optional candle skeleton (WEFT-521). Prefer top-level re-exports.
 pub use weftos_worldmodel_impls as impls;
 
-// ── Core: traits, types, latent contract ───────────────────────────────────
+// ── Core: traits, types, latent contract, attestation ──────────────────────
 pub use weftos_worldmodel_core::{
-    latent_dim_matches_v1, zero_latent, Action, ActionPlan, Encoder, Latent, LatentPlanner,
-    LatentVersion, LatticeApi, LatticeMethod, NodeId, ObservationFrame, PlanStep, PlannerKind,
-    Predictor, RecallHit, SigRegHealth, SigRegMonitor, SubscriptionId, WorldModelError,
-    WorldModelResult, LATENT_DIM, LATENT_DIM_U16, LATENT_SCHEMA_MAJOR_V1, LATTICE_METHOD_COUNT,
-    LATTICE_METHODS, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
+    latent_dim_matches_v1, surprise_voe, zero_latent, Action, ActionPlan, Encoder, Latent,
+    LatentPlanner, LatentVersion, LatticeApi, LatticeMethod, NodeId, ObservationFrame,
+    ObservationTuple, PlanStep, PlannerKind, Predictor, RecallHit, SigRegHealth, SigRegMonitor,
+    SubscriptionId, WorldModelError, WorldModelResult, ATTESTATION_SOURCE,
+    EVENT_KIND_LEWM_FRAME_ATTESTATION, LATENT_DIM, LATENT_DIM_U16, LATENT_SCHEMA_MAJOR_V1,
+    LATTICE_METHOD_COUNT, LATTICE_METHODS, SIGREG_HEALTH_ROLLBACK_THRESHOLD,
+    SIGREG_HEALTH_WINDOW_SECS,
+};
+
+// ── Host attestation path (JSON + ChainSink; requires `std`) ───────────────
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub mod attestation;
+
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use attestation::{
+    attest_frame, AttestationError, AttestationPayload, ChainEntry, ChainSink, MemoryChainSink,
+    ATTESTATION_SCHEMA_MAJOR, ATTESTATION_SCHEMA_MINOR,
 };
 
 // ── Impls: default stubs + action encoder ──────────────────────────────────

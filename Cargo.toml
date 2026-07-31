@@ -36,6 +36,8 @@ members = [
     "crates/weftos-worldmodel-impls",
     # WEFT-522: LeWM facade — re-exports core traits + default impls (single entrypoint).
     "crates/weftos-worldmodel",
+    # WEFT-524 / WEFT-533: WorldModelService binary (3 topologies) + frame attestation host.
+    "crates/clawft-worldmodel-service",
     # `weftos-leaf-display` removed from the workspace in Phase E
     # (2026-05-15) — superseded by `weftos-leaf-scene`,
     # `weftos-leaf-renderer`, and `weftos-scene-builder`. The directory

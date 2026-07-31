@@ -1995,6 +1995,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-worldmodel-service"
+version = "0.6.20"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "weftos-worldmodel",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10254,6 +10267,8 @@ dependencies = [
 name = "weftos-worldmodel"
 version = "0.6.20"
 dependencies = [
+ "serde",
+ "serde_json",
  "weftos-worldmodel-core",
  "weftos-worldmodel-impls",
 ]

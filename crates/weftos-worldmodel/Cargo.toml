@@ -14,7 +14,13 @@ categories = ["science", "algorithms"]
 [features]
 default = []
 # Optional host-side marker (crate is no_std + alloc by default).
-std = ["weftos-worldmodel-core/std", "weftos-worldmodel-impls/std"]
+# Enables JSON attestation encode/decode for ExoChain (WEFT-533).
+std = [
+    "weftos-worldmodel-core/std",
+    "weftos-worldmodel-impls/std",
+    "dep:serde",
+    "dep:serde_json",
+]
 # Forward optional candle ML skeleton from impls (no weights / no training).
 # Default CI never enables this — see weftos-worldmodel-impls README.
 candle = ["weftos-worldmodel-impls/candle", "std"]
@@ -22,10 +28,13 @@ candle = ["weftos-worldmodel-impls/candle", "std"]
 [dependencies]
 weftos-worldmodel-core = { workspace = true, default-features = false }
 weftos-worldmodel-impls = { workspace = true, default-features = false }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 weftos-worldmodel-core = { workspace = true, default-features = false }
 weftos-worldmodel-impls = { workspace = true, default-features = false }
+serde_json = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = false
