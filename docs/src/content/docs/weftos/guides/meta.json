@@ -1,4 +1,4 @@
 {
   "title": "Guides",
-  "pages": ["configuration", "feature-flags", "integration-patterns", "kernel-modules", "deployment-docker", "deployment-sops", "assessment", "gui", "graphify-forensic", "exochain-compliance"]
+  "pages": ["configuration", "feature-flags", "integration-patterns", "kernel-modules", "deployment-docker", "deployment-release", "deployment-wasm", "deployment-sops", "assessment", "gui", "graphify-forensic", "exochain-compliance"]
 }

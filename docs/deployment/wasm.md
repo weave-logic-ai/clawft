@@ -1,5 +1,9 @@
 # WASM Deployment
 
+> **Public site:** [Fumadocs — WASM Deployment](../src/content/docs/weftos/guides/deployment-wasm.mdx)
+> (WEFT-468 dual surface — see [README.md](./README.md)). ECC is excluded on
+> `wasm32-unknown-unknown` (WEFT-504).
+
 clawft compiles to a WebAssembly module targeting `wasm32-wasip2`. The WASM
 build provides a lightweight agent core (target: < 300 KB uncompressed,
 < 120 KB gzipped) suitable for edge devices, IoT, and browser-based

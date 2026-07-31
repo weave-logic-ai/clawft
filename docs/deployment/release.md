@@ -1,5 +1,8 @@
 # Release Process
 
+> **Public site:** [Fumadocs — Release Process](../src/content/docs/weftos/guides/deployment-release.mdx)
+> (WEFT-468 dual surface — see [README.md](./README.md)).
+
 WeftOS releases are tag-driven. Pushing a SemVer-shaped tag (`vX.Y.Z`) to
 the `master` branch fans out into five workflows that produce binaries,
 WASM artifacts, knowledge-base bundles, the crates.io publish, and the

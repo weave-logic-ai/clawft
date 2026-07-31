@@ -59,6 +59,21 @@
 //!
 //! Source: <https://github.com/weave-logic-ai/weftos>
 
+// WEFT-504: `ecc` pulls native-only deps (blake3, clawft-core/vector-memory,
+// clawft-bvh). Browser / pure wasm32-unknown-unknown consumers must build
+// with `--no-default-features` (mesh + ecc off). `scripts/build.sh browser`
+// never enables ecc; `scripts/build.sh check|gate` assert the rejection.
+#[cfg(all(
+    feature = "ecc",
+    target_arch = "wasm32",
+    target_os = "unknown"
+))]
+compile_error!(
+    "feature \"ecc\" is not supported on wasm32-unknown-unknown (WEFT-504); \
+     use --no-default-features for kernel WASM checks, or scripts/build.sh browser \
+     (clawft-wasm never enables ecc)"
+);
+
 // ── ECC cognitive substrate modules (K3c) ────────────────────────
 #[cfg(feature = "ecc")]
 pub mod artifact_store;

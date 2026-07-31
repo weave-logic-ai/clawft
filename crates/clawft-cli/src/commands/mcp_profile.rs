@@ -303,6 +303,54 @@ mod tests {
         assert_eq!(full.len(), sample_tools().len());
     }
 
+    /// WEFT-703 / ADR-076 C5: catalog **default** profile live wire names must
+    /// be allowed by `ProfileSet::product_default()`, and media/full-only
+    /// catalog tools must not leak into default.
+    ///
+    /// Source of truth for the list: `docs/weftos/mcp-capability-catalog.md`
+    /// (rows with `status=live` and profiles containing `default`). Update
+    /// that table **first**, then this test.
+    #[test]
+    fn catalog_default_live_tools_allowed_by_default_profile() {
+        let p = ProfileSet::product_default();
+        // Live + default (control ∪ workspace) from the catalog table.
+        let catalog_default_live = [
+            "skill_list",
+            "skill_get",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_directory",
+            "exec_shell",
+            "process_spawn",
+            "memory_read",
+            "memory_write",
+            "web_search",
+            "web_fetch",
+        ];
+        for name in catalog_default_live {
+            assert!(
+                p.allows_tool(name),
+                "catalog default live tool `{name}` missing from ProfileSet default (WEFT-703); \
+                 update mcp_profile allowlists or fix the catalog"
+            );
+        }
+        // Live but media-only / full-only — must stay off default.
+        for name in [
+            "voice_listen",
+            "voice_speak",
+            "audio_transcribe",
+            "audio_synthesize",
+            "render_ui",
+            "delegate_task",
+        ] {
+            assert!(
+                !p.allows_tool(name),
+                "catalog non-default live tool `{name}` leaked into default profile (WEFT-703)"
+            );
+        }
+    }
+
     #[test]
     fn workspace_only() {
         let p = ProfileSet::parse("workspace").unwrap();

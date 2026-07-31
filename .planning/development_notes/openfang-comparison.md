@@ -161,3 +161,30 @@ Drop-in `/v1/chat/completions` would enable existing tooling integration.
 ## Conclusion
 
 Different products for overlapping use cases. OpenFang optimizes for breadth (channels, autonomous agents, marketplace). We optimize for depth (routing intelligence, voice, quality, browser execution). The most impactful things to adopt: session repair, canonical sessions, and broader channel coverage.
+
+---
+
+## Gap triage (WEFT-549, 2026-07-31)
+
+Competitive-analysis items only — **not** research deliverables. Each gap is
+owned, deferred (`no-op` / later cycle), or already partially covered in-tree.
+New implementation work must open a **new** Plane item under the owning
+workstream; this section is the triage outcome that closes WEFT-549.
+
+| # | Gap target | Owner workstream | Disposition | Notes / follow-up |
+|---|------------|------------------|-------------|-------------------|
+| 1 | Channel breadth (40 vs ~13) | **ws06-channels** | adopt selectively | Prioritize high-value nets (Bluesky/X/Matrix depth) over LINE/Viber parity; file per-adapter Plane items when scheduled |
+| 2 | Autonomous Hands agents | **ws11-agent-core** | adopt pattern | HAND.toml-like packaging maps to skills/agents manifests; no 1:1 OpenFang Hands port |
+| 3 | Tauri 2.0 desktop | **ws09-gui** | defer / no-op for 0.8–0.9 | Browser WASM + clawft-ui SPA is current desktop story; Tauri only if product demands native shell |
+| 4 | 16-layer security stack | **ws08-security** | partial / map | Keep WeftOS model (governance gates, ExoChain, wasm-sandbox, rate limits); do not clone OpenFang layer list — track deltas via security audits |
+| 5 | OpenAI-compatible API | **ws04-api** / services | adopt | `/v1/chat/completions` façade is valuable for tooling; schedule under services HTTP when capacity |
+| 6 | P2P OFP wire protocol | **ws07-mesh** | no-op as OFP | Prefer existing mesh (ADR-026/031) over OpenFang OFP clone |
+| 7 | Agent marketplace (FangHub) | product / **ws14-deployment** | defer | Marketplace is product/ops, not core runtime; revisit post-1.0 |
+| 8 | JS + Python SDKs | **ws15-mcp** + docs | partial | MCP is the external control plane (ADR-075/076); thin language SDKs optional later |
+| 9 | ratatui TUI | **ws09-gui** / console | partial / no-op new TUI | Kernel console + weaver already cover ops CLI; full ratatui dashboard not planned |
+| 10 | Migration tools (LangChain/AutoGPT/…) | docs / **ws14-deployment** | docs-only | Migration guides in docs when demanded; no in-tree converter priority |
+| 11 | Session repair / canonical sessions | **ws11-agent-core** | adopt | Highest-value patterns from “Patterns Worth Adopting”; open dedicated tickets when implementing |
+| 12 | Loop guard / text-to-tool recovery | **ws11-agent-core** | adopt | Medium priority hardening; group with agent-loop reliability |
+
+**Rule:** do not leave orphans under ws17-research — competitive gaps belong to
+product workstreams above.

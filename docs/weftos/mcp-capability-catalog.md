@@ -75,6 +75,12 @@ weft mcp-server --profile full --reexport-mcp   # peer MCP re-export; explicit o
 
 ## Drift policy
 
+**CI (WEFT-703 / ADR-076 C5):** `crates/clawft-cli` unit test
+`catalog_default_live_tools_allowed_by_default_profile` pins catalog
+**default** `status=live` wire names to `ProfileSet::product_default()`.
+Fails when a live default catalog tool is missing from the allowlist, or
+when media/full-only live tools leak into default.
+
 When adding a tool or weave method:
 
 1. Add/update a catalog row.  

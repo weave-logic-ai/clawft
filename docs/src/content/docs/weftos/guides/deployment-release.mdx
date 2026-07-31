@@ -1,0 +1,44 @@
+---
+title: Release Process
+description: Tag-driven SemVer releases — cargo-dist binaries, WASM, crates.io, multi-arch Docker, and release gates.
+---
+
+# Release Process
+
+WeftOS releases are **tag-driven**. Pushing a SemVer-shaped tag (`vX.Y.Z`)
+fans out into workflows that produce binaries, WASM artifacts, knowledge-base
+bundles, crates.io publish, and the multi-arch Docker image.
+
+Canonical long-form operator guide (repo):
+[docs/deployment/release.md](https://github.com/weave-logic-ai/weftos/blob/master/docs/deployment/release.md)
+(WEFT-468 — Fumadocs surfaces this publicly; deep detail lives with the
+deployment markdown set).
+
+## Version numbering
+
+- **MAJOR.MINOR.PATCH** ([SemVer](https://semver.org/)).
+- Workspace root `Cargo.toml` is the version source of truth.
+- Publish refuses tag/workspace mismatches.
+
+## What a tag triggers
+
+| Artifact | Typical workflow / tool |
+|----------|-------------------------|
+| Host binaries | cargo-dist |
+| Browser / WASI WASM | `scripts/build.sh browser` / `wasi` |
+| Docker multi-arch | `release-docker.yml` (see [Docker Deployment](./deployment-docker)) |
+| crates.io | publish workflow for `publish = true` crates |
+
+## Local rehearsal
+
+```bash
+# Prefer the unified script (see scripts/build.sh --help)
+scripts/build.sh gate --with-release-dry-run   # optional multi-minute
+scripts/build.sh native                        # release CLI
+```
+
+## Related
+
+- [Docker Deployment](./deployment-docker)
+- [WASM Deployment](./deployment-wasm)
+- [Deployment SOPs](./deployment-sops)

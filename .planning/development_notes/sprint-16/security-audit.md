@@ -99,19 +99,17 @@ flag for non-localhost binds.
 
 ---
 
-### M-3: No rate limiting on API endpoints
+### M-3: No rate limiting on API endpoints — **CLOSED (WEFT-546)**
 
-**File:** `crates/clawft-services/src/api/handlers.rs` line 128
-**Severity:** MEDIUM
+**File:** `crates/clawft-services/src/api/middleware.rs` (`rate_limit_middleware`)
+**Severity:** MEDIUM (historical)
 **OWASP:** A04:2021 -- Insecure Design
 
-A TODO comment acknowledges the need for rate limiting but none is
-implemented. The token creation endpoint (`POST /api/auth/token`) is
-particularly sensitive -- without rate limiting an attacker can
-generate unlimited tokens.
-
-**Recommendation:** Add `tower::limit::RateLimitLayer` or a
-token-bucket middleware before the first client deployment.
+**Status 2026-07-31:** Fixed. Per-IP token-bucket middleware is wired on the
+HTTP façade (`RateLimitState` + `rate_limit_middleware` in `api/mod.rs`).
+Classes: Auth (e.g. `/api/auth/token`) tighter quota; general `/api/*`; WS.
+Unit tests: `rate_limit_blocks_after_quota`, `rate_limit_separate_ips`,
+`rate_limit_general_api_allows_60`, `rate_class_classifies_paths`.
 
 ---
 
@@ -309,7 +307,7 @@ and run `cargo audit` as part of `scripts/build.sh gate`.
 2. [x] Fix TokenStore panic on poisoned lock (H-2)
 3. [ ] Enable auth middleware on `/api` routes (M-1)
 4. [ ] Restrict CORS to explicit origins (M-2)
-5. [ ] Add rate limiting middleware (M-3)
+5. [x] Add rate limiting middleware (M-3) — WEFT-546
 6. [ ] Add token revocation (M-4)
 7. [ ] Add ExoChain idempotency keys (M-5)
 8. [ ] Install and run `cargo audit` in CI

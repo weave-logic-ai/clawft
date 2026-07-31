@@ -93,6 +93,20 @@ cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-featur
 
 so non-browser code cannot creep into the kernel default feature set.
 
+### ECC exclusion on `wasm32-unknown-unknown` (WEFT-504)
+
+The kernel `ecc` feature enables native-only deps (`blake3`,
+`clawft-core/vector-memory`, `clawft-bvh`). It is **not** supported on
+`wasm32-unknown-unknown`:
+
+| Surface | Behavior |
+|---------|----------|
+| `scripts/build.sh browser` | Builds `clawft-wasm` with `--features browser` only — never enables `ecc` |
+| `clawft-kernel` + `ecc` on wasm32-unknown-unknown | Hard `compile_error!` (WEFT-504) + native dep failures |
+| `scripts/build.sh check` | After the WEFT-114 no-mesh check, asserts `--features ecc` **fails** on that target |
+
+Do **not** pass `--features ecc` into browser/WASI package builds.
+
 ---
 
 ## How to pass features

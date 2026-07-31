@@ -773,6 +773,41 @@ check_kernel_wasm_no_mesh() {
     cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features
 }
 
+# WEFT-504: `ecc` must not compile on wasm32-unknown-unknown (blake3 /
+# vector-memory / BVH are native). Expect cargo check to fail; success is a
+# gate failure. Logs suppressed unless VERBOSE=1.
+check_kernel_ecc_rejected_on_wasm() {
+    local log
+    log="$(mktemp -t weft-ecc-wasm.XXXXXX)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$log'" RETURN
+    set +e
+    cargo check -p clawft-kernel \
+        --target wasm32-unknown-unknown \
+        --no-default-features \
+        --features ecc \
+        >"$log" 2>&1
+    local rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        fail "ecc unexpectedly compiled on wasm32-unknown-unknown (WEFT-504)"
+        if [ "${VERBOSE:-0}" = "1" ]; then
+            cat "$log"
+        fi
+        return 1
+    fi
+    # Prefer our compile_error message; also accept dep-level getrandom failures.
+    if grep -q 'WEFT-504\|ecc.*not supported\|getrandom\|could not compile' "$log"; then
+        pass "ecc correctly rejected on wasm32-unknown-unknown (WEFT-504)"
+        return 0
+    fi
+    fail "ecc wasm check failed for an unexpected reason (WEFT-504); re-run with VERBOSE=1"
+    if [ "${VERBOSE:-0}" = "1" ]; then
+        cat "$log"
+    fi
+    return 1
+}
+
 cmd_check() {
     header "Running cargo check --workspace${FEATURES:+ --features $FEATURES}"
     timer_start
@@ -793,6 +828,17 @@ cmd_check() {
             printf "  ${YELLOW}DRY${NC}   cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features\n"
         else
             check_kernel_wasm_no_mesh
+        fi
+        timer_end
+
+        # WEFT-504: assert `ecc` is rejected on wasm32-unknown-unknown
+        # (compile_error in clawft-kernel + native-only deps).
+        header "Asserting ecc is rejected on wasm32-unknown-unknown (WEFT-504)"
+        timer_start
+        if [ "$DRY_RUN" = true ]; then
+            printf "  ${YELLOW}DRY${NC}   cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features --features ecc  (expect fail)\n"
+        else
+            check_kernel_ecc_rejected_on_wasm
         fi
         timer_end
     else
@@ -1602,8 +1648,9 @@ ${BOLD}Commands:${NC}
                   cargo check -p clawft-kernel --target wasm32-unknown-unknown
                   --no-default-features when the target is installed (WEFT-114:
                   mesh/default features off — blocks non-browser code creeping
-                  into the kernel default feature set). CI hard gate twin:
-                  pr-gates.yml job wasm-kernel-no-mesh.
+                  into the kernel default feature set). Also asserts that
+                  --features ecc fails on that target (WEFT-504). CI hard gate
+                  twin: pr-gates.yml job wasm-kernel-no-mesh.
   clippy          Run clippy with warnings-as-errors
   audit           Run cargo audit with residual ignore-list (deny warnings).
                   Requires: cargo install --locked cargo-audit

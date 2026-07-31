@@ -1,5 +1,8 @@
 # Docker Deployment
 
+> **Public site:** [Fumadocs — Docker Deployment](../src/content/docs/weftos/guides/deployment-docker.mdx)
+> (WEFT-468 dual surface — see [README.md](./README.md)).
+
 WeftOS ships a multi-arch Docker image based on `alpine:3.21`. The image is
 **self-contained**: a multi-stage build compiles a static musl `weft` binary
 from the repository tag (or local checkout), then copies it into a minimal

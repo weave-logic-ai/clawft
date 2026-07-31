@@ -1,0 +1,54 @@
+---
+title: WASM Deployment
+description: Browser (wasm32-unknown-unknown) and WASI (wasm32-wasip2) builds of clawft-wasm via scripts/build.sh.
+---
+
+# WASM Deployment
+
+WeftOS ships two WASM tracks:
+
+| Target | Command | Use |
+|--------|---------|-----|
+| **Browser** | `scripts/build.sh browser` | In-tab agent (`clawft-wasm` + wasm-bindgen) |
+| **WASI** | `scripts/build.sh wasi` | wasmtime / edge hosts (`wasm32-wasip2`) |
+
+Canonical long-form operator guide (repo):
+[docs/deployment/wasm.md](https://github.com/weave-logic-ai/weftos/blob/master/docs/deployment/wasm.md)
+(WEFT-468).
+
+## Prerequisites
+
+```bash
+rustup target add wasm32-unknown-unknown
+rustup target add wasm32-wasip2
+# Optional: wasm-bindgen-cli, wasm-opt (binaryen)
+```
+
+## Build
+
+```bash
+scripts/build.sh browser          # default: release-wasm profile + bindgen → www/pkg
+scripts/build.sh wasi
+scripts/build.sh browser --features browser-opfs
+```
+
+**Mutex (ADR-083):** never enable `native` and `browser` on the same compile unit.
+
+### ECC exclusion (WEFT-504)
+
+The kernel `ecc` feature is **rejected** on `wasm32-unknown-unknown`
+(`compile_error!` + native deps). Browser builds never enable `ecc`.
+See [feature flags](./feature-flags) and `docs/development/feature-flags.md`.
+
+## Size / test
+
+```bash
+scripts/build.sh test-browser     # headless Chrome suite when available
+scripts/build.sh gate             # includes browser WASM soft checks
+```
+
+## Related
+
+- [Docker Deployment](./deployment-docker)
+- [Release Process](./deployment-release)
+- Site page: [WASM sandbox](../wasm-sandbox)
