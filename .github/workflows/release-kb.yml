@@ -72,18 +72,19 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           ASSET="${{ steps.rename.outputs.asset }}"
 
-          # Wait for the release to exist (created by release.yml)
-          for i in $(seq 1 90); do
+          # Wait for the release to exist (created by release.yml).
+          # cargo-dist multi-platform builds often exceed 30m (Intel macOS ~35m).
+          for i in $(seq 1 180); do
             if gh release view "$TAG" >/dev/null 2>&1; then
               echo "Release $TAG found"
               break
             fi
-            echo "Waiting for release $TAG to be created... ($i/90)"
+            echo "Waiting for release $TAG to be created... ($i/180)"
             sleep 20
           done
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::Release $TAG not found after 30 minutes"
+            echo "::error::Release $TAG not found after 60 minutes"
             exit 1
           fi
 
