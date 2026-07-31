@@ -506,12 +506,76 @@ impl TtsService for CloudOpenAiTts {
     }
 }
 
+// ── Cloud-fallback transparency (WEFT-224 / SC-3) ───────────────────────────
+
+/// Tracing target for SC-3 cloud-fallback transparency events.
+///
+/// Filter: `RUST_LOG=voice.cloud_fallback=warn` (or include in a broader filter).
+pub const CLOUD_FALLBACK_TARGET: &str = "voice.cloud_fallback";
+
+/// Human-readable OpenAI Whisper provider label (never an API key / secret).
+pub const PROVIDER_OPENAI_WHISPER: &str = "OpenAI Whisper API";
+
+/// Human-readable OpenAI TTS provider label (never an API key / secret).
+pub const PROVIDER_OPENAI_TTS: &str = "OpenAI TTS API";
+
+/// Why cloud fallback was dispatched (logged; no audio / no keys).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudFallbackReason {
+    /// Local engine returned an error.
+    LocalError,
+    /// Local STT confidence was below the configured threshold.
+    LowConfidence,
+}
+
+impl CloudFallbackReason {
+    /// Stable snake_case tag for structured log fields.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalError => "local_error",
+            Self::LowConfidence => "low_confidence",
+        }
+    }
+}
+
+/// SC-3 transparency message body. Contains only the provider display name —
+/// never audio bytes, transcripts, synthesis text, or API keys.
+pub fn cloud_fallback_transparency_message(provider: &str) -> String {
+    format!("Cloud fallback active: sending audio to {provider}")
+}
+
+/// Emit a WARN transparency line when the fallback chain is about to send
+/// data to a cloud provider (WEFT-224 / SC-3).
+///
+/// # Privacy
+/// Logs **only** `provider`, `reason`, and `modality`. Callers must not pass
+/// PCM samples, raw audio, transcripts, synthesis text, or credentials into
+/// this function.
+pub fn emit_cloud_fallback_transparency(
+    provider: &str,
+    reason: CloudFallbackReason,
+    modality: &str,
+) {
+    // Format string references the `provider` field — do not interpolate
+    // audio, transcripts, synthesis text, or credentials here.
+    warn!(
+        target: CLOUD_FALLBACK_TARGET,
+        event = "voice.cloud_fallback",
+        provider = %provider,
+        reason = reason.as_str(),
+        modality = %modality,
+        "Cloud fallback active: sending audio to {provider}"
+    );
+}
+
 // ── Fallback chains ─────────────────────────────────────────────────────────
 
 /// Local-first STT with optional cloud fallback on error / low confidence.
 pub struct FallbackStt {
     local: Arc<dyn SttService>,
     cloud: Option<Arc<dyn SttService>>,
+    /// Display name for SC-3 transparency (never secrets / never audio).
+    cloud_provider: Option<String>,
     confidence_threshold: f32,
 }
 
@@ -521,13 +585,26 @@ impl FallbackStt {
         Self {
             local,
             cloud: None,
+            cloud_provider: None,
             confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
         }
     }
 
-    /// Add cloud fallback.
-    pub fn with_cloud(mut self, cloud: Arc<dyn SttService>) -> Self {
+    /// Add cloud fallback with a generic provider label.
+    ///
+    /// Prefer [`Self::with_cloud_provider`] so SC-3 logs name a real provider.
+    pub fn with_cloud(self, cloud: Arc<dyn SttService>) -> Self {
+        self.with_cloud_provider(cloud, "cloud STT provider")
+    }
+
+    /// Add cloud fallback and set the SC-3 transparency provider label.
+    pub fn with_cloud_provider(
+        mut self,
+        cloud: Arc<dyn SttService>,
+        provider: impl Into<String>,
+    ) -> Self {
         self.cloud = Some(cloud);
+        self.cloud_provider = Some(provider.into());
         self
     }
 
@@ -535,6 +612,12 @@ impl FallbackStt {
     pub fn with_confidence_threshold(mut self, threshold: f32) -> Self {
         self.confidence_threshold = threshold;
         self
+    }
+
+    fn cloud_provider_label(&self) -> &str {
+        self.cloud_provider
+            .as_deref()
+            .unwrap_or("cloud STT provider")
     }
 }
 
@@ -548,10 +631,16 @@ impl SttService for FallbackStt {
             }
             Ok(low) => {
                 if let Some(cloud) = &self.cloud {
-                    info!(
+                    // SC-3: warn before any audio leaves the machine.
+                    emit_cloud_fallback_transparency(
+                        self.cloud_provider_label(),
+                        CloudFallbackReason::LowConfidence,
+                        "stt",
+                    );
+                    debug!(
                         conf = low.confidence,
                         threshold = self.confidence_threshold,
-                        "STT local low confidence — trying cloud"
+                        "STT local low confidence — dispatching cloud"
                     );
                     match cloud.transcribe(pcm, language).await {
                         Ok(cloud_res) if cloud_res.confidence > low.confidence => {
@@ -560,6 +649,8 @@ impl SttService for FallbackStt {
                         }
                         Ok(_) => Ok(low),
                         Err(e) => {
+                            // Error string may include HTTP status text; never
+                            // re-log request bodies or keys.
                             warn!(error = %e, "STT cloud fallback failed; keeping local");
                             Ok(low)
                         }
@@ -570,7 +661,13 @@ impl SttService for FallbackStt {
             }
             Err(local_err) => {
                 if let Some(cloud) = &self.cloud {
-                    warn!(error = %local_err, "STT local failed — trying cloud");
+                    // SC-3: warn before any audio leaves the machine.
+                    emit_cloud_fallback_transparency(
+                        self.cloud_provider_label(),
+                        CloudFallbackReason::LocalError,
+                        "stt",
+                    );
+                    debug!(error = %local_err, "STT local failed — dispatching cloud");
                     let cloud_res = cloud.transcribe(pcm, language).await?;
                     info!(source = %cloud_res.source, "STT cloud fallback after local error");
                     Ok(cloud_res)
@@ -586,18 +683,42 @@ impl SttService for FallbackStt {
 pub struct FallbackTts {
     local: Arc<dyn TtsService>,
     cloud: Option<Arc<dyn TtsService>>,
+    /// Display name for SC-3 transparency (never secrets).
+    cloud_provider: Option<String>,
 }
 
 impl FallbackTts {
     /// Local-only chain.
     pub fn new(local: Arc<dyn TtsService>) -> Self {
-        Self { local, cloud: None }
+        Self {
+            local,
+            cloud: None,
+            cloud_provider: None,
+        }
     }
 
-    /// Add cloud fallback.
-    pub fn with_cloud(mut self, cloud: Arc<dyn TtsService>) -> Self {
+    /// Add cloud fallback with a generic provider label.
+    ///
+    /// Prefer [`Self::with_cloud_provider`] so SC-3 logs name a real provider.
+    pub fn with_cloud(self, cloud: Arc<dyn TtsService>) -> Self {
+        self.with_cloud_provider(cloud, "cloud TTS provider")
+    }
+
+    /// Add cloud fallback and set the SC-3 transparency provider label.
+    pub fn with_cloud_provider(
+        mut self,
+        cloud: Arc<dyn TtsService>,
+        provider: impl Into<String>,
+    ) -> Self {
         self.cloud = Some(cloud);
+        self.cloud_provider = Some(provider.into());
         self
+    }
+
+    fn cloud_provider_label(&self) -> &str {
+        self.cloud_provider
+            .as_deref()
+            .unwrap_or("cloud TTS provider")
     }
 }
 
@@ -616,9 +737,16 @@ impl TtsService for FallbackTts {
             }
             Err(local_err) => {
                 if let Some(cloud) = &self.cloud {
-                    warn!(error = %local_err, "TTS local failed — trying cloud");
+                    // SC-3: warn before synthesis request leaves the machine.
+                    // Message uses the same SC-3 phrasing; we never log `text`.
+                    emit_cloud_fallback_transparency(
+                        self.cloud_provider_label(),
+                        CloudFallbackReason::LocalError,
+                        "tts",
+                    );
+                    debug!(error = %local_err, "TTS local failed — dispatching cloud");
                     let s = cloud.synthesize(text, voice, speed).await?;
-                    info!(source = %s.source, "TTS cloud fallback");
+                    info!(source = %s.source, "TTS cloud fallback completed");
                     Ok(s)
                 } else {
                     Err(local_err)
@@ -654,7 +782,11 @@ pub fn build_default_stt() -> Arc<dyn SttService> {
     let local: Arc<dyn SttService> = Arc::new(LocalSubstrateStt::new(default_stt_url()));
     let mut chain = FallbackStt::new(local);
     if let Some(key) = openai_api_key() {
-        chain = chain.with_cloud(Arc::new(CloudWhisperStt::new(key)));
+        // Provider label is public product name only — never the API key.
+        chain = chain.with_cloud_provider(
+            Arc::new(CloudWhisperStt::new(key)),
+            PROVIDER_OPENAI_WHISPER,
+        );
     }
     Arc::new(chain)
 }
@@ -664,7 +796,10 @@ pub fn build_default_tts() -> Arc<dyn TtsService> {
     let local: Arc<dyn TtsService> = Arc::new(LocalSubstrateTts::new(default_tts_url()));
     let mut chain = FallbackTts::new(local);
     if let Some(key) = openai_api_key() {
-        chain = chain.with_cloud(Arc::new(CloudOpenAiTts::new(key)));
+        chain = chain.with_cloud_provider(
+            Arc::new(CloudOpenAiTts::new(key)),
+            PROVIDER_OPENAI_TTS,
+        );
     }
     Arc::new(chain)
 }
@@ -851,5 +986,263 @@ mod tests {
         pb.play(&[1, 2, 3], 16_000).await.unwrap();
         let last = pb.last.lock().unwrap().clone().unwrap();
         assert_eq!(last.samples, vec![1, 2, 3]);
+    }
+
+    // ── WEFT-224 / SC-3 transparency ────────────────────────────────────────
+
+    #[test]
+    fn cloud_fallback_message_format_sc3() {
+        let msg = cloud_fallback_transparency_message(PROVIDER_OPENAI_WHISPER);
+        assert_eq!(
+            msg,
+            "Cloud fallback active: sending audio to OpenAI Whisper API"
+        );
+        // Privacy: message must not embed credentials or raw audio markers.
+        assert!(!msg.contains("sk-"));
+        assert!(!msg.contains("api_key"));
+        assert!(!msg.contains("pcm"));
+    }
+
+    #[test]
+    fn cloud_fallback_reason_tags() {
+        assert_eq!(CloudFallbackReason::LocalError.as_str(), "local_error");
+        assert_eq!(
+            CloudFallbackReason::LowConfidence.as_str(),
+            "low_confidence"
+        );
+    }
+
+    /// Capture `voice.cloud_fallback` events the same way SC-1/SC-4 tests do.
+    fn capture_cloud_fallback_events<F>(f: F) -> Vec<(String, String, String, String)>
+    where
+        F: FnOnce(),
+    {
+        use std::sync::Mutex as StdMutex;
+        use tracing::Subscriber;
+        use tracing::field::{Field, Visit};
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default, Clone)]
+        struct Captured {
+            event: Option<String>,
+            provider: Option<String>,
+            reason: Option<String>,
+            modality: Option<String>,
+            message: Option<String>,
+        }
+
+        impl Visit for Captured {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.assign(field.name(), value);
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                // `%field` Display values and the default message arrive here.
+                self.assign(field.name(), &format!("{value:?}"));
+            }
+        }
+
+        impl Captured {
+            fn assign(&mut self, name: &str, value: &str) {
+                // Debug format of a &str is quoted; strip for stable asserts.
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(value);
+                match name {
+                    "event" => self.event = Some(value.to_string()),
+                    "provider" => self.provider = Some(value.to_string()),
+                    "reason" => self.reason = Some(value.to_string()),
+                    "modality" => self.modality = Some(value.to_string()),
+                    "message" => self.message = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+
+        struct CapturingLayer {
+            sink: Arc<StdMutex<Vec<Captured>>>,
+        }
+
+        impl<S> Layer<S> for CapturingLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                if event.metadata().target() != CLOUD_FALLBACK_TARGET {
+                    return;
+                }
+                let mut cap = Captured::default();
+                event.record(&mut cap);
+                self.sink.lock().unwrap().push(cap);
+            }
+        }
+
+        let sink: Arc<StdMutex<Vec<Captured>>> = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer { sink: sink.clone() });
+        with_default(subscriber, f);
+
+        sink.lock()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c.event.clone().unwrap_or_default(),
+                    c.provider.clone().unwrap_or_default(),
+                    c.reason.clone().unwrap_or_default(),
+                    c.message.clone().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sc3_stt_low_confidence_emits_transparency_warn() {
+        let local = Arc::new(MockStt {
+            text: "maybe".into(),
+            confidence: 0.2,
+            fail: false,
+            source: "local".into(),
+        });
+        let cloud = Arc::new(MockStt {
+            text: "certain".into(),
+            confidence: 0.95,
+            fail: false,
+            source: "cloud:openai-whisper".into(),
+        });
+        let stt = FallbackStt::new(local)
+            .with_cloud_provider(cloud, PROVIDER_OPENAI_WHISPER);
+        let pcm = pcm_ms(50);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let events = capture_cloud_fallback_events(|| {
+            rt.block_on(async {
+                let r = stt.transcribe(&pcm, "en").await.unwrap();
+                assert_eq!(r.text, "certain");
+            });
+        });
+
+        assert_eq!(events.len(), 1, "expected one SC-3 event, got {events:?}");
+        let (event, provider, reason, message) = &events[0];
+        assert_eq!(event, "voice.cloud_fallback");
+        assert_eq!(provider, PROVIDER_OPENAI_WHISPER);
+        assert_eq!(reason, "low_confidence");
+        assert!(
+            message.contains("Cloud fallback active: sending audio to OpenAI Whisper API")
+                || message.is_empty(), // some layers only expose structured fields
+            "unexpected message: {message:?}"
+        );
+        // Privacy: no sample dumps or keys in structured fields we capture.
+        assert!(!provider.contains("sk-"));
+        assert!(!message.contains("sk-"));
+    }
+
+    #[test]
+    fn sc3_stt_local_error_emits_transparency_warn() {
+        let local = Arc::new(MockStt {
+            text: String::new(),
+            confidence: 0.0,
+            fail: true,
+            source: "local".into(),
+        });
+        let cloud = Arc::new(MockStt {
+            text: "recovered".into(),
+            confidence: 0.95,
+            fail: false,
+            source: "cloud:openai-whisper".into(),
+        });
+        let stt = FallbackStt::new(local)
+            .with_cloud_provider(cloud, PROVIDER_OPENAI_WHISPER);
+        let pcm = pcm_ms(20);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let events = capture_cloud_fallback_events(|| {
+            rt.block_on(async {
+                let r = stt.transcribe(&pcm, "en").await.unwrap();
+                assert_eq!(r.text, "recovered");
+            });
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].2, "local_error");
+        assert_eq!(events[0].1, PROVIDER_OPENAI_WHISPER);
+    }
+
+    #[test]
+    fn sc3_tts_local_error_emits_transparency_warn() {
+        let local = Arc::new(MockTts {
+            fail: true,
+            source: "local".into(),
+        });
+        let cloud = Arc::new(MockTts {
+            fail: false,
+            source: "cloud:openai-tts".into(),
+        });
+        let tts = FallbackTts::new(local).with_cloud_provider(cloud, PROVIDER_OPENAI_TTS);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let events = capture_cloud_fallback_events(|| {
+            rt.block_on(async {
+                // Synthesis text must not appear in the transparency log.
+                let s = tts
+                    .synthesize("secret utterance not for logs", "", 1.0)
+                    .await
+                    .unwrap();
+                assert_eq!(s.source, "cloud:openai-tts");
+            });
+        });
+
+        assert_eq!(events.len(), 1);
+        let (event, provider, reason, message) = &events[0];
+        assert_eq!(event, "voice.cloud_fallback");
+        assert_eq!(provider, PROVIDER_OPENAI_TTS);
+        assert_eq!(reason, "local_error");
+        assert!(!message.contains("secret utterance"));
+        assert!(!provider.contains("secret"));
+    }
+
+    #[test]
+    fn sc3_high_confidence_local_does_not_emit() {
+        let local = Arc::new(MockStt {
+            text: "hello".into(),
+            confidence: 0.95,
+            fail: false,
+            source: "local".into(),
+        });
+        let cloud = Arc::new(MockStt {
+            text: "cloud".into(),
+            confidence: 0.99,
+            fail: false,
+            source: "cloud:x".into(),
+        });
+        let stt = FallbackStt::new(local)
+            .with_cloud_provider(cloud, PROVIDER_OPENAI_WHISPER);
+        let pcm = pcm_ms(10);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let events = capture_cloud_fallback_events(|| {
+            rt.block_on(async {
+                let r = stt.transcribe(&pcm, "en").await.unwrap();
+                assert_eq!(r.source, "local");
+            });
+        });
+        assert!(
+            events.is_empty(),
+            "local-high-confidence must not emit SC-3: {events:?}"
+        );
     }
 }

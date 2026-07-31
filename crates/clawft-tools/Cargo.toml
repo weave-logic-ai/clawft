@@ -59,3 +59,5 @@ tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# WEFT-224 SC-3: capture transparency log lines in unit tests.
+tracing-subscriber = { workspace = true, features = ["registry"] }

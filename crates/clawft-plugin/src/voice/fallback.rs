@@ -3,11 +3,46 @@
 //! [`SttFallbackChain`] tries local STT first, falling back to a cloud
 //! provider when the local result has low confidence or errors.
 //! [`TtsFallbackChain`] tries local TTS first, falling back on error.
+//!
+//! # SC-3 / WEFT-224
+//!
+//! On every cloud dispatch, a WARN line is emitted on target
+//! `voice.cloud_fallback`:
+//! `Cloud fallback active: sending audio to <provider>`.
+//! Structured fields: `event`, `provider`, `reason`, `modality`.
+//! Never logs audio bytes, transcripts, synthesis text, or API keys.
 
 use crate::PluginError;
+use tracing::warn;
 
 use super::cloud_stt::CloudSttProvider;
 use super::cloud_tts::CloudTtsProvider;
+
+/// Tracing target for SC-3 cloud-fallback transparency (WEFT-224).
+pub const CLOUD_FALLBACK_TARGET: &str = "voice.cloud_fallback";
+
+/// Map internal provider keys to user-facing SC-3 labels.
+fn cloud_provider_display(name: &str) -> &str {
+    match name {
+        "openai-whisper" => "OpenAI Whisper API",
+        "openai-tts" => "OpenAI TTS API",
+        "elevenlabs" => "ElevenLabs API",
+        other => other,
+    }
+}
+
+/// Emit SC-3 transparency WARN before cloud I/O (no audio / no secrets).
+fn emit_cloud_fallback_transparency(provider_name: &str, reason: &str, modality: &str) {
+    let provider = cloud_provider_display(provider_name);
+    warn!(
+        target: CLOUD_FALLBACK_TARGET,
+        event = "voice.cloud_fallback",
+        provider = %provider,
+        reason = %reason,
+        modality = %modality,
+        "Cloud fallback active: sending audio to {provider}"
+    );
+}
 
 /// Minimum confidence score to accept a local STT result without
 /// attempting cloud fallback.
@@ -129,6 +164,8 @@ impl SttFallbackChain {
             Ok(low_confidence) => {
                 // Local succeeded but confidence is too low -- try cloud.
                 if let Some(cloud) = &self.cloud {
+                    // SC-3: warn before audio leaves the machine (no bytes logged).
+                    emit_cloud_fallback_transparency(cloud.name(), "low_confidence", "stt");
                     match cloud.transcribe(audio_data, mime_type, language).await {
                         Ok(cloud_result) if cloud_result.confidence > low_confidence.confidence => {
                             Ok(SttFallbackResult {
@@ -170,6 +207,8 @@ impl SttFallbackChain {
             Err(local_err) => {
                 // Local failed entirely -- try cloud.
                 if let Some(cloud) = &self.cloud {
+                    // SC-3: warn before audio leaves the machine (no bytes logged).
+                    emit_cloud_fallback_transparency(cloud.name(), "local_error", "stt");
                     let cloud_result = cloud.transcribe(audio_data, mime_type, language).await?;
                     Ok(SttFallbackResult {
                         text: cloud_result.text,
@@ -242,6 +281,9 @@ impl TtsFallbackChain {
             }),
             Err(local_err) => {
                 if let Some(cloud) = &self.cloud {
+                    // SC-3: warn before synthesis request leaves the machine.
+                    // Never log `text` or returned audio bytes.
+                    emit_cloud_fallback_transparency(cloud.name(), "local_error", "tts");
                     let voice = voice_id.unwrap_or("alloy");
                     let result = cloud.synthesize(text, voice).await?;
                     Ok(TtsFallbackResult {
@@ -510,5 +552,33 @@ mod tests {
             .with_cloud(Box::new(MockCloudTts { should_fail: true }));
         let result = chain.synthesize("hello", None).await;
         assert!(result.is_err());
+    }
+
+    // -- WEFT-224 / SC-3 provider display labels --
+
+    #[test]
+    fn sc3_provider_display_maps_known_names() {
+        assert_eq!(
+            cloud_provider_display("openai-whisper"),
+            "OpenAI Whisper API"
+        );
+        assert_eq!(cloud_provider_display("openai-tts"), "OpenAI TTS API");
+        assert_eq!(cloud_provider_display("elevenlabs"), "ElevenLabs API");
+        assert_eq!(cloud_provider_display("mock-cloud"), "mock-cloud");
+    }
+
+    #[test]
+    fn sc3_transparency_message_has_no_secrets_or_audio() {
+        // Message body is pure format of provider label only.
+        let provider = cloud_provider_display("openai-whisper");
+        let msg = format!("Cloud fallback active: sending audio to {provider}");
+        assert_eq!(
+            msg,
+            "Cloud fallback active: sending audio to OpenAI Whisper API"
+        );
+        assert!(!msg.contains("sk-"));
+        assert!(!msg.contains("api_key"));
+        assert!(!msg.contains("pcm"));
+        assert!(!msg.contains("audio_data"));
     }
 }

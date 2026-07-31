@@ -854,6 +854,45 @@ These are enforced by the unit tests in
 `crates/clawft-plugin/src/voice/privacy_indicator.rs`. Treat
 them as acceptance criteria for any future capture backend.
 
+## Cloud Fallback Transparency (WEFT-224 / SC-3)
+
+When local STT or TTS fails (or STT confidence is below the chain
+threshold) and a cloud provider is configured, the fallback chain
+dispatches to the cloud. **Before any request leaves the machine**, a
+WARN line is emitted so operators can see that audio (or a synthesis
+request) is leaving the host:
+
+```text
+Cloud fallback active: sending audio to OpenAI Whisper API
+```
+
+| Field | Meaning |
+| --- | --- |
+| Tracing target | `voice.cloud_fallback` |
+| Level | **WARN** (always, on every dispatch) |
+| `event` | `voice.cloud_fallback` |
+| `provider` | Human-readable provider label (e.g. `OpenAI Whisper API`, `OpenAI TTS API`) |
+| `reason` | `local_error` or `low_confidence` |
+| `modality` | `stt` or `tts` |
+
+**Privacy invariants**
+
+- The log line never includes raw PCM / audio bytes, transcripts,
+  synthesis text, or API keys.
+- Cloud fallback still requires an explicit key / config path (e.g.
+  `OPENAI_API_KEY` for the tools chain); SC-3 only adds transparency
+  when that path is already armed.
+
+**Where it lives**
+
+| Stack | Module |
+| --- | --- |
+| Live tools chain (WEFT-214) | `clawft-tools::voice_backend` — `FallbackStt` / `FallbackTts` |
+| Plugin scaffold | `clawft-plugin::voice::fallback` — `SttFallbackChain` / `TtsFallbackChain` |
+
+Filter logs with `RUST_LOG=voice.cloud_fallback=warn` (or include that
+target in a broader filter).
+
 ---
 
 ## Further Reading
