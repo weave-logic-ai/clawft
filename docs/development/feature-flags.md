@@ -253,9 +253,13 @@ Delegates to `clawft-kernel` (and tokio/clap for native):
 
 | Feature | Default | Enables |
 |---------|---------|---------|
-| `agent-core-chat` | **yes** | AgentService dispatch cutover control (Phase D3) |
 | `cluster` / `ecc` / `exochain` / `mesh` | **yes** | kernel feature passthrough |
 | `rvf-rpc` | no | weftos-rvf-wire + rvf-types |
+
+> **Removed (WEFT-497):** `agent-core-chat` was an empty default-on
+> cutover toggle left after agent-core-v1 Phase D3. Spike path already
+> deleted in D3 (`0dd28b49`); flag had no `#[cfg]` gates and was
+> removed after soak on 0.8.x.
 
 ---
 

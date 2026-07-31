@@ -110,9 +110,9 @@ fn daemon_terminal() -> Option<Arc<clawft_service_terminal::TerminalManager>> {
 /// handle. The C2 spike fallback was removed in D3 along with the
 /// inline `handle_agent_chat` body; if the service didn't wire the
 /// dispatch arm surfaces a typed "agent service not wired" error
-/// instead of falling back. The `agent-core-chat` Cargo feature
-/// survives so a single-commit revert can restore the spike if D3
-/// regresses a release-blocking flow.
+/// instead of falling back. The temporary `agent-core-chat` Cargo
+/// feature was removed in WEFT-497 after D3 soak (no `#[cfg]` gates
+/// remained; the flag was an empty default-on toggle).
 ///
 /// Generic param matches the blanket
 /// `impl<P: Platform> AgentLoopHandle for AgentLoop<P>` so production
@@ -6207,12 +6207,10 @@ async fn dispatch(
         "agent.chat" => {
             // agent-core-v1 Phase D3 (the cutover): every request goes
             // through `clawft-service-agent::AgentService::dispatch`.
-            // The C2 spike fallback was removed in this commit along
-            // with `handle_agent_chat`; if the service didn't wire
-            // (LLM init failed at boot) we surface that as a clean
-            // typed error rather than panic. The `agent-core-chat`
-            // feature flag survives so a single-commit revert + flag
-            // flip restores the spike if D3 ever needs to roll back.
+            // The C2 spike path is gone; if the service didn't wire
+            // (LLM init failed at boot) we surface a typed error.
+            // WEFT-497 removed the empty `agent-core-chat` feature flag
+            // after soak — no `#[cfg]` branches remained.
             //
             // WEFT-334: failures carry `error_kind` + legacy string
             // `error` so panels can branch without substring matching.

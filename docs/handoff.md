@@ -3102,8 +3102,8 @@ clawft-weave          58  (+ integration suites: ~30)
 
 `scripts/build.sh check`, `scripts/build.sh clippy`, and
 `cargo build -p clawft-weave --no-default-features --features
-cluster,ecc,exochain,mesh` (the `agent-core-chat` feature off path)
-all return exit 0.
+cluster,ecc,exochain,mesh` all return exit 0.
+(The empty `agent-core-chat` feature was later removed in WEFT-497.)
 
 ## End-state acceptance criteria — all met
 

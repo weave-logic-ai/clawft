@@ -33,10 +33,11 @@
 //!   inherited from B1/B2). Public surface fixed; tests cover the
 //!   lock / cancel / shutdown semantics with a stubbed
 //!   [`AgentLoopHandle`](crate::service::AgentLoopHandle).
-//! - **C2** — daemon wiring behind the `agent-core-chat` feature flag.
+//! - **C2** — daemon wiring (`DAEMON_AGENT` OnceLock + boot order).
 //! - **C3** — substrate-backed `ConversationSink`.
 //! - **D2** — kernel-backed [`EffectGate`](clawft_core::agent::gate::EffectGate).
-//! - **D3** — flag flip; spike deletion.
+//! - **D3** — spike deletion; `agent.chat` always via `AgentService::dispatch`.
+//! - **WEFT-497** — removed residual empty `agent-core-chat` Cargo feature.
 
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]

@@ -119,6 +119,8 @@ Goal: identity becomes operable, not just loaded.
 
 **agent-core-v1 is complete as of commit F2 (`feat(weaver): soul promote command`).** All 12 end-state acceptance criteria above are satisfied: the spike was retired in D3, the chat path runs end-to-end through `clawft-service-agent::AgentService::dispatch` → `clawft-core::agent::AgentLoop::handle_turn`, the kernel gate is in-line on every tool call, identity loads from `.clawft/SOUL.md` + `IDENTITY.md` with the BINDING_THREAD_EXCERPT pin, and the soul-journal flow now has both halves wired (F1 stamped the substrate grant; F2 promotes journal entries into SOUL.md with a witness audit entry). Follow-ups are tracked under agent-core-v1.1 (notably: agent-side journal-write path during chat turns, and a public `chain.append` RPC so `weaver soul promote` can push witness records onto the live chain instead of the local audit log).
 
+**WEFT-497 (0.8.x):** residual empty Cargo feature `agent-core-chat` removed after D3 soak — no `#[cfg]` gates remained post-`0dd28b49`.
+
 ## Sequencing & parallelism
 
 Execution uses `git worktree` per parallelizable commit. Worktrees
