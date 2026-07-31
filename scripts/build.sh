@@ -521,6 +521,105 @@ cmd_releases_mdx() {
     timer_end
 }
 
+# ── Docs site MDX soft-check (WEFT-453) ──────────────────────────────
+# Local rehearsal of the same `npm run build` that Vercel (production
+# deploy) and pr-gates.yml `docs-build` (WEFT-448 hard merge gate) run
+# against docs/src/. Soft by default so missing Node/npm or a broken
+# MDX page does not break broader local scripts; set DOCS_BUILD_HARD=1
+# to fail the process on build errors (CI-style).
+#
+# Distinct from `ui` (clawft-ui React frontend) and from `releases-mdx`
+# (CHANGELOG → Release Notes MDX regen only).
+cmd_docs() {
+    header "Soft-check docs-site MDX build (docs/src → next build)"
+    local docs_dir="$ROOT/docs/src"
+    local hard="${DOCS_BUILD_HARD:-0}"
+    local build_rc=0
+
+    if [ ! -d "$docs_dir" ] || [ ! -f "$docs_dir/package.json" ]; then
+        skip "docs/src/ not found — docs site soft-check skipped"
+        return 0
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        skip "npm not installed — cannot soft-check docs/src (install Node 20+)"
+        return 0
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        skip "node not installed — cannot soft-check docs/src"
+        return 0
+    fi
+
+    info "matches Vercel + pr-gates docs-build: cd docs/src && npm run build"
+    if [ "$hard" = "1" ]; then
+        info "mode=hard (DOCS_BUILD_HARD=1)"
+    else
+        info "mode=soft (set DOCS_BUILD_HARD=1 to fail hard on MDX/build errors)"
+    fi
+
+    timer_start
+    if [ "$DRY_RUN" = true ]; then
+        if [ ! -d "$docs_dir/node_modules" ]; then
+            printf "  ${YELLOW}DRY${NC}   cd docs/src && npm ci\n"
+        fi
+        printf "  ${YELLOW}DRY${NC}   cd docs/src && npm run build\n"
+        timer_end
+        pass "docs soft-check (dry-run)"
+        return 0
+    fi
+
+    # Prefer npm ci when lockfile present (mirrors CI); fall back to npm install.
+    if [ ! -d "$docs_dir/node_modules" ]; then
+        info "installing docs/src dependencies"
+        set +e
+        if [ -f "$docs_dir/package-lock.json" ]; then
+            (cd "$docs_dir" && npm ci --no-audit --no-fund)
+        else
+            (cd "$docs_dir" && npm install --no-audit --no-fund)
+        fi
+        build_rc=$?
+        set -e
+        if [ "$build_rc" -ne 0 ]; then
+            if [ "$hard" = "1" ]; then
+                fail "docs/src dependency install failed"
+                timer_end
+                return 1
+            fi
+            skip "docs/src dependency install failed (soft — set DOCS_BUILD_HARD=1 to fail)"
+            timer_end
+            return 0
+        fi
+    fi
+
+    set +e
+    if [ "$VERBOSE" = true ]; then
+        (cd "$docs_dir" && npm run build)
+    else
+        (cd "$docs_dir" && npm run build) 2>&1 | tail -30
+    fi
+    build_rc=$?
+    set -e
+    timer_end
+
+    if [ "$build_rc" -eq 0 ]; then
+        if [ -d "$docs_dir/.next" ]; then
+            local size
+            size=$(du -sh "$docs_dir/.next" 2>/dev/null | cut -f1)
+            printf "  ${CYAN}SIZE${NC}  docs .next: %s\n" "$size"
+        fi
+        pass "docs/src MDX build (npm run build)"
+        return 0
+    fi
+
+    if [ "$hard" = "1" ]; then
+        fail "docs/src MDX build failed (DOCS_BUILD_HARD=1)"
+        return 1
+    fi
+    # Soft path: report failure without failing the process. Local
+    # rehearsal still surfaces the error in the log (tail above).
+    skip "docs/src MDX build failed (soft — set DOCS_BUILD_HARD=1 to fail; see pr-gates docs-build for hard CI)"
+    return 0
+}
+
 cmd_all() {
     header "Building everything"
     local failed=0
@@ -1497,6 +1596,10 @@ ${BOLD}Commands:${NC}
                   Installs npm deps + chromium on first run.
   releases-mdx    Regenerate docs/src/content/docs/weftos/vision/releases.mdx
                   from CHANGELOG.md (also runs as --check before commits)
+  docs            Soft-check docs-site MDX build (WEFT-453). Runs the same
+                  cd docs/src && npm run build that Vercel and pr-gates
+                  docs-build use. Soft by default (missing npm or a broken
+                  page skips/returns 0); DOCS_BUILD_HARD=1 to fail hard.
   all             Build everything (native + wasi + browser + ui)
   test [pkg…]     Run cargo test --workspace (or scoped: test clawft-channels …)
   test-browser    Run browser WASM regression suite under headless Chrome
@@ -1739,6 +1842,7 @@ main() {
         ui-docker)    cmd_ui_docker ;;
         ui-e2e)       cmd_ui_e2e ;;
         releases-mdx) cmd_releases_mdx ;;
+        docs|docs-mdx|docs-build) cmd_docs ;;
         all)          cmd_all ;;
         test)         cmd_test ;;
         test-browser) cmd_test_browser ;;

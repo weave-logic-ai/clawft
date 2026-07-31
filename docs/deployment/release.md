@@ -414,6 +414,82 @@ settings, add the job name to `Settings -> Branches -> master ->
 Require status checks to pass`. Job names match the `name:` field in
 `pr-gates.yml`.
 
+## Documentation site (Fumadocs / Vercel)
+
+The public docs site is a Next.js + [Fumadocs](https://fumadocs.vercel.app/)
+app under `docs/src/`. Production deploys and PR merge gates are separate
+surfaces; local rehearsal uses `scripts/build.sh docs` (WEFT-453).
+
+### Where production deploys from
+
+**Vercel Git integration** owns production deploy. There is **no** in-repo
+`vercel deploy` workflow and none is planned (stay Vercel-only — avoids a
+second deploy path that can drift from the Vercel project settings).
+
+| Surface | Trigger | Command | Fail mode |
+|---------|---------|---------|-----------|
+| **Vercel production** | Git push to the branch linked in the Vercel project (typically `master` / `main`); Root Directory = `docs/src` | Vercel runs `npm install` / `npm run build` in `docs/src/` | Blocks the Vercel deploy |
+| **pr-gates `docs-build`** (WEFT-448) | PR/push when `docs/src/**` (or `pr-gates.yml`) changes | `cd docs/src && npm ci && npm run build` | **Hard** — blocks merge |
+| **Local soft-check** (WEFT-453) | Manual | `scripts/build.sh docs` | **Soft** by default (missing Node/npm or a broken page reports `SKIP` / does not fail the process). `DOCS_BUILD_HARD=1 scripts/build.sh docs` fails hard for CI-style rehearsal. |
+
+Aliases accepted by `scripts/build.sh`: `docs`, `docs-mdx`, `docs-build`.
+This is distinct from `ui` (clawft-ui) and `releases-mdx` (CHANGELOG →
+Release Notes MDX only).
+
+### What changes trigger a redeploy?
+
+**Vercel** rebuilds when the connected branch moves and Vercel’s path
+filter (if configured in the Vercel project) matches. The repo root is
+not the app root: Vercel’s **Root Directory** is `docs/src`, so changes
+outside that tree usually do **not** redeploy unless the project’s
+Ignored Build Step / path filter says otherwise. Confirm the live filter
+in the Vercel project settings if a content PR did not redeploy.
+
+**pr-gates `docs-build`** is narrower and explicit: it runs only when
+`docs/src/**` or `.github/workflows/pr-gates.yml` changes
+(`dorny/paths-filter`). Other PRs skip the job with a notice. That is
+the in-repo hard gate for MDX syntax / Next build breakage.
+
+**CDN assets** (browser WASM + RVF knowledge base used by the playground)
+are separate: `.github/workflows/docs-assets.yml` publishes rolling
+`cdn-assets` release artifacts after the Browser WASM workflow succeeds
+on `master`. That is not the HTML/MDX site deploy.
+
+### Local rehearsal
+
+```bash
+# Soft-check (default): same npm run build as Vercel / docs-build
+scripts/build.sh docs
+
+# Hard fail on MDX/build errors (closest to CI)
+DOCS_BUILD_HARD=1 scripts/build.sh docs
+
+# Preview without executing
+scripts/build.sh docs --dry-run
+
+# Dev server (hot reload; not a production build)
+cd docs/src && npm install && npm run dev   # http://localhost:3000
+```
+
+Regenerate the Release Notes page from `CHANGELOG.md` before a release
+tag (see Pre-Tag Checklist above):
+
+```bash
+scripts/build.sh releases-mdx
+```
+
+### Decision: no redundant in-repo deploy workflow
+
+**Stay Vercel-only** for production HTML/MDX deploys. Rationale:
+
+1. Vercel already owns build + CDN + previews for the Fumadocs app.
+2. Merge safety is covered by pr-gates **Docs site build** (hard).
+3. Local reproduce is covered by `scripts/build.sh docs` (soft).
+4. A second GitHub Actions `vercel deploy` job would duplicate secrets,
+   project settings, and failure modes without adding a new guarantee.
+
+Revisit only if the project leaves Vercel or needs air-gapped publish.
+
 ## Security audits
 
 `scripts/build.sh gate` and the `pr-gates.yml` CI workflow both run
