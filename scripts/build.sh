@@ -32,9 +32,9 @@ BENCH_CRATE=""
 BENCH_NAME=""
 CLEAN_STALE_DAYS=""
 TEST_PACKAGES=()
+# WEFT-460: optional gate step — cargo-dist host-triple rehearsal
+WITH_RELEASE_DRY_RUN=false
 COMMAND=""
-# WEFT-499: optional native egui GUI binary alongside weft/weaver.
-WITH_GUI=false
 
 # ── Reporting helpers ────────────────────────────────────────────────
 pass()  { printf "  ${GREEN}PASS${NC}  %s\n" "$*"; }
@@ -139,12 +139,6 @@ cmd_native() {
         report_binary_size "target/debug/weft" "Native binary (weft)"
         report_binary_size "target/debug/weaver" "Native binary (weaver)"
     fi
-    # WEFT-499: promote weft-gui-egui to a first-class native artifact via --gui.
-    if [ "$WITH_GUI" = true ]; then
-        cmd_gui_egui
-    else
-        info "GUI binary not built (pass --gui for weft-gui-egui; or: scripts/build.sh gui-egui)"
-    fi
 }
 
 cmd_native_debug() {
@@ -157,9 +151,6 @@ cmd_native_debug() {
     timer_end
     report_binary_size "target/debug/weft" "Native binary (weft, debug)"
     report_binary_size "target/debug/weaver" "Native binary (weave, debug)"
-    if [ "$WITH_GUI" = true ]; then
-        PROFILE=debug cmd_gui_egui
-    fi
 }
 
 # ── Build stamp env ─────────────────────────────────────────────────
@@ -431,27 +422,9 @@ cmd_browser() {
 
     # Run wasm-bindgen to generate JS glue into www/pkg/ so the test
     # harness can be served directly from www/ at the root URL.
-    # WEFT-599: js-sys/web-sys exact-pin wasm-bindgen (=0.2.N); CLI must match
-    # Cargo.lock. Prefer: cargo install wasm-bindgen-cli --version <N> --locked
     local pkg_dir="$ROOT/crates/clawft-wasm/www/pkg"
-    local locked_bindgen=""
-    if [ -f "$ROOT/Cargo.lock" ]; then
-        locked_bindgen=$(awk '
-            $0 == "name = \"wasm-bindgen\"" { found=1; next }
-            found && $1 == "version" {
-                gsub(/"/, "", $3); print $3; exit
-            }
-        ' "$ROOT/Cargo.lock")
-    fi
     if command -v wasm-bindgen >/dev/null 2>&1; then
-        local cli_ver
-        cli_ver=$(wasm-bindgen --version 2>/dev/null | awk '{print $NF}')
-        if [ -n "$locked_bindgen" ] && [ -n "$cli_ver" ] && [ "$cli_ver" != "$locked_bindgen" ]; then
-            fail "wasm-bindgen-cli $cli_ver != Cargo.lock wasm-bindgen $locked_bindgen"
-            info "Install matching CLI: cargo install wasm-bindgen-cli --version $locked_bindgen --locked"
-            return 1
-        fi
-        info "Running wasm-bindgen ($cli_ver) → $pkg_dir"
+        info "Running wasm-bindgen → $pkg_dir"
         run_cmd wasm-bindgen "$wasm_file" \
             --out-dir "$pkg_dir" \
             --target web \
@@ -460,11 +433,7 @@ cmd_browser() {
         pass "pkg/ ready — run: scripts/build.sh serve"
     else
         skip "wasm-bindgen CLI not found — pkg/ not generated"
-        if [ -n "$locked_bindgen" ]; then
-            info "Install with: cargo install wasm-bindgen-cli --version $locked_bindgen --locked"
-        else
-            info "Install with: cargo install wasm-bindgen-cli"
-        fi
+        info "Install with: cargo install wasm-bindgen-cli"
     fi
 }
 
@@ -554,105 +523,6 @@ cmd_releases_mdx() {
     timer_end
 }
 
-# ── Docs site MDX soft-check (WEFT-453) ──────────────────────────────
-# Local rehearsal of the same `npm run build` that Vercel (production
-# deploy) and pr-gates.yml `docs-build` (WEFT-448 hard merge gate) run
-# against docs/src/. Soft by default so missing Node/npm or a broken
-# MDX page does not break broader local scripts; set DOCS_BUILD_HARD=1
-# to fail the process on build errors (CI-style).
-#
-# Distinct from `ui` (clawft-ui React frontend) and from `releases-mdx`
-# (CHANGELOG → Release Notes MDX regen only).
-cmd_docs() {
-    header "Soft-check docs-site MDX build (docs/src → next build)"
-    local docs_dir="$ROOT/docs/src"
-    local hard="${DOCS_BUILD_HARD:-0}"
-    local build_rc=0
-
-    if [ ! -d "$docs_dir" ] || [ ! -f "$docs_dir/package.json" ]; then
-        skip "docs/src/ not found — docs site soft-check skipped"
-        return 0
-    fi
-    if ! command -v npm >/dev/null 2>&1; then
-        skip "npm not installed — cannot soft-check docs/src (install Node 20+)"
-        return 0
-    fi
-    if ! command -v node >/dev/null 2>&1; then
-        skip "node not installed — cannot soft-check docs/src"
-        return 0
-    fi
-
-    info "matches Vercel + pr-gates docs-build: cd docs/src && npm run build"
-    if [ "$hard" = "1" ]; then
-        info "mode=hard (DOCS_BUILD_HARD=1)"
-    else
-        info "mode=soft (set DOCS_BUILD_HARD=1 to fail hard on MDX/build errors)"
-    fi
-
-    timer_start
-    if [ "$DRY_RUN" = true ]; then
-        if [ ! -d "$docs_dir/node_modules" ]; then
-            printf "  ${YELLOW}DRY${NC}   cd docs/src && npm ci\n"
-        fi
-        printf "  ${YELLOW}DRY${NC}   cd docs/src && npm run build\n"
-        timer_end
-        pass "docs soft-check (dry-run)"
-        return 0
-    fi
-
-    # Prefer npm ci when lockfile present (mirrors CI); fall back to npm install.
-    if [ ! -d "$docs_dir/node_modules" ]; then
-        info "installing docs/src dependencies"
-        set +e
-        if [ -f "$docs_dir/package-lock.json" ]; then
-            (cd "$docs_dir" && npm ci --no-audit --no-fund)
-        else
-            (cd "$docs_dir" && npm install --no-audit --no-fund)
-        fi
-        build_rc=$?
-        set -e
-        if [ "$build_rc" -ne 0 ]; then
-            if [ "$hard" = "1" ]; then
-                fail "docs/src dependency install failed"
-                timer_end
-                return 1
-            fi
-            skip "docs/src dependency install failed (soft — set DOCS_BUILD_HARD=1 to fail)"
-            timer_end
-            return 0
-        fi
-    fi
-
-    set +e
-    if [ "$VERBOSE" = true ]; then
-        (cd "$docs_dir" && npm run build)
-    else
-        (cd "$docs_dir" && npm run build) 2>&1 | tail -30
-    fi
-    build_rc=$?
-    set -e
-    timer_end
-
-    if [ "$build_rc" -eq 0 ]; then
-        if [ -d "$docs_dir/.next" ]; then
-            local size
-            size=$(du -sh "$docs_dir/.next" 2>/dev/null | cut -f1)
-            printf "  ${CYAN}SIZE${NC}  docs .next: %s\n" "$size"
-        fi
-        pass "docs/src MDX build (npm run build)"
-        return 0
-    fi
-
-    if [ "$hard" = "1" ]; then
-        fail "docs/src MDX build failed (DOCS_BUILD_HARD=1)"
-        return 1
-    fi
-    # Soft path: report failure without failing the process. Local
-    # rehearsal still surfaces the error in the log (tail above).
-    skip "docs/src MDX build failed (soft — set DOCS_BUILD_HARD=1 to fail; see pr-gates docs-build for hard CI)"
-    return 0
-}
-
 cmd_all() {
     header "Building everything"
     local failed=0
@@ -732,17 +602,19 @@ cmd_test() {
 #   - wasm-pack             (rustup component or cargo-installed)
 #   - chromedriver matching the installed Chrome
 #   - Chrome / Chromium     (linux: google-chrome; macOS: /Applications/.../Google Chrome)
-# CI installs all three via the `browser-wasm-tests` job in
+# CI installs all three via the `wasm-browser-test` job in
 # `.github/workflows/pr-gates.yml`.
-#
-# WEFT-408 / P6.7: wall-clock duration is written to
-# `browser-test-duration.json` (gitignored) for the ≤10% regression gate
-# (`browser-duration-gate` / `scripts/bench/check-browser-test-duration.sh`).
 #
 # Override the browser via `--features` if you want firefox: this
 # script defaults to chrome.
 cmd_test_browser() {
     header "Running browser WASM regression suite (wasm-pack --headless --chrome)"
+    if ! command -v wasm-pack >/dev/null 2>&1; then
+        fail "wasm-pack not found — install via: cargo install wasm-pack"
+        return 1
+    fi
+    if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
+    timer_start
     # Default suite is browser (entry-point contracts). Pass FEATURES=browser-opfs
     # to also exercise OPFS FS (WEFT-13 / browser_opfs.rs), env
     # (WEFT-14 / browser_env_persist.rs), and conversation history
@@ -761,17 +633,9 @@ cmd_test_browser() {
             printf "  ${YELLOW}DRY${NC}   … --test browser_env_persist\n"
             printf "  ${YELLOW}DRY${NC}   … --test browser_history_persist\n"
         fi
+        timer_end
         return 0
     fi
-    if ! command -v wasm-pack >/dev/null 2>&1; then
-        fail "wasm-pack not found — install via: cargo install wasm-pack"
-        return 1
-    fi
-    if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
-    timer_start
-    # High-resolution wall clock for WEFT-408 duration artefact.
-    local t0 t1 elapsed_sec
-    t0=$(date +%s)
     # Always show full output — tail -5 hides per-test results from the runner.
     "${args[@]}" 2>&1
     local rc=$?
@@ -796,112 +660,8 @@ cmd_test_browser() {
             rc=$?
         fi
     fi
-    t1=$(date +%s)
-    elapsed_sec=$((t1 - t0))
     timer_end
-
-    # Capture suite duration artefact for the ≤10% regression gate (WEFT-408).
-    local duration_out="${BROWSER_DURATION_OUT:-$ROOT/browser-test-duration.json}"
-    if [ "$rc" -eq 0 ]; then
-        BROWSER_TEST_PASS=true
-    else
-        BROWSER_TEST_PASS=false
-    fi
-    if BROWSER_TEST_FEATURES="$feat" \
-       BROWSER_TEST_SUITE="browser_pipeline" \
-       BROWSER_TEST_PASS="$BROWSER_TEST_PASS" \
-        bash "$ROOT/scripts/bench/check-browser-test-duration.sh" \
-            --from-sec "$elapsed_sec" \
-            --out "$duration_out" \
-            --write-only >/dev/null; then
-        info "Wrote test-duration artefact → $duration_out (${elapsed_sec}s)"
-    else
-        warn "Could not write test-duration artefact (gate script missing?)"
-    fi
-
     return "$rc"
-}
-
-# Browser test-duration regression gate (WEFT-408 / P6.7).
-#
-# Compares `browser-test-duration.json` (from the last test-browser run)
-# against `scripts/bench/browser-test-duration-baseline.json`. Fails when
-# the suite is >10% slower than the baseline. Soft mode / re-seed:
-#   BROWSER_DURATION_SOFT=1
-#   BROWSER_DURATION_UPDATE_BASELINE=1
-cmd_browser_duration_gate() {
-    header "Browser test-duration gate (≤10% regression)"
-    local results="${BROWSER_DURATION_OUT:-$ROOT/browser-test-duration.json}"
-    local baseline="${BROWSER_DURATION_BASELINE:-$ROOT/scripts/bench/browser-test-duration-baseline.json}"
-    if [ "$DRY_RUN" = true ]; then
-        printf "  ${YELLOW}DRY${NC}   scripts/bench/check-browser-test-duration.sh %s %s\n" \
-            "$results" "$baseline"
-        return 0
-    fi
-    if [ ! -f "$results" ]; then
-        fail "results not found: $results"
-        fail "Run scripts/build.sh test-browser first (writes the artefact)."
-        return 1
-    fi
-    bash "$ROOT/scripts/bench/check-browser-test-duration.sh" "$results" "$baseline"
-}
-
-# Docker smoke against the harness pkg (WEFT-408 / P6.7).
-#
-# Serves crates/clawft-wasm/www/ via nginx:alpine and probes index + pkg.
-# Soft-skip when docker is unavailable: BROWSER_SMOKE_SOFT=1
-cmd_browser_docker_smoke() {
-    header "Browser harness docker smoke"
-    local args=()
-    # Auto-build pkg when missing so the gate is self-contained in CI.
-    if [ ! -f "$ROOT/crates/clawft-wasm/www/pkg/clawft_wasm_bg.wasm" ]; then
-        args+=(--build)
-    fi
-    if [ "$DRY_RUN" = true ]; then
-        printf "  ${YELLOW}DRY${NC}   scripts/ci/browser-harness-docker-smoke.sh %s\n" "${args[*]:-}"
-        return 0
-    fi
-    bash "$ROOT/scripts/ci/browser-harness-docker-smoke.sh" "${args[@]+"${args[@]}"}"
-}
-
-# Final browser regression pack (WEFT-408 / P6.7):
-#   1. test-browser          — wasm-bindgen-test suite + duration artefact
-#   2. browser-duration-gate — ≤10% wall-clock regression
-#   3. browser-docker-smoke  — nginx smoke of harness pkg
-#
-# Duration gate is soft-skipped when the suite itself failed (artefact
-# still written with pass=false). Docker smoke builds pkg if needed.
-cmd_browser_regression() {
-    header "Browser final regression suite (WEFT-408 / P6.7)"
-    local failed=0
-    if [ "$DRY_RUN" = true ]; then
-        cmd_test_browser || true
-        cmd_browser_duration_gate || true
-        cmd_browser_docker_smoke || true
-        return 0
-    fi
-
-    if ! cmd_test_browser; then
-        fail "test-browser failed — duration gate still runs for the artefact"
-        failed=$((failed + 1))
-    fi
-
-    if ! cmd_browser_duration_gate; then
-        fail "browser-duration-gate failed"
-        failed=$((failed + 1))
-    fi
-
-    if ! cmd_browser_docker_smoke; then
-        fail "browser-docker-smoke failed"
-        failed=$((failed + 1))
-    fi
-
-    if [ "$failed" -gt 0 ]; then
-        fail "browser-regression: $failed step(s) failed"
-        return 1
-    fi
-    pass "browser final regression suite clean"
-    return 0
 }
 
 # Browser WASM bundle-size gate (WEFT-389 / M5-A).
@@ -925,35 +685,6 @@ cmd_bundle_size() {
         return 0
     fi
     bash "$ROOT/scripts/bench/check-bundle-size.sh" "$pkg" "$@"
-    local rc=$?
-    timer_end
-    return "$rc"
-}
-
-# Browser performance profiling baseline (WEFT-407 / BW6).
-#
-# Runs scripts/bench/browser-perf-baseline.sh — Node unit tests for the
-# metric helpers plus a CI stub report (schema weftos.browser-perf.v1).
-# Live load/init/first-msg/memory samples come from the www harness
-# (window.__clawftPerf). See docs/browser/performance.md.
-#
-#   scripts/build.sh browser-perf
-#   scripts/build.sh browser-perf --stub
-#   scripts/build.sh browser-perf --test-only
-cmd_browser_perf() {
-    header "Browser performance baseline (WEFT-407)"
-    local script="$ROOT/scripts/bench/browser-perf-baseline.sh"
-    if [ ! -f "$script" ]; then
-        fail "missing $script"
-        return 1
-    fi
-    timer_start
-    if [ "$DRY_RUN" = true ]; then
-        printf "  ${YELLOW}DRY${NC}   bash %s %s\n" "$script" "$*"
-        timer_end
-        return 0
-    fi
-    bash "$script" "$@"
     local rc=$?
     timer_end
     return "$rc"
@@ -1422,9 +1153,216 @@ cmd_pipeline_pass() {
     fi
 }
 
+# ── WEFT-460: cargo-dist host-triple release rehearsal ───────────────
+# Reproduces the local leg of release.yml for the host triple so
+# contributors catch packaging breakage before tag push. Not a substitute
+# for the full multi-target CI matrix — only the host triple is built.
+#
+# Expected local archives (from [package.metadata.dist] dist=true crates):
+#   clawft-cli-{triple}.tar.gz   (weft)
+#   clawft-weave-{triple}.tar.gz (weaver)
+#   weftos-{triple}.tar.gz       (weftos)
+#   clawft-gui-egui-{triple}.tar.gz (weft-gui-egui)
+# Artifacts land in target/distrib/. Requires cargo-dist (the `dist` CLI),
+# pinned at [workspace.metadata.dist] cargo-dist-version.
+#
+# Usage:
+#   scripts/build.sh release-dry-run
+#   scripts/build.sh gate --with-release-dry-run   # optional gate step 17
+#   GATE_RELEASE_DRY_RUN=1 scripts/build.sh gate
+
+# Resolve the cargo-dist CLI binary (`dist` preferred; `cargo dist` fallback).
+dist_cli() {
+    if command -v dist >/dev/null 2>&1; then
+        echo "dist"
+        return 0
+    fi
+    if cargo dist --version >/dev/null 2>&1; then
+        echo "cargo dist"
+        return 0
+    fi
+    return 1
+}
+
+host_triple() {
+    rustc -vV 2>/dev/null | sed -n 's/^host: //p'
+}
+
+# Core of release-dry-run. Returns 0 on success. Does not print the
+# phase-gate style summary — callers own that.
+cmd_release_dry_run_impl() {
+    local host dist_bin dist_ver pinned_ver
+    local manifest_tmp
+    local expected_apps=(clawft-cli clawft-weave weftos clawft-gui-egui)
+    local expected_bins_clawft_cli=weft
+    local expected_bins_clawft_weave=weaver
+    local expected_bins_weftos=weftos
+    local expected_bins_clawft_gui_egui=weft-gui-egui
+    # Real release archives are multi-MB stripped LTO binaries. Lies-mode
+    # stubs (~11 KB) and empty files must not pass verification.
+    local min_archive_bytes=102400
+    local failures=0
+    local app archive checksum path bytes bin_name listing
+
+    host="$(host_triple)"
+    if [ -z "$host" ]; then
+        fail "could not determine host triple (rustc -vV)"
+        return 1
+    fi
+    info "Host triple: $host"
+
+    if ! dist_bin="$(dist_cli)"; then
+        fail "cargo-dist not installed — run: cargo install --locked cargo-dist --version 0.31.0"
+        fail "(or: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh)"
+        return 1
+    fi
+    dist_ver="$($dist_bin --version 2>/dev/null | head -1 || true)"
+    info "Using: $dist_bin ($dist_ver)"
+
+    # Soft pin check against workspace.metadata.dist cargo-dist-version.
+    pinned_ver="$(
+        sed -n 's/^cargo-dist-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$ROOT/Cargo.toml" 2>/dev/null | head -1
+    )"
+    if [ -n "$pinned_ver" ] && ! printf '%s\n' "$dist_ver" | grep -q "$pinned_ver"; then
+        printf "  ${YELLOW}WARN${NC}  cargo-dist version mismatch: local reports '%s', Cargo.toml pins %s\n" \
+            "$dist_ver" "$pinned_ver"
+        info "Install the pin with: cargo install --locked cargo-dist --version $pinned_ver"
+    fi
+
+    # Host must be in the release matrix (else CI wouldn't build it either).
+    if ! grep -E "\"${host}\"" "$ROOT/Cargo.toml" >/dev/null 2>&1; then
+        fail "host triple $host is not listed in [workspace.metadata.dist] targets"
+        fail "cargo-dist will not produce a release archive for this machine"
+        return 1
+    fi
+    pass "host triple is in cargo-dist targets"
+
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   %s build --artifacts=local --target %s --output-format=json\n" \
+            "$dist_bin" "$host"
+        printf "  ${YELLOW}DRY${NC}   verify target/distrib/{%s}-%s.tar.gz names + sizes\n" \
+            "$(IFS=,; echo "${expected_apps[*]}")" "$host"
+        return 0
+    fi
+
+    header "cargo-dist local build for $host"
+    info "This is a full profile=dist (inherits release/LTO) build — expect several minutes"
+    timer_start
+    # BSD mktemp (macOS) requires the Xs at the end of the template.
+    manifest_tmp="$(mktemp "${TMPDIR:-/tmp}/weft-release-dry-run.XXXXXX")" || {
+        fail "mktemp failed"
+        return 1
+    }
+    # stdout is the dist-manifest JSON; warnings/progress go to stderr.
+    # shellcheck disable=SC2086
+    if ! $dist_bin build --artifacts=local --target "$host" --output-format=json \
+            >"$manifest_tmp"; then
+        timer_end
+        fail "dist build failed for target $host"
+        rm -f "$manifest_tmp"
+        return 1
+    fi
+    timer_end
+    pass "dist build --artifacts=local --target $host"
+
+    header "Verifying asset names + sizes (target/distrib/)"
+    for app in "${expected_apps[@]}"; do
+        archive="${app}-${host}.tar.gz"
+        checksum="${archive}.sha256"
+        path="$ROOT/target/distrib/$archive"
+
+        if [ ! -f "$path" ]; then
+            fail "missing archive: $archive"
+            failures=$((failures + 1))
+            continue
+        fi
+
+        bytes=$(wc -c < "$path" | tr -d ' ')
+        if [ "$bytes" -lt "$min_archive_bytes" ]; then
+            fail "$archive is only ${bytes} bytes (min ${min_archive_bytes}) — build may have produced a stub"
+            failures=$((failures + 1))
+            continue
+        fi
+        report_binary_size "$path" "$archive"
+        pass "archive present: $archive"
+
+        if [ ! -f "$ROOT/target/distrib/$checksum" ]; then
+            fail "missing checksum: $checksum"
+            failures=$((failures + 1))
+        else
+            pass "checksum present: $checksum"
+        fi
+
+        # Confirm the expected binary is inside the archive.
+        case "$app" in
+            clawft-cli)      bin_name="$expected_bins_clawft_cli" ;;
+            clawft-weave)    bin_name="$expected_bins_clawft_weave" ;;
+            weftos)          bin_name="$expected_bins_weftos" ;;
+            clawft-gui-egui) bin_name="$expected_bins_clawft_gui_egui" ;;
+            *)               bin_name="" ;;
+        esac
+        if [ -n "$bin_name" ]; then
+            listing="$(tar -tzf "$path" 2>/dev/null || true)"
+            if printf '%s\n' "$listing" | grep -E "(^|/)${bin_name}(\.exe)?$" >/dev/null 2>&1; then
+                pass "archive contains binary: $bin_name"
+            else
+                fail "archive $archive does not contain expected binary '$bin_name'"
+                failures=$((failures + 1))
+            fi
+            # LICENSE + README are include = [...] in workspace.metadata.dist
+            if printf '%s\n' "$listing" | grep -E '(^|/)LICENSE$' >/dev/null 2>&1 \
+                && printf '%s\n' "$listing" | grep -E '(^|/)README\.md$' >/dev/null 2>&1; then
+                pass "archive contains LICENSE + README.md"
+            else
+                fail "archive $archive missing LICENSE and/or README.md"
+                failures=$((failures + 1))
+            fi
+        fi
+    done
+
+    # Surface any extra host archives dist produced (informational).
+    if [ -d "$ROOT/target/distrib" ]; then
+        info "All host archives in target/distrib/:"
+        # shellcheck disable=SC2012
+        ls -1 "$ROOT/target/distrib"/*"${host}"*.tar.gz 2>/dev/null | while read -r f; do
+            report_binary_size "$f" "$(basename "$f")"
+        done || true
+    fi
+
+    rm -f "$manifest_tmp"
+
+    if [ "$failures" -gt 0 ]; then
+        fail "release-dry-run: $failures verification failure(s)"
+        return 1
+    fi
+    pass "release-dry-run: all host assets verified"
+    return 0
+}
+
+cmd_release_dry_run() {
+    header "Release dry-run (cargo-dist host triple) — WEFT-460"
+    timer_start
+    if cmd_release_dry_run_impl; then
+        timer_end
+        return 0
+    else
+        timer_end
+        return 1
+    fi
+}
+
 cmd_gate() {
-    header "Phase Gate — 16 checks"
-    local total=16 passed=0 failed=0 skipped=0
+    # Honor GATE_RELEASE_DRY_RUN=1 even without the CLI flag.
+    if [ "${GATE_RELEASE_DRY_RUN:-}" = "1" ] || [ "${GATE_RELEASE_DRY_RUN:-}" = "true" ]; then
+        WITH_RELEASE_DRY_RUN=true
+    fi
+    local total=16
+    if [ "$WITH_RELEASE_DRY_RUN" = true ]; then
+        total=17
+    fi
+    header "Phase Gate — ${total} checks"
+    local passed=0 failed=0 skipped=0
 
     run_gate_check() {
         local num="$1" label="$2"
@@ -1581,6 +1519,26 @@ cmd_gate() {
     run_gate_check 16 "pipeline pass (clawft-core test(pipeline))" \
         cmd_pipeline_pass_impl
 
+    # 17. WEFT-460 — optional cargo-dist host-triple release rehearsal.
+    # Off by default (multi-minute LTO build). Enable with:
+    #   scripts/build.sh gate --with-release-dry-run
+    #   GATE_RELEASE_DRY_RUN=1 scripts/build.sh gate
+    if [ "$WITH_RELEASE_DRY_RUN" = true ]; then
+        printf "\n${BOLD}[%2d/%d]${NC} %s\n" 17 "$total" "release-dry-run (cargo-dist host triple)"
+        timer_start
+        if [ "$DRY_RUN" = true ]; then
+            printf "  ${YELLOW}DRY${NC}   scripts/build.sh release-dry-run\n"
+            passed=$((passed + 1))
+        elif cmd_release_dry_run_impl; then
+            pass "release-dry-run (cargo-dist host triple)"
+            passed=$((passed + 1))
+        else
+            fail "release-dry-run (cargo-dist host triple)"
+            failed=$((failed + 1))
+        fi
+        timer_end
+    fi
+
     # Summary
     echo ""
     printf "${BOLD}═══════════════════════════════════════${NC}\n"
@@ -1609,9 +1567,8 @@ usage() {
 ${BOLD}Usage:${NC} scripts/build.sh <command> [options]
 
 ${BOLD}Commands:${NC}
-  native          Build native CLI binary (release). Pass --gui to also build
-                  the native egui shell (weft-gui-egui). WEFT-499.
-  native-debug    Build native CLI binary (debug, fast). Honors --gui.
+  native          Build native CLI binary (release)
+  native-debug    Build native CLI binary (debug, fast)
   install         Build weft + weaver and install both to ~/.cargo/bin
                   (atomic replace, ad-hoc re-sign on macOS, fresh git build
                   stamp, prints versions). Release by default; --debug for
@@ -1620,8 +1577,7 @@ ${BOLD}Commands:${NC}
                   Refuses to drop subcommands the installed binary has
                   (--force overrides). --prefix DIR installs elsewhere (for
                   verification). Restart the daemon afterward if running.
-  gui-egui        Build native egui GUI binary alone (weft-gui-egui). Same as
-                  native --gui without the CLI binaries.
+  gui-egui        Build native egui GUI binary (weft-gui-egui, requires --features native)
   wasi            Build WASM for WASI (wasm32-wasip2)
   browser         Build WASM for browser (wasm32-unknown-unknown)
   ui              Build React frontend (tsc + vite)
@@ -1631,30 +1587,13 @@ ${BOLD}Commands:${NC}
                   Installs npm deps + chromium on first run.
   releases-mdx    Regenerate docs/src/content/docs/weftos/vision/releases.mdx
                   from CHANGELOG.md (also runs as --check before commits)
-  docs            Soft-check docs-site MDX build (WEFT-453). Runs the same
-                  cd docs/src && npm run build that Vercel and pr-gates
-                  docs-build use. Soft by default (missing npm or a broken
-                  page skips/returns 0); DOCS_BUILD_HARD=1 to fail hard.
   all             Build everything (native + wasi + browser + ui)
   test [pkg…]     Run cargo test --workspace (or scoped: test clawft-channels …)
   test-browser    Run browser WASM regression suite under headless Chrome
                   (WEFT-388 / M5-A). Requires wasm-pack + chromedriver.
-                  Writes browser-test-duration.json for the duration gate.
-  browser-duration-gate
-                  ≤10% test-duration regression check vs committed baseline
-                  (WEFT-408 / P6.7). Needs a prior test-browser run.
-  browser-docker-smoke
-                  Docker/nginx smoke of crates/clawft-wasm/www harness pkg
-                  (WEFT-408 / P6.7). Soft-skip: BROWSER_SMOKE_SOFT=1
-  browser-regression
-                  Final pack: test-browser + duration gate + docker smoke
-                  (WEFT-408 / P6.7).
   bundle-size     Gate browser WASM bundle (raw + gzip) against the
                   documented budget (WEFT-389 / M5-A).
                   See docs/architecture/wasm-bundle-size.md
-  browser-perf    Browser load/init/first-msg/memory baseline (WEFT-407).
-                  Node unit tests + CI stub report by default.
-                  See docs/browser/performance.md
   wasm-panel      Build the VSCode dev-panel wasm bundle (clawft-gui-egui)
                   via wasm-pack / cargo + wasm-bindgen + wasm-opt -Oz, then
                   gate against the panel size budget. (WEFT-484 / M6-B)
@@ -1677,10 +1616,16 @@ ${BOLD}Commands:${NC}
   gate            Run full phase gate (16 checks, includes cargo audit +
                   npm audit critical/high / WEFT-598 +
                   kernel WASM no-mesh / WEFT-114 + pipeline pass / WEFT-56).
-                  Canonical replacement for the retired scripts/check-features.sh
-                  (WEFT-409/WEFT-564).
+                  Pass --with-release-dry-run (or GATE_RELEASE_DRY_RUN=1)
+                  to add optional check 17: cargo-dist host-triple rehearsal.
   pipeline-pass   Fast clawft-core pipeline regression
                   (nextest -E 'test(pipeline)'; typically <5s). Also gate #15.
+  release-dry-run Rehearse the cargo-dist release for the host triple only
+                  (WEFT-460). Runs: dist build --artifacts=local --target <host>
+                  then verifies asset names, sizes, and archive contents under
+                  target/distrib/. Requires cargo-dist (pin: Cargo.toml
+                  [workspace.metadata.dist] cargo-dist-version). Multi-minute
+                  LTO build — not part of the default gate.
   bench <crate> <name>
                   Run a `[[bench]] harness = false` target (e.g.
                   scripts/build.sh bench clawft-kernel vector_backend_bench
@@ -1700,10 +1645,6 @@ ${BOLD}Options:${NC}
                   diskann/hybrid vector config silently degrades to a brute-
                   force stub; the kernel warns at boot, vector.strict errors)
   --profile <p>   Cargo profile: debug, release, release-wasm (default varies)
-  --gui           With native / native-debug: also build weft-gui-egui
-                  (clawft-gui-egui --features native). Shipped via cargo-dist
-                  as clawft-gui-egui-<triple>.tar.gz alongside weft/weaver
-                  (WEFT-499). No effect on other commands (use gui-egui).
   --force, -f     Force rebuild even if artifacts are up-to-date; for
                   install, override the feature-downgrade guard
   --debug         Use the debug profile (install command)
@@ -1711,21 +1652,25 @@ ${BOLD}Options:${NC}
                   verdict when a known-environmental failure would fail-fast
   --prefix <dir>  Install into <dir> instead of ~/.cargo/bin (install command)
   --days <n>      Age threshold in days (clean-stale command, default 7)
+  --with-release-dry-run
+                  (gate only) Also run release-dry-run as check 17 (WEFT-460).
+                  Equivalent env: GATE_RELEASE_DRY_RUN=1
   --verbose       Show full cargo output
   --dry-run       Print commands without executing
   --help          Show this help
 
 ${BOLD}Examples:${NC}
   scripts/build.sh native                          # Release CLI binary
-  scripts/build.sh native --gui                    # CLI + weft-gui-egui (WEFT-499)
   scripts/build.sh install --features voice-onnx    # Install with voice (this machine)
   scripts/build.sh install --debug                  # Fast-iteration install
   scripts/build.sh install --prefix /tmp/wprefix    # Verify install off ~/.cargo/bin
   scripts/build.sh native --features voice          # CLI with voice
-  scripts/build.sh gui-egui                         # Native egui GUI alone (release)
+  scripts/build.sh gui-egui                         # Native egui GUI (release)
   scripts/build.sh gui-egui --profile debug         # Native egui GUI (debug)
   scripts/build.sh browser                          # Browser WASM
   scripts/build.sh gate                             # Full phase gate
+  scripts/build.sh gate --with-release-dry-run      # Gate + cargo-dist host rehearsal
+  scripts/build.sh release-dry-run                  # cargo-dist host-triple dry-run
   scripts/build.sh native --dry-run                 # Preview commands
   scripts/build.sh wasi --force                      # Force WASI rebuild
   scripts/build.sh browser && scripts/build.sh serve # Build + serve test harness
@@ -1783,41 +1728,6 @@ parse_args() {
         fi
     fi
 
-    # Capture flags for browser-perf (WEFT-407):
-    #   scripts/build.sh browser-perf [--stub|--test-only|--check [path]|--json-out PATH]
-    BROWSER_PERF_ARGS=()
-    if [ "$COMMAND" = "browser-perf" ]; then
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                --stub|--test-only)
-                    BROWSER_PERF_ARGS+=("$1")
-                    shift
-                    ;;
-                --check)
-                    BROWSER_PERF_ARGS+=("$1")
-                    shift
-                    if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
-                        BROWSER_PERF_ARGS+=("$1")
-                        shift
-                    fi
-                    ;;
-                --json-out)
-                    BROWSER_PERF_ARGS+=("$1" "${2:?'--json-out requires a path'}")
-                    shift 2
-                    ;;
-                --verbose|--dry-run|--help|-h)
-                    # leave for the global option loop
-                    break
-                    ;;
-                *)
-                    printf "${RED}Unknown browser-perf option: %s${NC}\n" "$1"
-                    usage
-                    exit 1
-                    ;;
-            esac
-        done
-    fi
-
     while [ $# -gt 0 ]; do
         case "$1" in
             --features)
@@ -1827,11 +1737,6 @@ parse_args() {
             --profile)
                 PROFILE="${2:?'--profile requires a value'}"
                 shift 2
-                ;;
-            --gui)
-                # WEFT-499: native egui shell (weft-gui-egui) alongside CLI.
-                WITH_GUI=true
-                shift
                 ;;
             --force|-f)
                 FORCE=true
@@ -1852,6 +1757,10 @@ parse_args() {
             --days)
                 CLEAN_STALE_DAYS="${2:?'--days requires a number'}"
                 shift 2
+                ;;
+            --with-release-dry-run)
+                WITH_RELEASE_DRY_RUN=true
+                shift
                 ;;
             --verbose)
                 VERBOSE=true
@@ -1889,15 +1798,10 @@ main() {
         ui-docker)    cmd_ui_docker ;;
         ui-e2e)       cmd_ui_e2e ;;
         releases-mdx) cmd_releases_mdx ;;
-        docs|docs-mdx|docs-build) cmd_docs ;;
         all)          cmd_all ;;
         test)         cmd_test ;;
         test-browser) cmd_test_browser ;;
-        browser-duration-gate) cmd_browser_duration_gate ;;
-        browser-docker-smoke)  cmd_browser_docker_smoke ;;
-        browser-regression)    cmd_browser_regression ;;
         bundle-size)  cmd_bundle_size ;;
-        browser-perf) cmd_browser_perf "${BROWSER_PERF_ARGS[@]+"${BROWSER_PERF_ARGS[@]}"}" ;;
         wasm-panel)   cmd_wasm_panel "${WASM_PANEL_MAX_RAW_KB:-}" "${WASM_PANEL_MAX_GZ_KB:-}" ;;
         check)        cmd_check ;;
         clippy)       cmd_clippy ;;
@@ -1905,6 +1809,7 @@ main() {
         npm-audit)    cmd_npm_audit ;;
         gate)         cmd_gate ;;
         pipeline-pass) cmd_pipeline_pass ;;
+        release-dry-run) cmd_release_dry_run ;;
         bench)        cmd_bench "$BENCH_CRATE" "$BENCH_NAME" ;;
         serve)        cmd_serve "$SERVE_PORT" ;;
         clean)        cmd_clean ;;

@@ -78,11 +78,64 @@ Before pushing the release tag:
       docs-site Release Notes page from `CHANGELOG.md`.
 - [ ] Commit the changelog + regenerated MDX in the same commit as the
       version bump.
-- [ ] Run `scripts/build.sh gate` (the 11-check phase gate) and confirm
-      green.
+- [ ] Run `scripts/build.sh gate` (the phase gate) and confirm green.
+- [ ] Run `scripts/build.sh release-dry-run` (or
+      `scripts/build.sh gate --with-release-dry-run`) to rehearse the
+      cargo-dist host-triple packaging locally before the tag push
+      (WEFT-460). See [Local release dry-run](#local-release-dry-run)
+      below.
 
 The release tag should point at the commit that contains the dated
 changelog entry, not the version-bump commit immediately before it.
+
+### Local release dry-run
+
+cargo-dist only runs on tag push in CI. To catch packaging breakage on
+the host triple *before* pushing a tag:
+
+```bash
+# Requires cargo-dist matching [workspace.metadata.dist] cargo-dist-version
+# (currently 0.31.0):
+#   cargo install --locked cargo-dist --version 0.31.0
+
+scripts/build.sh release-dry-run
+```
+
+What it does:
+
+1. Resolves the host triple (`rustc -vV`) and asserts it is listed in
+   `[workspace.metadata.dist] targets`.
+2. Runs `dist build --artifacts=local --target <host>` (same local
+   artifact class CI builds per matrix leg).
+3. Verifies under `target/distrib/` that each dist-enabled app produced
+   a non-trivial archive + checksum, and that the archive contains the
+   expected binary plus `LICENSE` / `README.md`:
+
+| Archive                                      | Binary inside   |
+|----------------------------------------------|-----------------|
+| `clawft-cli-<host>.tar.gz`                   | `weft`          |
+| `clawft-weave-<host>.tar.gz`                 | `weaver`        |
+| `weftos-<host>.tar.gz`                       | `weftos`        |
+| `clawft-gui-egui-<host>.tar.gz`              | `weft-gui-egui` |
+
+This is a full `profile = dist` (inherits release / LTO) build for the
+host only — typically several minutes. It does **not** cross-compile
+the rest of the matrix (that remains CI's job).
+
+Optional phase-gate integration (off by default so a normal `gate` run
+stays fast):
+
+```bash
+scripts/build.sh gate --with-release-dry-run
+# or
+GATE_RELEASE_DRY_RUN=1 scripts/build.sh gate
+```
+
+That adds check 17 to the phase gate. Preview without building:
+
+```bash
+scripts/build.sh release-dry-run --dry-run
+```
 
 ## Release Workflows
 
@@ -401,8 +454,10 @@ scripts/build.sh native   # or: scripts/build.sh native-debug for fast iteration
 ```
 
 The binary lands at `target/release/weft`. `scripts/build.sh --help`
-covers the other subcommands (`wasi`, `browser`, `ui`, `gate`, `test`,
-`check`, `clippy`, `all`).
+covers the other subcommands (`wasi`, `browser`, `ui`, `gate`,
+`release-dry-run`, `test`, `check`, `clippy`, `all`). For a local
+cargo-dist packaging rehearsal on the host triple, see
+[Local release dry-run](#local-release-dry-run).
 
 ### Cross-Compilation
 
