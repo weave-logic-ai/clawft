@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::runtime::Mutex;
@@ -188,6 +189,14 @@ pub struct SessionManager<P: Platform> {
 
     /// Platform providing filesystem access.
     platform: Arc<P>,
+
+    /// Emit one `session.append` chain event per N successful appends
+    /// (WEFT-85 sample-rate cap). `1` = every turn (default). Values
+    /// below 1 are treated as 1. Counter is process-wide for this manager.
+    append_event_every_n: u32,
+
+    /// Monotonic counter of successful `append_turn` calls (for sampling).
+    append_event_counter: AtomicU64,
 }
 
 impl<P: Platform> SessionManager<P> {
@@ -206,6 +215,8 @@ impl<P: Platform> SessionManager<P> {
             sessions_dir,
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
             platform,
+            append_event_every_n: 1,
+            append_event_counter: AtomicU64::new(0),
         })
     }
 
@@ -217,7 +228,24 @@ impl<P: Platform> SessionManager<P> {
             sessions_dir,
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
             platform,
+            append_event_every_n: 1,
+            append_event_counter: AtomicU64::new(0),
         }
+    }
+
+    /// Cap `session.append` chain-event volume: emit one event per `n`
+    /// successful appends (WEFT-85). `n = 1` (default) emits every turn.
+    ///
+    /// Use when long-running sessions would flood the ExoChain; e.g.
+    /// `with_append_event_every_n(10)` keeps ~10% of append markers.
+    pub fn with_append_event_every_n(mut self, n: u32) -> Self {
+        self.append_event_every_n = n.max(1);
+        self
+    }
+
+    /// Current sample-rate cap (`1` = emit every append).
+    pub fn append_event_every_n(&self) -> u32 {
+        self.append_event_every_n.max(1)
     }
 
     /// Get an existing session or create a new one.
@@ -333,6 +361,10 @@ impl<P: Platform> SessionManager<P> {
     ///
     /// Updates both the in-memory cache and appends to the JSONL file on disk.
     /// If the session does not exist yet, it is created via [`get_or_create`].
+    ///
+    /// Emits a `session.append` chain event on every successful append
+    /// (WEFT-85 / MW-7), subject to [`Self::with_append_event_every_n`].
+    /// Payload: `key`, `role`, `turn_count` (not message content).
     pub async fn append_turn(
         &self,
         key: &str,
@@ -342,6 +374,7 @@ impl<P: Platform> SessionManager<P> {
         crate::security::validate_session_id(key)?;
         let mut session = self.get_or_create(key).await?;
         session.add_message(role, content, None);
+        let turn_count = session.messages.len();
 
         // Append message line to file.
         let msg = serde_json::json!({
@@ -364,7 +397,31 @@ impl<P: Platform> SessionManager<P> {
             cache.insert(key.to_string(), session);
         }
 
+        // Chain event for every appended turn (sample-rate capped).
+        // Count only after a successful write so failed appends stay silent.
+        self.maybe_emit_append_event(key, role, turn_count);
+
         Ok(())
+    }
+
+    /// Emit `session.append` when the sample-rate counter hits the cap.
+    fn maybe_emit_append_event(&self, key: &str, role: &str, turn_count: usize) {
+        let every_n = self.append_event_every_n() as u64;
+        let seq = self.append_event_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if seq % every_n != 0 {
+            return;
+        }
+        // Bare identifiers (not "key") so stringify! yields clean JSON keys
+        // (`key` not `"key"`). Same values as the create/destroy markers.
+        crate::chain_event!(
+            "session",
+            crate::chain_event::EVENT_KIND_SESSION_APPEND,
+            {
+                key: key,
+                role: role,
+                turn_count: turn_count
+            }
+        );
     }
 
     /// List all session keys (derived from `.jsonl` filenames on disk).
@@ -919,5 +976,97 @@ mod tests {
 
         let keys = mgr.list_sessions().await.unwrap();
         assert!(keys.is_empty());
+    }
+
+    /// WEFT-85: 100 appends produce 100 `session.append` chain events (default rate).
+    #[tokio::test]
+    async fn append_turn_emits_session_append_chain_event_every_turn() {
+        let platform = make_platform();
+        let mgr = make_manager(platform);
+        let _ = crate::chain_event::drain_pending_chain_events();
+
+        for i in 0..100 {
+            mgr.append_turn("chain:100", "user", &format!("msg-{i}"))
+                .await
+                .unwrap();
+        }
+
+        let events = crate::chain_event::drain_pending_chain_events();
+        let appends: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == crate::chain_event::EVENT_KIND_SESSION_APPEND)
+            .collect();
+        assert_eq!(
+            appends.len(),
+            100,
+            "default sample rate must emit one session.append per turn; got {} appends in {} total events",
+            appends.len(),
+            events.len()
+        );
+        assert!(appends.iter().all(|e| e.source == "session"));
+        // First append may also have produced session.create — do not require exclusivity.
+        let last = appends.last().unwrap();
+        let payload = last.payload.as_ref().expect("payload present");
+        assert_eq!(payload["key"], "chain:100");
+        assert_eq!(payload["role"], "user");
+        // turn_count is stringified by chain_event! via format!("{}", ...)
+        assert_eq!(payload["turn_count"], "100");
+    }
+
+    /// WEFT-85: sample-rate cap reduces event volume deterministically.
+    #[tokio::test]
+    async fn append_turn_sample_rate_caps_chain_events() {
+        let platform = make_platform();
+        let sessions_dir = PathBuf::from("/mock-home/.clawft/workspace/sessions");
+        let mgr = SessionManager::with_dir(platform, sessions_dir).with_append_event_every_n(10);
+        assert_eq!(mgr.append_event_every_n(), 10);
+        let _ = crate::chain_event::drain_pending_chain_events();
+
+        for i in 0..100 {
+            mgr.append_turn("chain:sampled", "assistant", &format!("msg-{i}"))
+                .await
+                .unwrap();
+        }
+
+        let events = crate::chain_event::drain_pending_chain_events();
+        let appends: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == crate::chain_event::EVENT_KIND_SESSION_APPEND)
+            .collect();
+        assert_eq!(
+            appends.len(),
+            10,
+            "every_n=10 over 100 turns must emit 10 session.append events"
+        );
+    }
+
+    /// WEFT-85: create + destroy still emit; append is independent.
+    #[tokio::test]
+    async fn session_lifecycle_chain_events_include_append() {
+        let platform = make_platform();
+        let mgr = make_manager(platform);
+        let _ = crate::chain_event::drain_pending_chain_events();
+
+        mgr.append_turn("life:1", "user", "hi").await.unwrap();
+        mgr.append_turn("life:1", "assistant", "yo").await.unwrap();
+        mgr.delete_session("life:1").await.unwrap();
+
+        let events = crate::chain_event::drain_pending_chain_events();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&crate::chain_event::EVENT_KIND_SESSION_CREATE),
+            "expected session.create in {kinds:?}"
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == crate::chain_event::EVENT_KIND_SESSION_APPEND)
+                .count(),
+            2
+        );
+        assert!(
+            kinds.contains(&crate::chain_event::EVENT_KIND_SESSION_DESTROY),
+            "expected session.destroy in {kinds:?}"
+        );
     }
 }

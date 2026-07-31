@@ -399,6 +399,32 @@ Each event payload includes:
 }
 ```
 
+### Session lifecycle chain events (WEFT-85 / MW-7)
+
+Conversation sessions are substrate state. Their create / append / destroy
+markers flow through the same `chain_event!` → pending buffer → daemon
+`ChainManager` path as governance decisions, so a long-running session is
+auditable for the full hot loop (not only create→destroy).
+
+| Event Kind | Source | When | Payload |
+|---|---|---|---|
+| `session.create` | `session` | `SessionManager::get_or_create` creates a new session (cache + disk miss) | `key` |
+| `session.append` | `session` | Every successful `SessionManager::append_turn` | `key`, `role`, `turn_count` |
+| `session.destroy` | `session` | `SessionManager::delete_session` | `key` |
+
+**Sample-rate cap.** High-volume sessions can flood the chain. Configure
+via `SessionManager::with_append_event_every_n(n)`:
+
+- `n = 1` (default): emit one `session.append` per turn (100 turns → 100 events).
+- `n = 10`: emit one event per 10 turns (100 turns → 10 events).
+
+Message **content is not** included in the append payload (PII / volume).
+Audit completeness for “activity happened” uses `key` + `role` + `turn_count`.
+
+Constants: `EVENT_KIND_SESSION_CREATE` / `EVENT_KIND_SESSION_APPEND` /
+`EVENT_KIND_SESSION_DESTROY` in both `clawft_core::chain_event` and
+`clawft_kernel::chain` (shared vocabulary).
+
 ---
 
 ## Customizing Governance

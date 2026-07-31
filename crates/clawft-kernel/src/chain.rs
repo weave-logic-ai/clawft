@@ -591,6 +591,14 @@ pub const EVENT_KIND_SANDBOX_EXECUTE: &str = "sandbox.execute";
 /// The payload should include `key`.
 pub const EVENT_KIND_SESSION_CREATE: &str = "session.create";
 
+/// Session turn-appended event (WEFT-85 / MW-7).
+///
+/// Emitted when a conversation turn is appended to a session via
+/// `SessionManager::append_turn`. Payload should include `key`, `role`,
+/// and `turn_count` (not message content). Subject to the manager's
+/// optional sample-rate cap (`append_event_every_n`).
+pub const EVENT_KIND_SESSION_APPEND: &str = "session.append";
+
 /// Session destroyed event.
 ///
 /// Emitted when a session is deleted from disk and cache.

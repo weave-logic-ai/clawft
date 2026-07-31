@@ -23,6 +23,13 @@ pub const EVENT_KIND_SANDBOX_EXECUTE: &str = "sandbox.execute";
 /// Session created.
 pub const EVENT_KIND_SESSION_CREATE: &str = "session.create";
 
+/// Conversation turn appended to a session (WEFT-85 / MW-7).
+///
+/// Emitted from [`crate::session::SessionManager::append_turn`] on every
+/// successful append (subject to the manager's optional sample-rate cap).
+/// Payload includes `key`, `role`, and `turn_count` — not message content.
+pub const EVENT_KIND_SESSION_APPEND: &str = "session.append";
+
 /// Session destroyed.
 pub const EVENT_KIND_SESSION_DESTROY: &str = "session.destroy";
 
@@ -133,6 +140,7 @@ mod tests {
     fn constants_match_expected_values() {
         assert_eq!(EVENT_KIND_SANDBOX_EXECUTE, "sandbox.execute");
         assert_eq!(EVENT_KIND_SESSION_CREATE, "session.create");
+        assert_eq!(EVENT_KIND_SESSION_APPEND, "session.append");
         assert_eq!(EVENT_KIND_SESSION_DESTROY, "session.destroy");
         assert_eq!(EVENT_KIND_WORKSPACE_CREATE, "workspace.create");
         assert_eq!(EVENT_KIND_WORKSPACE_CONFIG, "workspace.config");
