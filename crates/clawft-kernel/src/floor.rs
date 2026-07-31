@@ -36,16 +36,146 @@ pub const MAX_CROWD: usize = 4;
 /// this value is treated as self-echo (AEC leakage of the bot's own reply) and
 /// must not win the floor — the principled self-cancel fix. Exposed as a knob
 /// so Phase-1 sim data and live loud-room verification can retune it.
+///
+/// Chosen from ADR-068 Phase 0 loopback sim (self-echo samples cluster ≤0.2;
+/// genuine barge onset samples ≥0.7) with a mid-band default for headroom.
 pub const ERL_BARGE_FLOOR: f32 = 0.50;
 
-/// Whether a measured ERL confidence clears the barge floor (WEFT-628).
+/// Default hysteresis band below [`ERL_BARGE_FLOOR`] (WEFT-615).
+///
+/// Stateful [`ErlBargeGate`] admits at `floor` and only releases once ERL
+/// drops below `floor − hysteresis` (default release = 0.40). Prevents
+/// chatter at the admit boundary when AEC residual flutters mid-playback.
+pub const ERL_BARGE_HYSTERESIS: f32 = 0.10;
+
+/// Tunable ERL barge knobs (ADR-068 D1 / WEFT-615): floor + hysteresis.
+///
+/// Barge-in is **not** a static on/off switch — a claim is admitted when
+/// measured ERL confidence clears the floor. Retune from live loud-room
+/// data without code changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ErlBargeConfig {
+    /// Admit threshold in `[0, 1]`: `erl >= floor` → grant barge.
+    pub floor: f32,
+    /// Hysteresis band width; release at `floor − hysteresis` (clamped ≥ 0).
+    pub hysteresis: f32,
+}
+
+impl Default for ErlBargeConfig {
+    fn default() -> Self {
+        Self {
+            floor: ERL_BARGE_FLOOR,
+            hysteresis: ERL_BARGE_HYSTERESIS,
+        }
+    }
+}
+
+impl ErlBargeConfig {
+    /// Explicit knobs (tests / config plumbing).
+    pub const fn new(floor: f32, hysteresis: f32) -> Self {
+        Self { floor, hysteresis }
+    }
+
+    /// Release threshold: `max(0, floor − hysteresis)`.
+    #[inline]
+    pub fn release_floor(self) -> f32 {
+        (self.floor - self.hysteresis).max(0.0)
+    }
+
+    /// Stateless one-shot admit (no hysteresis hold).
+    #[inline]
+    pub fn admits(self, erl: f32) -> bool {
+        erl.is_finite() && erl >= self.floor
+    }
+}
+
+/// Stateful ERL barge gate with hysteresis (WEFT-615).
+///
+/// Feed successive ERL samples during provisional `Overlap` / continuous
+/// barge monitoring. Once admitted, stays admitted until ERL falls below
+/// the release floor — so boundary flutter does not thrash Mute/Resume.
+#[derive(Debug, Clone)]
+pub struct ErlBargeGate {
+    config: ErlBargeConfig,
+    admitted: bool,
+}
+
+impl ErlBargeGate {
+    /// A gate with the given knobs, starting denied (safe self-cancel default).
+    pub const fn new(config: ErlBargeConfig) -> Self {
+        Self {
+            config,
+            admitted: false,
+        }
+    }
+
+    /// Default floor + hysteresis, starting denied.
+    pub const fn with_defaults() -> Self {
+        Self::new(ErlBargeConfig {
+            floor: ERL_BARGE_FLOOR,
+            hysteresis: ERL_BARGE_HYSTERESIS,
+        })
+    }
+
+    /// Current knobs.
+    pub fn config(&self) -> ErlBargeConfig {
+        self.config
+    }
+
+    /// Whether the gate currently admits a barge.
+    pub fn is_admitted(&self) -> bool {
+        self.admitted
+    }
+
+    /// Observe one ERL sample; update hysteresis state; return admit decision.
+    pub fn observe(&mut self, erl: f32) -> bool {
+        if !erl.is_finite() {
+            self.admitted = false;
+            return false;
+        }
+        if erl >= self.config.floor {
+            self.admitted = true;
+        } else if erl < self.config.release_floor() {
+            self.admitted = false;
+        }
+        // else: hold prior state inside the hysteresis band
+        self.admitted
+    }
+
+    /// Reset to denied (e.g. on link restore / new Speaking turn).
+    pub fn reset(&mut self) {
+        self.admitted = false;
+    }
+}
+
+impl Default for ErlBargeGate {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
+/// Whether a measured ERL confidence clears the default barge floor
+/// (WEFT-628 / WEFT-615). Stateless one-shot — prefer [`ErlBargeGate`] when
+/// sampling repeatedly during playback.
 ///
 /// Used by the duplex / Talk-Mode loop when translating a provisional `Overlap`
 /// into an ECC [`FloorVerdict`](crate::duplex::FloorVerdict): high ERL →
 /// `GrantUser`, low ERL → `DenyBarge`.
 #[inline]
 pub fn erl_admits_barge(erl: f32) -> bool {
-    erl.is_finite() && erl >= ERL_BARGE_FLOOR
+    ErlBargeConfig::default().admits(erl)
+}
+
+/// Whether an optional ERL sample admits a barge under `config` (WEFT-615).
+///
+/// `None` (no measurement yet) is **deny** — safe self-cancel default so
+/// unknown residual never cancels TTS.
+#[inline]
+pub fn erl_admits_barge_opt(erl: Option<f32>, config: &ErlBargeConfig) -> bool {
+    match erl {
+        Some(v) => config.admits(v),
+        None => false,
+    }
 }
 
 // ── Content readiness ────────────────────────────────────────────────────────
@@ -147,18 +277,27 @@ pub fn compute_urgency(s: &UrgencySignals) -> f32 {
     base * erl_scale
 }
 
-/// Map a duplex `TurnClaim` ERL into a floor verdict scaffold (WEFT-628).
+/// Map a duplex `TurnClaim` ERL into a floor verdict scaffold (WEFT-628/615).
 ///
 /// The full Talk-Mode loop still owns when to *ask* this; the helper is the
 /// pure ERL branch of ADR-068 D1 so unit tests and the thin-edge loopback can
-/// prove self-cancel without the full daemon.
+/// prove self-cancel without the full daemon. Uses default knobs.
 #[inline]
 pub fn floor_verdict_from_erl(erl: Option<f32>) -> crate::duplex::FloorVerdict {
-    match erl {
-        Some(v) if erl_admits_barge(v) => crate::duplex::FloorVerdict::GrantUser,
-        Some(_) => crate::duplex::FloorVerdict::DenyBarge,
-        // No ERL yet — treat as unknown/low and deny (safe default for self-cancel).
-        None => crate::duplex::FloorVerdict::DenyBarge,
+    floor_verdict_from_erl_config(erl, &ErlBargeConfig::default())
+}
+
+/// Like [`floor_verdict_from_erl`] with explicit knobs (WEFT-615).
+#[inline]
+pub fn floor_verdict_from_erl_config(
+    erl: Option<f32>,
+    config: &ErlBargeConfig,
+) -> crate::duplex::FloorVerdict {
+    if erl_admits_barge_opt(erl, config) {
+        crate::duplex::FloorVerdict::GrantUser
+    } else {
+        // Low ERL, non-finite, or missing → DenyBarge (self-cancel fix).
+        crate::duplex::FloorVerdict::DenyBarge
     }
 }
 
@@ -378,6 +517,45 @@ mod tests {
     }
 
     #[test]
+    fn erl_barge_config_knobs_and_release() {
+        let cfg = ErlBargeConfig::default();
+        assert!((cfg.floor - ERL_BARGE_FLOOR).abs() < 1e-6);
+        assert!((cfg.hysteresis - ERL_BARGE_HYSTERESIS).abs() < 1e-6);
+        assert!((cfg.release_floor() - 0.40).abs() < 1e-6);
+        assert!(!erl_admits_barge_opt(None, &cfg));
+        assert!(!erl_admits_barge_opt(Some(0.2), &cfg));
+        assert!(erl_admits_barge_opt(Some(0.8), &cfg));
+    }
+
+    /// WEFT-615: hysteresis holds admit/deny across the mid-band so AEC
+    /// residual flutter does not thrash the floor verdict.
+    #[test]
+    fn erl_barge_gate_hysteresis() {
+        let mut gate = ErlBargeGate::with_defaults();
+        assert!(!gate.is_admitted());
+
+        // Self-echo territory — stay denied.
+        assert!(!gate.observe(0.15));
+        assert!(!gate.observe(0.35)); // still below release (0.40)
+
+        // Cross admit floor → grant.
+        assert!(gate.observe(0.55));
+        assert!(gate.is_admitted());
+
+        // Drop into the hysteresis band (0.40..0.50) — hold admitted.
+        assert!(gate.observe(0.45), "hold admit inside hysteresis band");
+        assert!(gate.is_admitted());
+
+        // Drop below release → deny.
+        assert!(!gate.observe(0.30));
+        assert!(!gate.is_admitted());
+
+        // Rise into band without clearing admit floor — stay denied.
+        assert!(!gate.observe(0.45), "hold deny inside band until floor");
+        assert!(gate.observe(0.50)); // re-admit at floor
+    }
+
+    #[test]
     fn floor_verdict_from_erl_self_cancel() {
         use crate::duplex::FloorVerdict;
         assert_eq!(
@@ -394,6 +572,16 @@ mod tests {
             floor_verdict_from_erl(None),
             FloorVerdict::DenyBarge,
             "missing ERL defaults safe (deny)"
+        );
+        // Custom floor (stricter) via config knob.
+        let strict = ErlBargeConfig::new(0.8, 0.1);
+        assert_eq!(
+            floor_verdict_from_erl_config(Some(0.7), &strict),
+            FloorVerdict::DenyBarge
+        );
+        assert_eq!(
+            floor_verdict_from_erl_config(Some(0.85), &strict),
+            FloorVerdict::GrantUser
         );
     }
 

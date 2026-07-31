@@ -20,7 +20,10 @@ use crate::duplex::{
     DuplexChannel, DuplexImpulse, DuplexState, EdgeCommand, FloorVerdict, PayloadKind,
     StreamObservation,
 };
-use crate::floor::{ContentReadiness, UrgencySignals, compute_urgency, floor_verdict_from_erl};
+use crate::floor::{
+    ContentReadiness, ErlBargeConfig, ErlBargeGate, UrgencySignals, compute_urgency,
+    floor_verdict_from_erl, floor_verdict_from_erl_config,
+};
 use crate::impulse::ImpulseType;
 
 // ---------------------------------------------------------------------------
@@ -211,12 +214,18 @@ pub struct ObserveOutcome {
 /// There is **no** private TalkForest — floor cognition rides the shared
 /// daemon machine only. Transport is a pair of `Vec`s simulating the two
 /// lanes; a later UDS/WebSocket carrier swaps the vectors for sockets.
+///
+/// The session holds an [`ErlBargeGate`] (WEFT-615) so repeated ERL samples
+/// during provisional Overlap use floor + hysteresis rather than a binary
+/// barge switch.
 #[derive(Debug)]
 pub struct LocalhostDuplexSession {
     /// Edge-side reflex + ERL relay.
     pub edge: ThinEdge,
     /// Daemon-side floor actuator.
     pub duplex: DuplexChannel,
+    /// Stateful ERL barge gate (floor + hysteresis knobs).
+    pub erl_gate: ErlBargeGate,
     /// Media frames the edge has streamed up (for inspection / later STT).
     pub media_up: Vec<MediaFrame>,
     /// Media frames the daemon has streamed down (TTS / text).
@@ -224,11 +233,17 @@ pub struct LocalhostDuplexSession {
 }
 
 impl LocalhostDuplexSession {
-    /// Open a localhost session for the given payload axis.
+    /// Open a localhost session for the given payload axis (default ERL knobs).
     pub fn open(payload: PayloadKind) -> Self {
+        Self::open_with_erl(payload, ErlBargeConfig::default())
+    }
+
+    /// Open with explicit ERL barge floor + hysteresis (WEFT-615 knobs).
+    pub fn open_with_erl(payload: PayloadKind, erl: ErlBargeConfig) -> Self {
         Self {
             edge: ThinEdge::new(),
             duplex: DuplexChannel::new(payload),
+            erl_gate: ErlBargeGate::new(erl),
             media_up: Vec::new(),
             media_down: Vec::new(),
         }
@@ -302,10 +317,62 @@ impl LocalhostDuplexSession {
         compute_urgency(&signals)
     }
 
+    /// JSON payload for lifting a duplex `TurnClaim` onto the ECC
+    /// [`ImpulseQueue`](crate::impulse::ImpulseQueue) (WEFT-615).
+    ///
+    /// Always carries `erl_confidence` as a number so the Talk-Mode loop's
+    /// acoustic gate fires: missing measurement becomes `0.0` (deny / safe).
+    pub fn duplex_turn_claim_payload(impulse: &DuplexImpulse) -> serde_json::Value {
+        serde_json::json!({
+            "erl_confidence": impulse.erl.unwrap_or(0.0),
+        })
+    }
+
     /// Decide a provisional Overlap using ERL only (scaffold for TalkModeLoop
     /// wiring). High ERL → grant user + mute; low ERL → deny barge.
+    ///
+    /// Uses default knobs (stateless one-shot). Prefer
+    /// [`resolve_overlap_with_gate`](Self::resolve_overlap_with_gate) when
+    /// sampling ERL repeatedly during Overlap (hysteresis).
     pub fn resolve_overlap_from_erl(&mut self, erl: Option<f32>) -> (FloorVerdict, Vec<EdgeCommand>) {
         let verdict = floor_verdict_from_erl(erl);
+        if matches!(verdict, FloorVerdict::DenyBarge) {
+            self.erl_gate.reset();
+        }
+        let cmds = self.apply_verdict(verdict);
+        (verdict, cmds)
+    }
+
+    /// Resolve Overlap through the session's stateful [`ErlBargeGate`]
+    /// (WEFT-615 floor + hysteresis). Feed successive ERL samples during
+    /// provisional Overlap; boundary flutter will not thrash Mute/Resume.
+    pub fn resolve_overlap_with_gate(
+        &mut self,
+        erl: Option<f32>,
+    ) -> (FloorVerdict, Vec<EdgeCommand>) {
+        let admitted = match erl {
+            Some(v) => self.erl_gate.observe(v),
+            None => {
+                self.erl_gate.reset();
+                false
+            }
+        };
+        let verdict = if admitted {
+            FloorVerdict::GrantUser
+        } else {
+            FloorVerdict::DenyBarge
+        };
+        let cmds = self.apply_verdict(verdict);
+        (verdict, cmds)
+    }
+
+    /// Stateless resolve with explicit knobs (no session gate state).
+    pub fn resolve_overlap_with_config(
+        &mut self,
+        erl: Option<f32>,
+        config: &ErlBargeConfig,
+    ) -> (FloorVerdict, Vec<EdgeCommand>) {
+        let verdict = floor_verdict_from_erl_config(erl, config);
         let cmds = self.apply_verdict(verdict);
         (verdict, cmds)
     }
@@ -411,5 +478,73 @@ mod tests {
         s.edge.on_link_loss();
         s.edge_push_media(MediaFrame::Pcm(vec![4, 5, 6]));
         assert_eq!(s.media_up.len(), 1, "Degraded edge must not TX");
+    }
+
+    /// WEFT-615: duplex TurnClaim payload always carries erl_confidence so
+    /// TalkModeLoop's acoustic gate (not a binary flag) can fire.
+    #[test]
+    fn duplex_claim_payload_carries_erl() {
+        let with = DuplexImpulse {
+            kind: ImpulseType::TurnClaim,
+            erl: Some(0.88),
+        };
+        let p = LocalhostDuplexSession::duplex_turn_claim_payload(&with);
+        assert!((p["erl_confidence"].as_f64().unwrap() - 0.88).abs() < 1e-6);
+
+        let missing = DuplexImpulse {
+            kind: ImpulseType::TurnClaim,
+            erl: None,
+        };
+        let p0 = LocalhostDuplexSession::duplex_turn_claim_payload(&missing);
+        assert_eq!(p0["erl_confidence"].as_f64().unwrap(), 0.0);
+    }
+
+    /// WEFT-615: hysteresis gate holds deny/admit across the mid-band during
+    /// provisional Overlap (no Mute thrash on AEC residual flutter).
+    #[test]
+    fn overlap_gate_hysteresis_no_thrash() {
+        let mut s = LocalhostDuplexSession::open(PayloadKind::Audio);
+        let _ = s.daemon_observe(StreamObservation::VadOnset);
+        let _ = s.daemon_observe(StreamObservation::SmartTurnEou);
+        let _ = s.apply_verdict(FloorVerdict::GrantAgent);
+        // Enter Overlap.
+        let _ = s.daemon_observe(StreamObservation::VadOnset);
+        assert_eq!(s.duplex.state(), DuplexState::Overlap);
+
+        // Self-echo samples stay denied — no Mute.
+        let (v, cmds) = s.resolve_overlap_with_gate(Some(0.2));
+        assert_eq!(v, FloorVerdict::DenyBarge);
+        assert!(!cmds.iter().any(|c| matches!(c, EdgeCommand::Mute)));
+        assert_eq!(s.duplex.state(), DuplexState::Speaking);
+
+        // Re-enter Overlap for a genuine barge, then flutter in-band.
+        let _ = s.daemon_observe(StreamObservation::VadOnset);
+        let (v, _) = s.resolve_overlap_with_gate(Some(0.9));
+        assert_eq!(v, FloorVerdict::GrantUser);
+        assert_eq!(s.duplex.state(), DuplexState::Listening);
+
+        // After grant we're Listening; gate itself holds admit in-band.
+        assert!(s.erl_gate.observe(0.45));
+        assert!(!s.erl_gate.observe(0.2));
+    }
+
+    /// Custom floor knob: admit only above a stricter threshold.
+    #[test]
+    fn custom_erl_floor_knob() {
+        let mut s = LocalhostDuplexSession::open_with_erl(
+            PayloadKind::Audio,
+            ErlBargeConfig::new(0.8, 0.1),
+        );
+        let _ = s.daemon_observe(StreamObservation::VadOnset);
+        let _ = s.daemon_observe(StreamObservation::SmartTurnEou);
+        let _ = s.apply_verdict(FloorVerdict::GrantAgent);
+        let _ = s.daemon_observe(StreamObservation::VadOnset);
+        let (v, _) = s.resolve_overlap_with_config(Some(0.7), &ErlBargeConfig::new(0.8, 0.1));
+        assert_eq!(v, FloorVerdict::DenyBarge, "0.7 < custom floor 0.8");
+        // Re-overlap and clear the stricter floor.
+        let _ = s.daemon_observe(StreamObservation::VadOnset);
+        let (v, cmds) = s.resolve_overlap_with_config(Some(0.85), &ErlBargeConfig::new(0.8, 0.1));
+        assert_eq!(v, FloorVerdict::GrantUser);
+        assert!(cmds.iter().any(|c| matches!(c, EdgeCommand::Mute)));
     }
 }

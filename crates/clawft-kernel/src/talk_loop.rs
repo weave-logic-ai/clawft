@@ -16,6 +16,8 @@
 //!                             and **never a turn node** (the load-bearing invariant)
 //!            TurnClaim      → prune the in-flight node (Frontier→Pruned) +
 //!                             draw a Contradicts edge from the claiming turn
+//!                             (WEFT-615: acoustic claims with `erl_confidence`
+//!                             below the ERL barge floor are denied — self-cancel)
 //! ```
 //!
 //! It registers as a [`SystemService`] **alongside** the coherence
@@ -47,7 +49,7 @@ use crate::context_graft::{NodeState, mirror_state};
 use crate::crossref::{CrossRef, CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
 use crate::floor::{
     ContentReadiness, FloorCandidate, FloorState, UrgencySignals, contending_count, crowd_density,
-    evaluate_floor,
+    erl_admits_barge, evaluate_floor,
 };
 use crate::impulse::{Impulse, ImpulseQueue, ImpulseType};
 use crate::view_resolver::ViewResolver;
@@ -285,6 +287,12 @@ impl TalkModeLoop {
     /// text, identical to the pre-M2 read for a single-conversation loop (voice).
     fn read_floor(&self, drained: &[Impulse]) -> (FloorState, f32, f32) {
         let crowd = crowd_density(contending_count(drained));
+        // WEFT-615 / ADR-068 D1: latest acoustic TurnClaim ERL folds into
+        // compute_urgency so self-echo cannot outscore a held floor.
+        let claim_erl = drained
+            .iter()
+            .filter(|i| i.impulse_type == ImpulseType::TurnClaim)
+            .find_map(|i| payload_f32(i, "erl_confidence"));
         let mut convs: HashSet<String> = HashSet::new();
         for imp in drained {
             if let Some(conv) = self.impulse_conv(imp) {
@@ -316,12 +324,30 @@ impl TalkModeLoop {
                         crowd_density: crowd,
                         content_readiness: readiness,
                         hard_interrupt: false,
-                        // Acoustic ERL is filled by the duplex TurnClaim path
-                        // (WEFT-628); non-duplex floor reads leave it None.
+                        // Agent content is not an acoustic barge claim — ERL
+                        // scales only the barge contender below (WEFT-615).
                         erl_confidence: None,
                     },
                 ));
             }
+        }
+        // Barge claim itself is a floor contender when present (ADR-068 D1 /
+        // WEFT-615): high-ERL onset can win; low-ERL is weighted toward zero
+        // via compute_urgency's erl_scale so self-echo cannot take the floor.
+        if let Some(erl) = claim_erl {
+            candidates.push(FloorCandidate::new(
+                "barge-claim",
+                0,
+                UrgencySignals {
+                    semantic_relevance: 1.0,
+                    emotional_arousal: 0.5,
+                    wait_time: 0.0,
+                    crowd_density: crowd,
+                    content_readiness: ContentReadiness::NotStarted,
+                    hard_interrupt: false,
+                    erl_confidence: Some(erl),
+                },
+            ));
         }
         let decision = evaluate_floor(&candidates);
         let dampened = {
@@ -415,6 +441,18 @@ impl TalkModeLoop {
                 // Barge-in: prune the conversation's in-flight node
                 // (Frontier→Pruned) and draw a Contradicts edge from the claiming
                 // turn (if registered).
+                //
+                // WEFT-615 / ADR-068 D1: acoustic claims carry `erl_confidence`
+                // from the thin-edge AEC. Below the ERL barge floor → DenyBarge
+                // (self-echo of the bot's own TTS) — do not prune. Non-acoustic
+                // TurnClaims (Wave 2 cancel/refine with `prune_seq`, text) omit
+                // the field and keep the legacy always-prune path.
+                if let Some(erl) = payload_f32(imp, "erl_confidence")
+                    && !erl_admits_barge(erl)
+                {
+                    debug!(erl, "talk loop: TurnClaim denied — ERL below barge floor");
+                    return;
+                }
                 let Some(conv) = self.impulse_conv(imp) else {
                     return;
                 };
@@ -494,6 +532,16 @@ impl TalkModeLoop {
 /// Read an optional `u64` field from an impulse payload object.
 fn payload_u64(imp: &Impulse, key: &str) -> Option<u64> {
     imp.payload.get(key).and_then(|v| v.as_u64())
+}
+
+/// Read an optional finite `f32` field from an impulse payload object
+/// (JSON numbers arrive as `f64`).
+fn payload_f32(imp: &Impulse, key: &str) -> Option<f32> {
+    imp.payload
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32)
+        .filter(|f| f.is_finite())
 }
 
 // The `SystemService` impl + the native `run_talk_loop` live in a sibling file

@@ -211,6 +211,102 @@ fn turn_claim_prunes_and_contradicts() {
     assert_eq!(l.current_turn("conv-1"), Some(300));
 }
 
+/// WEFT-615: acoustic TurnClaim with low ERL confidence is self-echo —
+/// DenyBarge, do **not** prune the in-flight answer (self-cancel fix).
+#[test]
+fn turn_claim_low_erl_does_not_prune() {
+    let (iq, causal, _crs, view, l) = make_loop();
+    let (n200, _u200) = seed_turn(&view, &causal, &l, 200, "agent is still speaking");
+    assert_eq!(l.current_turn("conv-1"), Some(200));
+
+    iq.emit(
+        0,
+        [0u8; 32],
+        0,
+        ImpulseType::TurnClaim,
+        json!({ "erl_confidence": 0.12, "claim_seq": 300 }),
+        210,
+    );
+
+    let r = l.tick();
+    assert_eq!(r.prunes, 0, "low-ERL claim must not prune (self-cancel)");
+    assert_eq!(view.state(200), Some(NodeState::Frontier));
+    assert_eq!(
+        causal.get_node(n200).unwrap().metadata["state"],
+        "frontier"
+    );
+    assert_eq!(l.current_turn("conv-1"), Some(200));
+}
+
+/// WEFT-615: acoustic TurnClaim with ERL ≥ barge floor admits the interrupt
+/// and prunes — barge-in re-enabled as an ERL floor decision, not a flag.
+#[test]
+fn turn_claim_high_erl_admits_barge_and_prunes() {
+    let (iq, causal, _crs, view, l) = make_loop();
+    let (n300, _u300) = seed_turn(&view, &causal, &l, 300, "user interrupting");
+    let (n200, _u200) = seed_turn(&view, &causal, &l, 200, "agent answer in flight");
+    assert_eq!(l.current_turn("conv-1"), Some(200));
+
+    iq.emit(
+        0,
+        [0u8; 32],
+        0,
+        ImpulseType::TurnClaim,
+        json!({ "erl_confidence": 0.91, "claim_seq": 300 }),
+        210,
+    );
+
+    let r = l.tick();
+    assert_eq!(r.prunes, 1, "high-ERL claim must prune (genuine barge)");
+    assert_eq!(view.state(200), Some(NodeState::Pruned));
+    assert_eq!(causal.get_node(n200).unwrap().metadata["state"], "pruned");
+    assert_eq!(l.current_turn("conv-1"), Some(300));
+    let _ = n300;
+}
+
+/// WEFT-615: duplex payload helper + talk-loop gate form an end-to-end path
+/// (thin edge → ImpulseQueue → DenyBarge/GrantUser semantics).
+#[test]
+fn duplex_payload_into_talk_loop_self_cancel() {
+    use crate::duplex::DuplexImpulse;
+    use crate::thin_edge::LocalhostDuplexSession;
+
+    let (iq, causal, _crs, view, l) = make_loop();
+    seed_turn(&view, &causal, &l, 200, "still speaking");
+
+    let claim = DuplexImpulse {
+        kind: ImpulseType::TurnClaim,
+        erl: Some(0.08),
+    };
+    let payload = LocalhostDuplexSession::duplex_turn_claim_payload(&claim);
+    iq.emit(0, [0u8; 32], 0, ImpulseType::TurnClaim, payload, 50);
+    let r = l.tick();
+    assert_eq!(r.prunes, 0);
+
+    // Genuine barge via the same payload path.
+    let (n400, _) = seed_turn(&view, &causal, &l, 400, "real user barge");
+    // Re-seed in-flight after the prior claim left it intact.
+    assert_eq!(l.current_turn("conv-1"), Some(400)); // last seed wins
+    // Need an agent answer as current; seed another after claim registration.
+    let (_n500, _) = seed_turn(&view, &causal, &l, 500, "agent continues");
+    assert_eq!(l.current_turn("conv-1"), Some(500));
+
+    let claim_hi = DuplexImpulse {
+        kind: ImpulseType::TurnClaim,
+        erl: Some(0.95),
+    };
+    let mut payload = LocalhostDuplexSession::duplex_turn_claim_payload(&claim_hi);
+    payload
+        .as_object_mut()
+        .unwrap()
+        .insert("claim_seq".into(), json!(400));
+    iq.emit(0, [0u8; 32], 0, ImpulseType::TurnClaim, payload, 60);
+    let r = l.tick();
+    assert_eq!(r.prunes, 1);
+    assert_eq!(l.current_turn("conv-1"), Some(400));
+    let _ = n400;
+}
+
 /// A TurnShift opens the floor (drops the in-flight turn) without committing.
 #[test]
 fn turn_shift_hands_off_the_floor() {

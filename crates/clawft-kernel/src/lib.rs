@@ -397,9 +397,10 @@ pub use causal_state_fold::{
 pub use error::{KernelError, KernelResult};
 #[cfg(feature = "ecc")]
 pub use floor::{
-    ContentReadiness, ERL_BARGE_FLOOR, FloorCandidate, FloorDecision, FloorState, UrgencySignals,
-    compute_urgency, contending_count, crowd_density, erl_admits_barge, evaluate_floor,
-    floor_verdict_from_erl,
+    ContentReadiness, ERL_BARGE_FLOOR, ERL_BARGE_HYSTERESIS, ErlBargeConfig, ErlBargeGate,
+    FloorCandidate, FloorDecision, FloorState, UrgencySignals, compute_urgency, contending_count,
+    crowd_density, erl_admits_barge, erl_admits_barge_opt, evaluate_floor, floor_verdict_from_erl,
+    floor_verdict_from_erl_config,
 };
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
