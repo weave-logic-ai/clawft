@@ -348,14 +348,20 @@ tempfile = "3"
 
 # cargo-dist configuration
 [workspace.metadata.dist]
-# The preferred cargo-dist version to use in CI
+# The preferred cargo-dist version to use in CI.
+# Pin stays on 0.31.0 until the WEFT-462 follow-up regenerates release.yml
+# and re-applies the WEFT-593 hand-patch. Upstream latest stable as of
+# 2026-07-31 is 0.32.0; v1.0 has not shipped. Plan + cadence:
+# docs/plans/weft-462-cargo-dist.md and docs/deployment/release.md
+# ("How to bump cargo-dist"). Quarterly sweep — never on a product tag cut.
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
 # WEFT-593: release.yml is hand-patched (secret-scan-safe job outputs +
 # refuse binary-less announce). Without this, `dist plan` / CI host steps
 # refuse to run because the workflow differs from stock `dist generate`.
-# Re-apply the release.yml patch after any `dist generate` / version bump.
+# Re-apply the release.yml patch after any `dist generate` / version bump
+# (checklist: docs/plans/weft-462-cargo-dist.md § Phase C). WEFT-462.
 allow-dirty = ["ci"]
 # Target platforms for binary builds
 targets = [
