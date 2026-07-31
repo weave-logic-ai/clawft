@@ -152,6 +152,25 @@ Consumer verification steps live in
 PR / master pushes still upload the unbound `browser-wasm-pkg` Actions
 artifact for docs playground consumption.
 
+### 3b. `Docs Assets Publish` -- `docs-assets.yml` (CDN)
+
+After **Browser WASM** succeeds on `master` (or on manual dispatch),
+publishes browser WASM + the RVF KB to the rolling GitHub Release tag
+`cdn-assets`. Every upload also writes SHA-stamped siblings
+(`clawft_wasm-{sha}.wasm` / `.js`, `weftos-docs-{sha}.rvf`) and retains
+the last N snapshot groups for rollback (**WEFT-454**).
+
+| Asset | Notes |
+|-------|-------|
+| `clawft_wasm_bg.wasm` / `clawft_wasm.js` | Rolling live pointers |
+| `weftos-docs.rvf` | Rolling KB |
+| `clawft_wasm-{sha}.wasm` / `.js` | SHA snapshot (12-char short) |
+| `weftos-docs-{sha}.rvf` | SHA snapshot |
+| `cdn-manifest.json` | Current SHA audit trail |
+
+Helper: `scripts/release/cdn-snapshot.sh`. Full lifecycle, cache-bust,
+and rollback procedure: [cdn.md](./cdn.md).
+
 ### 4. `Release (Knowledge Base)` -- `release-kb.yml`
 
 Builds the RVF knowledge base bundle that powers the docs-site
