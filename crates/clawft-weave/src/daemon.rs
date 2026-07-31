@@ -1464,6 +1464,40 @@ pub async fn run(
             Some(Arc::clone(&subagent_spawner)
                 as Arc<dyn clawft_core::agent::spawn::SubagentSpawner>),
         );
+        // WEFT-349: cross-agent delegation via `delegate_task` + agents/
+        // specialist profiles. Spawner lets chat spawn specialists on the
+        // local loop; Claude is optional (env / config key).
+        {
+            use clawft_tools::delegate_tool::{RegisterDelegateOpts, register_delegate_task};
+            let user_agents = dirs::home_dir().map(|h| h.join(".clawft").join("agents"));
+            let workspace_agents = {
+                let clawft = workspace.join(".clawft").join("agents");
+                if clawft.is_dir() {
+                    Some(clawft)
+                } else {
+                    let top = workspace.join("agents");
+                    if top.is_dir() {
+                        Some(top)
+                    } else {
+                        None
+                    }
+                }
+            };
+            let del_cfg = clawft_types::delegation::DelegationConfig::default();
+            register_delegate_task(
+                &del_cfg,
+                &mut tool_registry,
+                RegisterDelegateOpts {
+                    workspace_agents,
+                    user_agents,
+                    spawner: Some(
+                        Arc::clone(&subagent_spawner)
+                            as Arc<dyn clawft_core::agent::spawn::SubagentSpawner>,
+                    ),
+                    config_api_key: std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()),
+                },
+            );
+        }
         let tool_registry = Arc::new(tool_registry);
         // Stash the registry + spawner so the lifecycle paths (idle reaper,
         // agent.chat.end, agent.chat.cancel) can cascade-cancel a parent's

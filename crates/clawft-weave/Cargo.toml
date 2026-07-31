@@ -95,7 +95,9 @@ clawft-services = { workspace = true }
 # task_status / task_result / agent_message) in register_all — the daemon is
 # the only caller that injects a live SubagentSpawner. Workspace pins
 # default-features = false, so the feature must be named explicitly here.
-clawft-tools = { workspace = true, features = ["native", "subagent"] }
+# WEFT-349: `delegate` so the chat daemon can register `delegate_task`
+# with specialist profiles + local subagent spawner.
+clawft-tools = { workspace = true, features = ["native", "subagent", "delegate"] }
 # Base64 encoding for terminal RPC payloads (PTY bytes don't survive
 # raw JSON; chunks ride as { data: <base64>, ... }).
 base64 = "0.22"

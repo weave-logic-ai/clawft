@@ -5193,7 +5193,7 @@ mod tests {
         }
     }
 
-    /// A tool that simulates delegate_task by returning a fixed response.
+    /// A tool that simulates `delegate_task` (Claude path + WEFT-349 specialist).
     struct MockDelegateTaskTool;
 
     #[async_trait]
@@ -5208,7 +5208,8 @@ mod tests {
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "task": { "type": "string" }
+                    "task": { "type": "string" },
+                    "agent": { "type": "string" }
                 },
                 "required": ["task"]
             })
@@ -5221,12 +5222,42 @@ mod tests {
                 .get("task")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown)");
+            // WEFT-349: named specialist profile path (mock LLM / profile load).
+            if let Some(agent) = args.get("agent").and_then(|v| v.as_str()) {
+                return Ok(serde_json::json!({
+                    "status": "delegated",
+                    "target": "specialist",
+                    "agent": agent,
+                    "response": format!(
+                        "## Code review by {agent}\n\nTask: {task}\n\n- LGTM with nits"
+                    ),
+                    "task": task,
+                    "profile": { "name": agent, "skills": ["code-review"] },
+                }));
+            }
             Ok(serde_json::json!({
                 "status": "delegated",
                 "target": "claude",
                 "response": format!("Delegated: {task}"),
                 "task": task,
             }))
+        }
+    }
+
+    /// Auto-route code-review asks to `delegate_task` with agent=code-reviewer.
+    struct MockCodeReviewDelegation;
+
+    impl AutoDelegation for MockCodeReviewDelegation {
+        fn should_delegate(&self, content: &str) -> Option<serde_json::Value> {
+            let lower = content.to_lowercase();
+            if lower.contains("code review") || lower.contains("code-review") {
+                Some(serde_json::json!({
+                    "task": content,
+                    "agent": "code-reviewer",
+                }))
+            } else {
+                None
+            }
         }
     }
 
@@ -5323,6 +5354,69 @@ mod tests {
         assert_eq!(
             outbound.content, "LLM response",
             "non-matching message should go through normal LLM pipeline"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-349 AC: chat agent invokes `delegate_task` for a code-review
+    /// subtask (specialist profile) and receives the specialist output.
+    #[tokio::test]
+    async fn chat_agent_delegates_code_review_subtask() {
+        let transport = Arc::new(MockTransport::new("should NOT see this"));
+        let dir = temp_dir("weft349_code_review");
+        let platform = Arc::new(NativePlatform::new());
+        let bus = Arc::new(MessageBus::new());
+
+        let memory = Arc::new(MemoryStore::with_paths(
+            dir.join("memory").join("MEMORY.md"),
+            dir.join("memory").join("HISTORY.md"),
+            platform.clone(),
+        ));
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        tools.register(Arc::new(MockDelegateTaskTool));
+
+        let pipeline = make_pipeline(transport);
+        let agent = AgentLoop::new(
+            test_config(),
+            platform,
+            bus,
+            pipeline,
+            Arc::new(tools),
+            context,
+            PermissionResolver::default_resolver(),
+        )
+        .with_auto_delegation(Arc::new(MockCodeReviewDelegation));
+
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "local".into(),
+            chat_id: "test".into(),
+            content: "Please run a code review of delegate_tool.rs".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(
+            outbound.content.contains("Code review by code-reviewer"),
+            "chat agent should receive specialist output, got: {}",
+            outbound.content
+        );
+        assert!(
+            outbound.content.contains("LGTM"),
+            "specialist review body missing: {}",
+            outbound.content
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;

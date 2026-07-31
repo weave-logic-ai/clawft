@@ -70,3 +70,5 @@ symphonia = { workspace = true, optional = true }
 tokio = { workspace = true }
 # WEFT-224 SC-3: capture transparency log lines in unit tests.
 tracing-subscriber = { workspace = true, features = ["registry"] }
+# WEFT-349: specialist profile load from temp agents/ tree.
+tempfile = { workspace = true }

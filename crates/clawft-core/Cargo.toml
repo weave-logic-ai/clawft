@@ -73,6 +73,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde_yaml = { workspace = true }
+# WEFT-349: agent profiles may be agents/<name>.toml / agent.toml
+toml = { workspace = true }
 futures-util = { workspace = true }
 percent-encoding = "2"
 fnv = "1"

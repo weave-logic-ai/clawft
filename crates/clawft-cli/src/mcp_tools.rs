@@ -266,91 +266,58 @@ pub async fn register_mcp_tools(
     std::collections::HashMap::new()
 }
 
-/// Register the delegation tool if an Anthropic API key is available.
+/// Optional wiring for [`register_delegation`] (WEFT-349).
 ///
-/// Resolves the API key using a two-step lookup:
-/// 1. `ANTHROPIC_API_KEY` environment variable (highest priority)
-/// 2. `config_api_key` from the providers config section (fallback)
+/// Defaults discover specialist profiles from workspace / user agent dirs
+/// and leave the subagent spawner unset (CLI path). The daemon passes a
+/// spawner so `delegate_task` with `agent=` can run specialists locally.
+#[derive(Default)]
+pub struct DelegationRegisterOpts {
+    /// Workspace agents directory (`<ws>/agents` or `.clawft/agents`).
+    pub workspace_agents: Option<std::path::PathBuf>,
+    /// User agents directory (`~/.clawft/agents`).
+    pub user_agents: Option<std::path::PathBuf>,
+    /// Local subagent spawner for specialist execution (daemon path).
+    pub spawner: Option<std::sync::Arc<dyn clawft_core::agent::spawn::SubagentSpawner>>,
+}
+
+/// Register the `delegate_task` tool when Claude and/or specialist profiles
+/// are available (WEFT-349).
 ///
-/// Creates a [`ClaudeDelegator`] and [`DelegateTaskTool`] and registers
-/// them in the tool registry.
-///
-/// Gracefully degrades: if no API key is found or delegation is disabled
-/// in config, delegation is simply not available (not a fatal error).
+/// Thin wrapper over [`clawft_tools::delegate_tool::register_delegate_task`].
 #[cfg(feature = "delegate")]
 pub fn register_delegation(
     config: &clawft_types::delegation::DelegationConfig,
     registry: &mut clawft_core::tools::registry::ToolRegistry,
     config_api_key: Option<&str>,
 ) {
-    use clawft_services::delegation::DelegationEngine;
-    use clawft_services::delegation::claude::ClaudeDelegator;
-    use clawft_tools::delegate_tool::DelegateTaskTool;
+    register_delegation_with(config, registry, config_api_key, DelegationRegisterOpts::default());
+}
 
-    if !config.claude_enabled {
-        tracing::info!("delegation disabled in config, skipping");
-        return;
-    }
+/// Like [`register_delegation`], with explicit agent dirs / spawner.
+#[cfg(feature = "delegate")]
+pub fn register_delegation_with(
+    config: &clawft_types::delegation::DelegationConfig,
+    registry: &mut clawft_core::tools::registry::ToolRegistry,
+    config_api_key: Option<&str>,
+    opts: DelegationRegisterOpts,
+) {
+    use clawft_tools::delegate_tool::{RegisterDelegateOpts, register_delegate_task};
 
-    // Resolve API key: env var > config providers section.
-    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => key,
-        Ok(_) => {
-            // Env var is set but empty -- fall through to config fallback.
-            tracing::debug!("ANTHROPIC_API_KEY env var is empty, trying config fallback");
-            match config_api_key {
-                Some(key) if !key.is_empty() => key.to_string(),
-                _ => {
-                    tracing::info!(
-                        "ANTHROPIC_API_KEY env var is set but empty and no key in providers config; \
-                         delegation disabled"
-                    );
-                    return;
-                }
-            }
-        }
-        Err(_) => {
-            // Env var not set at all -- try config fallback.
-            match config_api_key {
-                Some(key) if !key.is_empty() => {
-                    tracing::debug!("using Anthropic API key from providers config");
-                    key.to_string()
-                }
-                _ => {
-                    tracing::info!(
-                        "ANTHROPIC_API_KEY not set and no key in providers config; \
-                         delegation disabled"
-                    );
-                    return;
-                }
-            }
-        }
-    };
+    let user_agents = opts
+        .user_agents
+        .or_else(|| dirs::home_dir().map(|h| h.join(".clawft").join("agents")));
 
-    let delegator = match ClaudeDelegator::new(config, api_key) {
-        Some(d) => Arc::new(d),
-        None => {
-            tracing::warn!("failed to create ClaudeDelegator, delegation disabled");
-            return;
-        }
-    };
-
-    let engine = Arc::new(DelegationEngine::new(config.clone()));
-
-    // Snapshot the current tool schemas before registering the delegate tool
-    // (to avoid the delegate tool appearing in its own tool list).
-    let tool_schemas = registry.schemas();
-
-    // Create a snapshot of the current registry so the delegate tool can
-    // execute tool calls from the Claude sub-agent. The snapshot contains
-    // all tools registered so far (but not the delegate tool itself,
-    // preventing recursive delegation).
-    let registry_snapshot = Arc::new(registry.snapshot());
-
-    let delegate_tool = DelegateTaskTool::new(delegator, engine, tool_schemas, registry_snapshot);
-
-    registry.register(Arc::new(delegate_tool));
-    tracing::info!("delegation tool registered");
+    register_delegate_task(
+        config,
+        registry,
+        RegisterDelegateOpts {
+            workspace_agents: opts.workspace_agents,
+            user_agents,
+            spawner: opts.spawner,
+            config_api_key: config_api_key.map(str::to_string),
+        },
+    );
 }
 
 /// No-op stub when the `delegate` feature is not enabled.
@@ -359,6 +326,17 @@ pub fn register_delegation(
     _config: &clawft_types::delegation::DelegationConfig,
     _registry: &mut clawft_core::tools::registry::ToolRegistry,
     _config_api_key: Option<&str>,
+) {
+    // Delegation feature not compiled in.
+}
+
+/// No-op stub when the `delegate` feature is not enabled.
+#[cfg(not(feature = "delegate"))]
+pub fn register_delegation_with(
+    _config: &clawft_types::delegation::DelegationConfig,
+    _registry: &mut clawft_core::tools::registry::ToolRegistry,
+    _config_api_key: Option<&str>,
+    _opts: DelegationRegisterOpts,
 ) {
     // Delegation feature not compiled in.
 }

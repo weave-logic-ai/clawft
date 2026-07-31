@@ -2,8 +2,8 @@
 //!
 //! An *agent definition* describes a custom agent persona: its name,
 //! system prompt, model override, allowed tools, and optional skills.
-//! Definitions are stored as YAML or JSON files and discovered from a
-//! 3-level directory hierarchy:
+//! Definitions are stored as YAML, JSON, or TOML files and discovered
+//! from a 3-level directory hierarchy:
 //!
 //! 1. **Workspace** agents (`<workspace>/agents/`) -- highest priority
 //! 2. **User** agents (`~/.clawft/agents/`) -- user-global agents
@@ -17,12 +17,13 @@
 //! ```text
 //! agents/
 //! +-- researcher/
-//! |   +-- agent.yaml   # or agent.json
-//! +-- code_reviewer/
-//!     +-- agent.yaml
+//! |   +-- agent.yaml   # or agent.json / agent.toml
+//! +-- code-reviewer/
+//!     +-- agent.toml
 //! ```
 //!
-//! A single-file agent is also supported: `agents/researcher.yaml`.
+//! A single-file agent is also supported: `agents/researcher.yaml`
+//! (or `.yml` / `.json` / `.toml`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -85,14 +86,16 @@ pub struct AgentDefinition {
 ///
 /// Supports both single-file and directory-per-agent layouts.
 /// Accepted file names inside a directory: `agent.yaml`, `agent.yml`,
-/// `agent.json`.  A standalone file is also accepted directly.
+/// `agent.json`, `agent.toml`.  A standalone file is also accepted
+/// directly (WEFT-349).
 pub struct AgentLoader;
 
 impl AgentLoader {
     /// Load an agent definition from a single file.
     ///
-    /// Accepts `.yaml`, `.yml`, or `.json` extensions.  The `source_path`
-    /// field on the returned definition is set to the resolved file path.
+    /// Accepts `.yaml`, `.yml`, `.json`, or `.toml` extensions.  The
+    /// `source_path` field on the returned definition is set to the
+    /// resolved file path.
     ///
     /// # Errors
     ///
@@ -121,8 +124,8 @@ impl AgentLoader {
     /// Load an agent from a file or directory.
     ///
     /// If `path` is a file, it is parsed directly.  If `path` is a
-    /// directory, the loader looks for `agent.yaml`, `agent.yml`, or
-    /// `agent.json` inside it.
+    /// directory, the loader looks for `agent.yaml`, `agent.yml`,
+    /// `agent.json`, or `agent.toml` inside it.
     ///
     /// # Errors
     ///
@@ -134,7 +137,7 @@ impl AgentLoader {
         }
 
         if path.is_dir() {
-            for filename in &["agent.yaml", "agent.yml", "agent.json"] {
+            for filename in &["agent.yaml", "agent.yml", "agent.json", "agent.toml"] {
                 let candidate = path.join(filename);
                 if candidate.is_file() {
                     let mut def = Self::load_file(&candidate)?;
@@ -143,7 +146,10 @@ impl AgentLoader {
                 }
             }
             return Err(ClawftError::PluginLoadFailed {
-                plugin: format!("agent: no agent.yaml/agent.json in {}", path.display()),
+                plugin: format!(
+                    "agent: no agent.yaml/agent.json/agent.toml in {}",
+                    path.display()
+                ),
             });
         }
 
@@ -153,11 +159,12 @@ impl AgentLoader {
     }
 
     /// Load all agent definitions from a directory of agent subdirectories
-    /// (or loose YAML/JSON files).
+    /// (or loose YAML/JSON/TOML files).
     ///
-    /// Each subdirectory should contain `agent.yaml` / `agent.json`.
-    /// Loose `.yaml`/`.yml`/`.json` files at the top level are also
-    /// loaded.  Errors on individual agents are logged and skipped.
+    /// Each subdirectory should contain `agent.yaml` / `agent.json` /
+    /// `agent.toml`.  Loose `.yaml`/`.yml`/`.json`/`.toml` files at the
+    /// top level are also loaded.  Errors on individual agents are
+    /// logged and skipped.
     pub fn load_dir(dir: &Path) -> Result<Vec<AgentDefinition>> {
         if !dir.is_dir() {
             return Ok(Vec::new());
@@ -198,9 +205,9 @@ impl AgentLoader {
                 Err(e) => {
                     // Only warn for entries that look like they *should* be agents
                     let looks_like_agent = entry_path.is_dir()
-                        || entry_path
-                            .extension()
-                            .is_some_and(|ext| ext == "yaml" || ext == "yml" || ext == "json");
+                        || entry_path.extension().is_some_and(|ext| {
+                            ext == "yaml" || ext == "yml" || ext == "json" || ext == "toml"
+                        });
                     if looks_like_agent {
                         warn!(
                             path = %entry_path.display(),
@@ -215,13 +222,16 @@ impl AgentLoader {
         Ok(defs)
     }
 
-    /// Parse file content as YAML or JSON based on file extension.
+    /// Parse file content as YAML, JSON, or TOML based on file extension.
     fn parse_content(content: &str, path: &Path) -> Result<AgentDefinition> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match ext {
             "json" => serde_json::from_str(content).map_err(|e| ClawftError::PluginLoadFailed {
                 plugin: format!("agent: invalid JSON in {}: {e}", path.display()),
+            }),
+            "toml" => toml::from_str(content).map_err(|e| ClawftError::PluginLoadFailed {
+                plugin: format!("agent: invalid TOML in {}: {e}", path.display()),
             }),
             // YAML is the default for .yaml, .yml, and any other extension
             _ => serde_yaml::from_str(content).map_err(|e| ClawftError::PluginLoadFailed {
@@ -316,6 +326,11 @@ impl AgentRegistry {
         }
     }
 
+    /// Insert (or replace) a single agent definition (WEFT-349 tests / wiring).
+    pub fn register(&mut self, def: AgentDefinition) {
+        self.agents.insert(def.name.clone(), def);
+    }
+
     /// Look up an agent by name.
     pub fn get(&self, name: &str) -> Option<&AgentDefinition> {
         self.agents.get(name)
@@ -326,6 +341,13 @@ impl AgentRegistry {
         let mut defs: Vec<_> = self.agents.values().collect();
         defs.sort_by_key(|d| &d.name);
         defs
+    }
+
+    /// Names of all registered agents, sorted.
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.agents.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Number of registered agents.
@@ -430,6 +452,36 @@ mod tests {
             def.variables.get("framework").map(|s| s.as_str()),
             Some("axum")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WEFT-349: specialist profiles may be `agent.toml`.
+    #[test]
+    fn load_toml_agent_definition() {
+        let dir = temp_dir("load_toml");
+        let agent_dir = dir.join("code-reviewer");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let toml = r#"
+name = "code-reviewer"
+description = "Reviews code for correctness and style"
+system_prompt = "You are a careful code reviewer."
+skills = ["code-review"]
+allowed_tools = ["read_file"]
+max_turns = 8
+"#;
+        std::fs::write(agent_dir.join("agent.toml"), toml).unwrap();
+
+        let def = AgentLoader::load(&agent_dir).unwrap();
+        assert_eq!(def.name, "code-reviewer");
+        assert_eq!(def.description, "Reviews code for correctness and style");
+        assert_eq!(
+            def.system_prompt.as_deref(),
+            Some("You are a careful code reviewer.")
+        );
+        assert_eq!(def.skills, vec!["code-review"]);
+        assert_eq!(def.allowed_tools, vec!["read_file"]);
+        assert_eq!(def.max_turns, Some(8));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
