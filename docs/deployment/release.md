@@ -1,9 +1,9 @@
 # Release Process
 
 WeftOS releases are tag-driven. Pushing a SemVer-shaped tag (`vX.Y.Z`) to
-the `master` branch fans out into parallel workflows that produce binaries,
-WASM artifacts, knowledge-base bundles, CycloneDX SBOMs, the crates.io
-publish, and the multi-arch Docker image. A gate workflow flips the
+the `master` branch fans out into five workflows that produce binaries,
+WASM artifacts, knowledge-base bundles, the crates.io publish, and the
+multi-arch Docker image. A sixth workflow gates the result and flips the
 release to "prerelease" if any leg fails.
 
 ## Version Numbering
@@ -86,9 +86,8 @@ changelog entry, not the version-bump commit immediately before it.
 
 ## Release Workflows
 
-Six tag-triggered workflows run in parallel (binaries, WASI, browser WASM,
-knowledge base, crates.io, and CycloneDX SBOM); Docker publishes after
-`Release` succeeds, and one gate workflow sweeps up afterwards.
+Five tag-triggered workflows run in parallel; one gate workflow sweeps up
+afterwards.
 
 ### 1. `Release` (cargo-dist) -- `release.yml`
 
@@ -153,25 +152,6 @@ Consumer verification steps live in
 PR / master pushes still upload the unbound `browser-wasm-pkg` Actions
 artifact for docs playground consumption.
 
-### 3b. `Docs Assets Publish` -- `docs-assets.yml` (CDN)
-
-After **Browser WASM** succeeds on `master` (or on manual dispatch),
-publishes browser WASM + the RVF KB to the rolling GitHub Release tag
-`cdn-assets`. Every upload also writes SHA-stamped siblings
-(`clawft_wasm-{sha}.wasm` / `.js`, `weftos-docs-{sha}.rvf`) and retains
-the last N snapshot groups for rollback (**WEFT-454**).
-
-| Asset | Notes |
-|-------|-------|
-| `clawft_wasm_bg.wasm` / `clawft_wasm.js` | Rolling live pointers |
-| `weftos-docs.rvf` | Rolling KB |
-| `clawft_wasm-{sha}.wasm` / `.js` | SHA snapshot (12-char short) |
-| `weftos-docs-{sha}.rvf` | SHA snapshot |
-| `cdn-manifest.json` | Current SHA audit trail |
-
-Helper: `scripts/release/cdn-snapshot.sh`. Full lifecycle, cache-bust,
-and rollback procedure: [cdn.md](./cdn.md).
-
 ### 4. `Release (Knowledge Base)` -- `release-kb.yml`
 
 Builds the RVF knowledge base bundle that powers the docs-site
@@ -184,46 +164,22 @@ playground tour guide:
 Uses `tools/build-kb` to walk `docs/src/content/docs/` and emit a single
 RVF file. Attached to the same Release.
 
-### 5. `Release SBOM` -- `release-sbom.yml` (WEFT-459)
+#### `tools/build-kb` lives outside the workspace (WEFT-461)
 
-Produces [CycloneDX](https://cyclonedx.org/) Software Bill of Materials
-for the cargo-dist packages and attaches them to the GitHub Release.
-cargo-dist v0.31 does not emit SBOMs for our matrix (native support is
-tracked with the dist version bump in WEFT-462); this workflow fills the
-gap with [`cargo-cyclonedx`](https://crates.io/crates/cargo-cyclonedx).
+`tools/build-kb` is **not** a root workspace member. It keeps its own
+`[workspace]` table and committed `Cargo.lock` so release / CDN jobs can
+build a ~500-line utility without resolving the full monorepo graph.
 
-| Asset | Notes |
-|-------|--------|
-| `weft-cli-<tag>.cdx.json` | CycloneDX 1.5 JSON for the `weft` binary (clawft-cli) — primary |
-| `weaver-<tag>.cdx.json` | CycloneDX 1.5 JSON for `weaver` (clawft-weave) |
-| `weftos-<tag>.cdx.json` | CycloneDX 1.5 JSON for the `weftos` binary |
-| `weftos-<tag>.sbom-meta.json` | Tag, git SHA, workspace version, per-file SHA-256 |
-| `*.cdx.json.sha256` / `weftos-<tag>.cdx.SHA256SUMS` | Detached checksums |
+| Requirement | Status |
+|-------------|--------|
+| Documented why out-of-workspace | [`tools/README.md`](../../tools/README.md) |
+| `Cargo.lock` committed | `tools/build-kb/Cargo.lock` |
+| Workflow cache on tool lockfile | `release-kb.yml` and `docs-assets.yml` key on `hashFiles('tools/build-kb/Cargo.lock')` and cache `tools/build-kb/target` |
 
-Generation helper: `scripts/release/generate-sbom.sh generate --tag <tag>`.
-Locally:
+Local rebuild: `scripts/build-kb.sh`. Revisit workspace membership only if
+the tool gains path-deps into product crates.
 
-```bash
-# Install once (pinned in CI as CARGO_CYCLONEDX_VERSION=0.5.9)
-cargo install cargo-cyclonedx --locked --version 0.5.9
-
-scripts/release/generate-sbom.sh generate --tag v0.8.0 --out-dir dist-sbom
-```
-
-Each SBOM also receives a GitHub Attestations / sigstore provenance
-attachment (same pattern as WASI / browser WASM). Verify:
-
-```bash
-gh attestation verify weft-cli-v0.8.0.cdx.json \
-  --repo weave-logic-ai/weftos
-```
-
-Downstream consumers can feed the `.cdx.json` into any CycloneDX-aware
-SCA scanner (Dependency-Track, Grype, Trivy, etc.). When cargo-dist
-gains first-class SBOM generation (WEFT-462), this workflow may fold into
-`release.yml`; until then it is the authoritative source of release SBOMs.
-
-### 6. `Publish Crates` -- `publish-crates.yml`
+### 5. `Publish Crates` -- `publish-crates.yml`
 
 Publishes every `publish = true` workspace crate to crates.io, in
 dependency-topological order, via `cargo-workspaces`. The job:
@@ -237,7 +193,7 @@ Once all crates land on crates.io, the published rustdoc on docs.rs gets
 the WeftOS ecosystem cross-link table because every distributable crate
 sets `[package.metadata.docs.rs]` with `all-features = true`.
 
-### 7. `Release (Docker)` -- `release-docker.yml`
+### 6. `Release (Docker)` -- `release-docker.yml`
 
 Triggered by the `Release` workflow's `workflow_run` event (orchestration
 gate: only publish Docker after a successful tag Release). The image
@@ -264,7 +220,7 @@ Post-publish smoke: `GET /api/health` (WEFT-550). See
 [`docker.md`](docker.md) for image internals, local builds, and macOS
 runtimes (Docker Desktop / OrbStack / Apple container CLI).
 
-### 8. `Release Gate` -- `release-gate.yml`
+### 7. `Release Gate` -- `release-gate.yml`
 
 The supervisor. Triggers on `workflow_run` from `Publish Crates` and
 `Release (Docker)`. If either of those failed, the gate:
@@ -333,25 +289,6 @@ curl -fsSL -o sha256sums \
   "https://github.com/weave-logic-ai/weftos/releases/download/v0.6.19/sha256sums"
 sha256sum -c sha256sums --ignore-missing
 ```
-
-### Software Bill of Materials (CycloneDX)
-
-Every version tag also attaches CycloneDX 1.5 JSON SBOMs (WEFT-459).
-Download the primary SBOM for the CLI:
-
-```bash
-TAG=v0.8.0
-curl -fsSL -o "weft-cli-${TAG}.cdx.json" \
-  "https://github.com/weave-logic-ai/weftos/releases/download/${TAG}/weft-cli-${TAG}.cdx.json"
-curl -fsSL -o "weft-cli-${TAG}.cdx.json.sha256" \
-  "https://github.com/weave-logic-ai/weftos/releases/download/${TAG}/weft-cli-${TAG}.cdx.json.sha256"
-sha256sum -c "weft-cli-${TAG}.cdx.json.sha256"
-```
-
-Companion BOMs `weaver-<tag>.cdx.json` and `weftos-<tag>.cdx.json`
-cover the other cargo-dist binaries. See
-[Release SBOM](#5-release-sbom----release-sbomyml-weft-459) above for
-the full asset list and attestation verification.
 
 ## Installing from a Release
 
@@ -473,7 +410,7 @@ blocks merge.
 | Job                              | Owner          | Notes                                                                 |
 |----------------------------------|----------------|-----------------------------------------------------------------------|
 | `Clippy lint`                    | clippy         | `-D warnings` workspace-wide.                                          |
-| `Test suite (…)`                 | cargo test     | **WEFT-457** matrix: full workspace on `ubuntu-latest`; light package set (`clawft-rpc`, `clawft-platform`, `clawft-types`, `clawft-cow-memory`) on `macos-latest` + `windows-latest`. Any leg red fails the PR. |
+| `Test suite`                     | cargo test     | Full workspace.                                                        |
 | `WASM size gate`                 | wasm-size      | Asserts wasip2 binary < 300 KB raw / 120 KB gzipped.                  |
 | `Binary size check`              | binary-size    | Asserts release `weft` < 10 MB.                                        |
 | `Browser WASM check`             | wasm-browser-check | **Hard gate (WEFT-447)**: `cargo check` for `wasm32-unknown-unknown`, no warning fallback. |
@@ -491,82 +428,6 @@ To make any of these jobs **required for merge** in repository
 settings, add the job name to `Settings -> Branches -> master ->
 Require status checks to pass`. Job names match the `name:` field in
 `pr-gates.yml`.
-
-## Documentation site (Fumadocs / Vercel)
-
-The public docs site is a Next.js + [Fumadocs](https://fumadocs.vercel.app/)
-app under `docs/src/`. Production deploys and PR merge gates are separate
-surfaces; local rehearsal uses `scripts/build.sh docs` (WEFT-453).
-
-### Where production deploys from
-
-**Vercel Git integration** owns production deploy. There is **no** in-repo
-`vercel deploy` workflow and none is planned (stay Vercel-only — avoids a
-second deploy path that can drift from the Vercel project settings).
-
-| Surface | Trigger | Command | Fail mode |
-|---------|---------|---------|-----------|
-| **Vercel production** | Git push to the branch linked in the Vercel project (typically `master` / `main`); Root Directory = `docs/src` | Vercel runs `npm install` / `npm run build` in `docs/src/` | Blocks the Vercel deploy |
-| **pr-gates `docs-build`** (WEFT-448) | PR/push when `docs/src/**` (or `pr-gates.yml`) changes | `cd docs/src && npm ci && npm run build` | **Hard** — blocks merge |
-| **Local soft-check** (WEFT-453) | Manual | `scripts/build.sh docs` | **Soft** by default (missing Node/npm or a broken page reports `SKIP` / does not fail the process). `DOCS_BUILD_HARD=1 scripts/build.sh docs` fails hard for CI-style rehearsal. |
-
-Aliases accepted by `scripts/build.sh`: `docs`, `docs-mdx`, `docs-build`.
-This is distinct from `ui` (clawft-ui) and `releases-mdx` (CHANGELOG →
-Release Notes MDX only).
-
-### What changes trigger a redeploy?
-
-**Vercel** rebuilds when the connected branch moves and Vercel’s path
-filter (if configured in the Vercel project) matches. The repo root is
-not the app root: Vercel’s **Root Directory** is `docs/src`, so changes
-outside that tree usually do **not** redeploy unless the project’s
-Ignored Build Step / path filter says otherwise. Confirm the live filter
-in the Vercel project settings if a content PR did not redeploy.
-
-**pr-gates `docs-build`** is narrower and explicit: it runs only when
-`docs/src/**` or `.github/workflows/pr-gates.yml` changes
-(`dorny/paths-filter`). Other PRs skip the job with a notice. That is
-the in-repo hard gate for MDX syntax / Next build breakage.
-
-**CDN assets** (browser WASM + RVF knowledge base used by the playground)
-are separate: `.github/workflows/docs-assets.yml` publishes rolling
-`cdn-assets` release artifacts after the Browser WASM workflow succeeds
-on `master`. That is not the HTML/MDX site deploy.
-
-### Local rehearsal
-
-```bash
-# Soft-check (default): same npm run build as Vercel / docs-build
-scripts/build.sh docs
-
-# Hard fail on MDX/build errors (closest to CI)
-DOCS_BUILD_HARD=1 scripts/build.sh docs
-
-# Preview without executing
-scripts/build.sh docs --dry-run
-
-# Dev server (hot reload; not a production build)
-cd docs/src && npm install && npm run dev   # http://localhost:3000
-```
-
-Regenerate the Release Notes page from `CHANGELOG.md` before a release
-tag (see Pre-Tag Checklist above):
-
-```bash
-scripts/build.sh releases-mdx
-```
-
-### Decision: no redundant in-repo deploy workflow
-
-**Stay Vercel-only** for production HTML/MDX deploys. Rationale:
-
-1. Vercel already owns build + CDN + previews for the Fumadocs app.
-2. Merge safety is covered by pr-gates **Docs site build** (hard).
-3. Local reproduce is covered by `scripts/build.sh docs` (soft).
-4. A second GitHub Actions `vercel deploy` job would duplicate secrets,
-   project settings, and failure modes without adding a new guarantee.
-
-Revisit only if the project leaves Vercel or needs air-gapped publish.
 
 ## Security audits
 
