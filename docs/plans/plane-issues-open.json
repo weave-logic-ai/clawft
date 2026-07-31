@@ -1,122 +1,5 @@
 [
   {
-    "id": "22c5dd53-3f60-49c9-87f9-86df19586a64",
-    "sequence_id": 41,
-    "weft": "WEFT-41",
-    "name": "ws03: research \u2014 Iteration 3 EML attention multi-param coordinated perturbation",
-    "priority": "low",
-    "state": "Todo",
-    "state_group": "unstarted",
-    "labels": [
-      "ws03-pipeline",
-      "audit-finding",
-      "audit-0.7.0",
-      "gap"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Source\n.planning/reviews/0.7.0-release-gate/03-pipeline-routing.md \u2014 Task 03-20; .planning/development_notes/eml_model_development_assessment.md:60-70, Q13.\nProblem / gap\nIteration 3 gate: multi-param coordinated perturbation on SafeTree; target \u226580% MSE reduction at (seq_len=4, d_model=8) and final_mse < 5e-2. Not attempted yet. Iterations 4-5+ (full EML-Transformer, hybrid scoring) explicitly aspirational. No tracking issue or plan stub.\nAcceptance criteria\n[ ] Run G3 benchmark with multi-param perturbation; record MSE / wall-clock.\n[ ] Either pass the gate (\u226580% MSE reduction) and ship, or document the failure mode and adjust the gate.\n[ ] CI integration optional.\nDependencies\nUpstream eml-core stability.\nNotes\nResearch track; truly long-horizon.",
-    "parent": null,
-    "created_at": "2026-04-28T23:10:49.741877Z",
-    "updated_at": "2026-07-31T18:03:36.053991Z",
-    "completed_at": null,
-    "assignees": [
-      "0d63f76f-0231-49e8-b81a-b2471bb7b91a"
-    ],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": []
-  },
-  {
-    "id": "adc403c2-aa3e-4c85-b717-28d76e1a0b2e",
-    "sequence_id": 57,
-    "weft": "WEFT-57",
-    "name": "ws03: research \u2014 track 80+ heuristics from eml-synergy-scan",
-    "priority": "low",
-    "state": "Todo",
-    "state_group": "unstarted",
-    "labels": [
-      "ws03-pipeline",
-      "audit-finding",
-      "audit-0.7.0",
-      "gap"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Source\n.planning/reviews/0.7.0-release-gate/03-pipeline-routing.md \u2014 \"Deferred items / From eml-synergy-scan.md\".\nProblem / gap\n80+ hardcoded heuristics across graphify, kernel, LLM, assessment, and bench subsystems are listed as EML candidates. Notable pipeline-relevant ones: assessment/effects.rs weighted scores, pipeline/scorer.rs weights (covered by Q10), LLM provider cost-vs-quality trade-off ($0.01/1K threshold). Scan is exploratory.\nAcceptance criteria\n[ ] Single tracking issue/page enumerating each candidate.\n[ ] Each candidate has a status: deferred, scheduled, won't-do.\n[ ] Annual review cadence.\nDependencies\nUpstream EML stability.\nNotes\nResearch backlog; long horizon.",
-    "parent": null,
-    "created_at": "2026-04-28T23:11:03.294819Z",
-    "updated_at": "2026-07-31T18:03:49.614828Z",
-    "completed_at": null,
-    "assignees": [
-      "0d63f76f-0231-49e8-b81a-b2471bb7b91a"
-    ],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": []
-  },
-  {
-    "id": "e8db3919-c0c6-41c0-b556-2cb19b62262e",
-    "sequence_id": 58,
-    "weft": "WEFT-58",
-    "name": "ws03: research \u2014 track HNSW EML opportunities (adaptive ef, learned distance)",
-    "priority": "low",
-    "state": "Todo",
-    "state_group": "unstarted",
-    "labels": [
-      "ws03-pipeline",
-      "audit-finding",
-      "audit-0.7.0",
-      "gap"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Source\n.planning/reviews/0.7.0-release-gate/03-pipeline-routing.md \u2014 \"Deferred items / From hnsw-eml-deep-analysis.md\".\nProblem / gap\n10 EML opportunities for HNSW (adaptive ef, learned distance, cosine decomposition, search-path prediction, etc.). Items 3-10 are research; items 1-2 (adaptive beam, learned distance) are not yet implemented.\nAcceptance criteria\n[ ] Decide whether items 1-2 enter 0.9.x scope.\n[ ] If yes: file separate Plane items.\n[ ] If no: tracking comment with rationale.\nDependencies\nUpstream HNSW + eml-core.\nNotes\nResearch.",
-    "parent": null,
-    "created_at": "2026-04-28T23:11:04.262089Z",
-    "updated_at": "2026-07-31T18:03:58.441876Z",
-    "completed_at": null,
-    "assignees": [
-      "0d63f76f-0231-49e8-b81a-b2471bb7b91a"
-    ],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": []
-  },
-  {
-    "id": "2a8c3f4d-17a7-4060-b99d-b7ec09036d86",
-    "sequence_id": 301,
-    "weft": "WEFT-301",
-    "name": "ws09: api-bridge \u2014 wire skill install/uninstall to real loader",
-    "priority": "medium",
-    "state": "Todo",
-    "state_group": "unstarted",
-    "labels": [
-      "ws09-clawft-dashboard",
-      "audit-finding",
-      "audit-0.7.0",
-      "stub",
-      "gap"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Source\n.planning/reviews/0.7.0-release-gate/09-clawft-agent-dashboard.md task #10 + TODOs at crates/clawft-services/src/api/bridge.rs:282 and :287.\nProblem / gap\nbridge.rs:282 (// TODO: implement skill installation via ClawHub registry) and :287 (// TODO: implement skill uninstallation) both currently return Err(\"not implemented\"). The /skills UI route renders an Install/Uninstall button that always fails. Real implementation depends on Skill loader (C3) and ClawHub registry (K4) main-sprint deliverables.\nAcceptance criteria\n[ ] install_skill(slug) calls into the real Skill loader and ClawHub registry; success returns the installed skill record.\n[ ] uninstall_skill(slug) removes from the loader and from local cache.\n[ ] UI install/uninstall round-trip works end-to-end against a running weft gateway.\n[ ] Error responses surface a useful message when a slug is unknown / network fails.\n[ ] TODO markers at bridge.rs:282 and :287 removed.\nDependencies\nC3 Skill loader / hot-reload\nK4 ClawHub registry\nNotes\nUntil C3/K4 land the UI button should remain feature-gated or grey out with a not yet available message.",
-    "parent": null,
-    "created_at": "2026-04-28T23:20:34.936209Z",
-    "updated_at": "2026-07-31T18:02:09.101051Z",
-    "completed_at": null,
-    "assignees": [
-      "0d63f76f-0231-49e8-b81a-b2471bb7b91a"
-    ],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": []
-  },
-  {
     "id": "115811af-f1d1-4710-89ae-df7f3e74e2e9",
     "sequence_id": 304,
     "weft": "WEFT-304",
@@ -172,33 +55,6 @@
     "assignees": [
       "0d63f76f-0231-49e8-b81a-b2471bb7b91a"
     ],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": []
-  },
-  {
-    "id": "696acbe3-3c85-4c45-a60b-a439f529020d",
-    "sequence_id": 312,
-    "weft": "WEFT-312",
-    "name": "ws09: responsive \u2014 mobile sidebar drawer and chat input",
-    "priority": "low",
-    "state": "Todo",
-    "state_group": "unstarted",
-    "labels": [
-      "ws09-clawft-dashboard",
-      "audit-finding",
-      "audit-0.7.0",
-      "gap"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Source\n.planning/reviews/0.7.0-release-gate/09-clawft-agent-dashboard.md task #21 + Deferred Phases S3.3.\nProblem / gap\nMainLayout.tsx has no responsive drawer for screens < 768 px. Mobile WebChat lacks a bottom-anchored input and swipe nav between sessions. S3.3 is entirely unstarted.\nAcceptance criteria\n[ ] Sidebar collapses to a drawer below 768 px with hamburger toggle.\n[ ] /chat mobile layout: bottom-anchored input, message list scroll-up, swipe-left/right to switch sessions.\n[ ] Tap targets meet WCAG 44x44 minimum.\n[ ] Existing desktop layout unaffected (visual snapshot baseline holds at >= 1024 px).\nDependencies\nWCAG audit (separate item).\nNotes\nKeep Tailwind v4 breakpoint conventions consistent across the app.",
-    "parent": null,
-    "created_at": "2026-04-28T23:21:18.641857Z",
-    "updated_at": "2026-04-28T23:21:18.594613Z",
-    "completed_at": null,
-    "assignees": [],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []
@@ -320,36 +176,6 @@
     ]
   },
   {
-    "id": "7048d115-49cb-4418-88de-66b4450ac87a",
-    "sequence_id": 561,
-    "weft": "WEFT-561",
-    "name": "ws09: ui \u2014 axe-core + Playwright a11y suite across all routes",
-    "priority": "low",
-    "state": "Todo",
-    "state_group": "unstarted",
-    "labels": [
-      "tests",
-      "ws09-clawft-dashboard"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Followup from WEFT-315 (jsx-a11y static lint + bundle-size gate shipped). The full runtime a11y audit needs:\nSet up Playwright suite for clawft-ui (no test infra exists yet)\nIntegrate @axe-core/playwright; visit each of the 14 routes\n  (/, /agents, /canvas, /chat, /sessions, /tools, /skills, /memory,\n   /config, /cron, /channels, /delegation, /monitoring, /voice)\nAssert no critical/serious WCAG AA violations\nTriage and fix the 25 jsx-a11y warnings currently emitted by lint\n  (label-has-associated-control sweep across cron/memory/delegation/\n   skills/browser-config; click-events-have-key-events on talk-overlay)\nWire into CI (gate on critical violations, summarize others)\nBonus: Lighthouse PWA + a11y score > 90 in CI (WEFT-560 pairs)\nSource: .planning/reviews/0.7.0-release-gate/09-clawft-agent-dashboard.md task #24 + Deferred Phases S3.5.\nAcceptance criteria:\n[ ] Playwright suite scaffolded under clawft-ui/tests/e2e\n[ ] axe-core integrated; runs on all 14 routes in CI\n[ ] critical/serious violations gated; others tracked\n[ ] 25 jsx-a11y warnings driven to zero",
-    "parent": null,
-    "created_at": "2026-05-01T04:36:27.284299Z",
-    "updated_at": "2026-07-31T18:02:39.008404Z",
-    "completed_at": null,
-    "assignees": [
-      "0d63f76f-0231-49e8-b81a-b2471bb7b91a"
-    ],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": [
-      "WEFT-315",
-      "WEFT-560"
-    ]
-  },
-  {
     "id": "77e73f8a-330d-4386-8fa3-a5e8759c5c6e",
     "sequence_id": 574,
     "weft": "WEFT-574",
@@ -375,35 +201,6 @@
     "estimate_point": null,
     "deps_mentioned": [
       "WEFT-313"
-    ]
-  },
-  {
-    "id": "40f14435-8310-4b0f-acd7-05c8b0e7bcea",
-    "sequence_id": 575,
-    "weft": "WEFT-575",
-    "name": "ws09: ui \u2014 axe-core runtime a11y scan still missing (WEFT-315 AC unmet, follow-up to WEFT-561)",
-    "priority": "low",
-    "state": "Backlog",
-    "state_group": "backlog",
-    "labels": [
-      "ws09-clawft-dashboard",
-      "audit-finding",
-      "gap"
-    ],
-    "cycles": [
-      "1.0.x"
-    ],
-    "description": "Source\naudit-C follow-up audit (.planning/reviews/0.7.0-release-gate/follow-up-audit/ws09-dashboard.md), WEFT-315 review.\nProblem / gap\nWEFT-315 shipped the bundle-size budget gate (scripts/bench/check-ui-bundle-size.sh) and an eslint-plugin-jsx-a11y static lint pass. The original AC explicitly required \"axe-core integrated into the Playwright suite or run as a standalone script across all 14 routes\" \u2014 that runtime axe-core scan is not in the tree. The eslint config documents the deferral. WEFT-561 already exists as the broader \"axe-core + Playwright a11y suite across all routes\" follow-up; this finding records the WEFT-315 AC as technically unmet so the audit close trail is accurate.\nAcceptance criteria (delegate to WEFT-561)\n[ ] axe-core (@axe-core/playwright) installed in clawft-ui/package.json.\n[ ] Playwright suite visits each of the 14 routes and asserts injectAxe + checkA11y reports zero critical violations.\n[ ] scripts/build.sh ui-e2e (or a sibling) runs the a11y subset on PRs.\n[ ] Critical violations fixed; non-critical tracked in dedicated WEFT items.\nDependencies\nWEFT-561 (umbrella). This issue can be closed by linking to WEFT-561's resolution.\nNotes\nFiled for audit-trail completeness \u2014 overlaps with WEFT-561 by design.",
-    "parent": null,
-    "created_at": "2026-05-01T15:05:26.751685Z",
-    "updated_at": "2026-05-01T15:05:26.696643Z",
-    "completed_at": null,
-    "assignees": [],
-    "sub_issues_count": 0,
-    "estimate_point": null,
-    "deps_mentioned": [
-      "WEFT-315",
-      "WEFT-561"
     ]
   },
   {

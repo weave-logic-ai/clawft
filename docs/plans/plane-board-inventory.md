@@ -1,6 +1,6 @@
 # Plane Board Inventory — WeftOS
 
-> Generated: 2026-07-31 20:36 UTC
+> Generated: 2026-07-31 20:56 UTC
 > Source: Plane workspace `weftos`
 > Machine-readable DAG: [`plane-dag.json`](./plane-dag.json)
 > Wave plan: [`plane-wave-plan.md`](./plane-wave-plan.md)
@@ -10,30 +10,29 @@
 | Metric | Count |
 |--------|------:|
 | Total tickets | 716 |
-| Open | 15 |
+| Open | 8 |
 | In Progress | 0 |
-| Done | 681 |
+| Done | 688 |
 | Cancelled | 20 |
 | Dependency edges | 43 |
 | Inferred domain edges | 0 |
-| Parallel waves | 2 |
+| Parallel waves | 1 |
 
 ### Open by cycle
 
-- **1.0.x**: 14
+- **1.0.x**: 7
 - **0.8.x**: 1
 
 ### Open by workstream
 
-- **ws09-clawft-dashboard**: 9
-- **ws03-pipeline**: 3
+- **ws09-clawft-dashboard**: 5
 - **ws17-research**: 2
 - **ws10-voice**: 1
 
 ### Open by priority
 
-- **medium**: 5
-- **low**: 10
+- **medium**: 4
+- **low**: 4
 
 ---
 
@@ -74,7 +73,7 @@
 | WEFT-38 | Done | medium | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — wire evolution_ready flag → mutation.rs GA loop (ADR-017 flywheel) |
 | WEFT-39 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — persist RetryModel learned weights across daemon restarts |
 | WEFT-40 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — surface routing-decision history via admin endpoint |
-| WEFT-41 | Todo | low | 1.0.x | ws03-pipeline | B | strong | — | — | ws03: research — Iteration 3 EML attention multi-param coordinated perturbation |
+| WEFT-41 | Done | low | 1.0.x | ws03-pipeline | B | strong | — | — | ws03: research — Iteration 3 EML attention multi-param coordinated perturbation |
 | WEFT-42 | Done | low | 0.9.x | ws03-pipeline | B | strong | — | — | ws03: kernel — wire sprint-16 two-tier EML coherence cadence |
 | WEFT-43 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — decide consolidation of clawft-service-llm vs clawft-llm |
 | WEFT-44 | Done | medium | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: service-llm — handle non-string content (vision blocks / structured) in LlmClient |
@@ -90,8 +89,8 @@
 | WEFT-54 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — review FitnessScorer.error_indicators allowlist (localization, jailbreak) |
 | WEFT-55 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — verify experimental-attention CI build/test wiring |
 | WEFT-56 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — define explicit pipeline-pass step in scripts/build.sh gate |
-| WEFT-57 | Todo | low | 1.0.x | ws03-pipeline | B | strong | — | — | ws03: research — track 80+ heuristics from eml-synergy-scan |
-| WEFT-58 | Todo | low | 1.0.x | ws03-pipeline | C | strong | — | — | ws03: research — track HNSW EML opportunities (adaptive ef, learned distance) |
+| WEFT-57 | Done | low | 1.0.x | ws03-pipeline | B | strong | — | — | ws03: research — track 80+ heuristics from eml-synergy-scan |
+| WEFT-58 | Done | low | 1.0.x | ws03-pipeline | C | strong | — | — | ws03: research — track HNSW EML opportunities (adaptive ef, learned distance) |
 | WEFT-59 | Done | high | 0.7.x | ws04-plugin-skills | B | strong | — | — | ws04: cli — add weft skills approve / reject CLI for autogen .pending markers |
 | WEFT-60 | Done | high | 0.7.x | ws04-plugin-skills | B | strong | — | — | ws04: cli — add weft skills pending listing with generated SKILL.md preview |
 | WEFT-61 | Done | high | 0.7.x | ws04-plugin-skills | B | strong | — | — | ws04: architecture — decide fate of 8 orphaned clawft-plugin-* crates |
@@ -334,7 +333,7 @@
 | WEFT-298 | Done | high | 0.7.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api — add CSP middleware to gateway handlers |
 | WEFT-299 | Cancelled | high | 0.7.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api — add rate-limiting middleware with per-endpoint defaults |
 | WEFT-300 | Done | medium | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api — add WebSocket heartbeat and dead-connection cleanup |
-| WEFT-301 | Todo | medium | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api-bridge — wire skill install/uninstall to real loader |
+| WEFT-301 | Done | medium | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api-bridge — wire skill install/uninstall to real loader |
 | WEFT-302 | Done | medium | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api-bridge — implement memory delete with append-only rewrite |
 | WEFT-303 | Done | medium | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api-bridge — implement save_config persistence |
 | WEFT-304 | Todo | medium | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: api — replace mock delegation handlers with FlowDelegator wiring |
@@ -345,7 +344,7 @@
 | WEFT-309 | Done | medium | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: auth — add use-auth hook with single-use URL token |
 | WEFT-310 | Done | medium | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: browser-config — validate cors_proxy URL is HTTPS in production |
 | WEFT-311 | Done | low | 0.9.x | ws09-clawft-dashboard | F | strong | WEFT-560 | — | ws09: pwa — add manifest, service worker, push notifications |
-| WEFT-312 | Todo | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: responsive — mobile sidebar drawer and chat input |
+| WEFT-312 | Done | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: responsive — mobile sidebar drawer and chat input |
 | WEFT-313 | Done | low | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: tauri — scaffold clawft-ui/src-tauri desktop shell |
 | WEFT-314 | Done | medium | 0.9.x | ws09-clawft-dashboard | F | strong | — | — | ws09: tests — add Playwright E2E suite under clawft-ui/tests |
 | WEFT-315 | Done | low | 0.9.x | ws09-clawft-dashboard | F | strong | WEFT-561 | — | ws09: ui — axe-core a11y audit and bundle-size budget |
@@ -594,7 +593,7 @@
 | WEFT-558 | Done | medium | 0.8.x | ws15-mcp | J | ok | WEFT-486 | WEFT-486 | ws15: VSCode panel E2E — chip-icon DOM assertion (followup to WEFT-486) |
 | WEFT-559 | Done | high | 0.8.x | ws15-mcp | J | weak | — | WEFT-483 | ws15: Windows named-pipe transport — implement DaemonClient + daemon listener for x86_64-p |
 | WEFT-560 | Backlog | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | WEFT-311 | ws09: pwa — push notifications via VAPID + WS event bridge |
-| WEFT-561 | Todo | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | WEFT-315,WEFT-575 | ws09: ui — axe-core + Playwright a11y suite across all routes |
+| WEFT-561 | Done | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | WEFT-315,WEFT-575 | ws09: ui — axe-core + Playwright a11y suite across all routes |
 | WEFT-562 | Cancelled | low | — | ws16-browser-wasm | G | strong | WEFT-409 | WEFT-409 | ws16: sparc(BW5) — retire scripts/check-features.sh references missed by WEFT-409 sweep |
 | WEFT-563 | Done | low | 0.8.x | ws16-browser-wasm | G | strong | WEFT-409 | WEFT-409 | ws16: sparc(BW5) — retire scripts/check-features.sh references missed by WEFT-409 sweep |
 | WEFT-564 | Done | low | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: scripts — actually retire or annotate scripts/check-features.sh (still on disk) |
@@ -608,7 +607,7 @@
 | WEFT-572 | Done | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: pwa — replace placeholder vite.svg icon with real 192/512 PNGs and maskable |
 | WEFT-573 | Done | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: pwa — render an offline banner when SW serves the cached shell |
 | WEFT-574 | Backlog | medium | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: tauri — desktop shell functional features (tray, hotkey, side-car, Spotlight, notifi |
-| WEFT-575 | Backlog | low | 1.0.x | ws09-clawft-dashboard | F | strong | WEFT-561 | — | ws09: ui — axe-core runtime a11y scan still missing (WEFT-315 AC unmet, follow-up to WEFT- |
+| WEFT-575 | Done | low | 1.0.x | ws09-clawft-dashboard | F | strong | WEFT-561 | — | ws09: ui — axe-core runtime a11y scan still missing (WEFT-315 AC unmet, follow-up to WEFT- |
 | WEFT-576 | Done | high | 1.0.x | ws09-clawft-dashboard | A | strong | — | — | ws09: deploy — Dockerfile must run as non-root user (security hardening) |
 | WEFT-577 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: vscode panel wasm bundle — trim back toward 4500/1500 KB ceiling |
 | WEFT-578 | Done | high | 0.8.x | ws08-weftos-gui | F | weak | — | — | ws08: 0.8.0 sidebar — canonical block per DESIGN.md §5 |
@@ -762,45 +761,7 @@
 
 ## Open tickets by workstream
 
-### ws03-pipeline (3 open)
-
-#### WEFT-41 — ws03: research — Iteration 3 EML attention multi-param coordinated perturbation
-
-- **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Iteration 3 gate: multi-param coordinated perturbation on SafeTree; target ≥80% MSE reduction at (seq_len=4, d_model=8) and final_mse < 5e-2. Not attempted yet. Iterations 4-5+ (full EML-Transformer, hybrid scoring) explicitly aspirational. No tracking issue or plan stub.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-57 — ws03: research — track 80+ heuristics from eml-synergy-scan
-
-- **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: 80+ hardcoded heuristics across graphify, kernel, LLM, assessment, and bench subsystems are listed as EML candidates. Notable pipeline-relevant ones: assessment/effects.rs weighted scores, pipeline/scorer.rs weights (covered by Q10), LLM provider cost-vs-quality trade-off ($0.01/1K threshold). Scan is exploratory.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-58 — ws03: research — track HNSW EML opportunities (adaptive ef, learned distance)
-
-- **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: C · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: 10 EML opportunities for HNSW (adaptive ef, learned distance, cosine decomposition, search-path prediction, etc.). Items 3-10 are research; items 1-2 (adaptive beam, learned distance) are not yet implemented.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-### ws09-clawft-dashboard (9 open)
-
-#### WEFT-301 — ws09: api-bridge — wire skill install/uninstall to real loader
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws09-clawft-dashboard, audit-finding, audit-0.7.0, stub, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: bridge.rs:282 (// TODO: implement skill installation via ClawHub registry) and :287 (// TODO: implement skill uninstallation) both currently return Err("not implemented"). The /skills UI route renders an Install/Uninstall button that always fails. Real implementation depends on Skill loader (C3) and ClawHub registry (K
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+### ws09-clawft-dashboard (5 open)
 
 #### WEFT-304 — ws09: api — replace mock delegation handlers with FlowDelegator wiring
 
@@ -838,15 +799,6 @@
 - **Gap**: WEFT-313 was closed as "scaffold shipped", but none of the six functional ACs landed. clawft-ui/src-tauri/src/lib.rs:1-16 explicitly lists the gaps: System tray with agent-status colour states (not shipped). Global hotkey Cmd+Shift+W / Ctrl+Shift+W (not shipped). weft-gateway side-car launch on app start, terminate on 
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-312 — ws09: responsive — mobile sidebar drawer and chat input
-
-- **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws09-clawft-dashboard, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: MainLayout.tsx has no responsive drawer for screens < 768 px. Mobile WebChat lacks a bottom-anchored input and swipe nav between sessions. S3.3 is entirely unstarted.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
 #### WEFT-560 — ws09: pwa — push notifications via VAPID + WS event bridge
 
 - **State**: Backlog · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: F · **AC**: strong
@@ -855,24 +807,6 @@
 - **Blocks**: WEFT-311
 - **Gap**: Followup from WEFT-311 (manifest + offline shell shipped). Push notifications need: gateway-side push subscription endpoints (POST /api/push/subscribe, DELETE /api/push/unsubscribe) VAPID keypair generation and server-side dispatch on configured WS events (e.g. agent_done, channe
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-561 — ws09: ui — axe-core + Playwright a11y suite across all routes
-
-- **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: tests, ws09-clawft-dashboard
-- **Blocked by**: none
-- **Blocks**: WEFT-315, WEFT-575
-- **Gap**: Followup from WEFT-315 (jsx-a11y static lint + bundle-size gate shipped). The full runtime a11y audit needs: Set up Playwright suite for clawft-ui (no test infra exists yet) Integrate @axe-core/playwright; visit each of the 14 routes (/, /agents, /canvas, /chat, /sessions, /too
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-575 — ws09: ui — axe-core runtime a11y scan still missing (WEFT-315 AC unmet, follow-up to WEFT-561)
-
-- **State**: Backlog · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W1 · **Lane**: F · **AC**: strong
-- **Labels**: ws09-clawft-dashboard, audit-finding, gap
-- **Blocked by**: WEFT-561
-- **Blocks**: none
-- **Gap**: WEFT-315 shipped the bundle-size budget gate (scripts/bench/check-ui-bundle-size.sh) and an eslint-plugin-jsx-a11y static lint pass. The original AC explicitly required "axe-core integrated into the Playwright suite or run as a standalone script across all 14 routes" — that runtime axe-core scan is not in the tree. The
-- **Plan**: Wait for WEFT-561
 
 ### ws10-voice (1 open)
 
