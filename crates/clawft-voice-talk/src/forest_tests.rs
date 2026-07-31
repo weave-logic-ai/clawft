@@ -99,3 +99,42 @@ fn full_turn_renders_speculative_then_committed_and_barge_in_contradicts() {
         "barge-in claims the floor via a TurnClaim impulse"
     );
 }
+
+#[test]
+fn partial_transcript_feeds_midstream_and_emits_coherence_alert_on_stall() {
+    // WEFT-715: LoopObserver partials → token ring → CoherenceAlert on the
+    // shared forest impulse queue (analysis only; no graph write).
+    let f = forest();
+    let obs = LoopObserver::new(f.clone());
+
+    // Default TemporalMidstreamAnalyzer stall_run is 4 identical tokens.
+    obs.observe(ConversationEvent::PartialTranscript {
+        text: "x x x x".into(),
+    });
+
+    assert!(f.midstream().ring_len() >= 4);
+    let drained = f.impulses().drain_ready();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].impulse_type, ImpulseType::CoherenceAlert);
+    assert_eq!(drained[0].payload["source"], "midstream");
+    assert_eq!(drained[0].payload["reason"], "repeat");
+}
+
+#[test]
+fn midstream_tick_silent_when_ring_is_diverse() {
+    let f = forest();
+    f.midstream().on_partial("hello world from user", 1);
+    assert!(f.on_midstream_tick(2).is_none());
+    assert!(f.impulses().drain_ready().is_empty());
+}
+
+#[test]
+fn midstream_iu_diff_available_on_forest() {
+    // WEFT-714: IU prefix-diff via temporal analyzer (last-token refine → Extend).
+    let f = forest();
+    f.midstream().set_stable_prefix("hello runing");
+    assert_eq!(
+        f.midstream().diff_against_stable("hello running"),
+        crate::PartialDiffVerdict::Extend
+    );
+}

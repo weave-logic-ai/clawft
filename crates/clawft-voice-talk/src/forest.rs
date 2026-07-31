@@ -39,6 +39,8 @@ use clawft_kernel::{
 };
 use std::collections::HashMap;
 
+use crate::midstream::{MidstreamTickGuard, StallSignal};
+
 /// The shared ECC forest substrate plus the P2 [`TalkModeLoop`] orchestrator.
 ///
 /// One per conversation. Construction is pure (no models, no I/O), so it builds
@@ -46,6 +48,10 @@ use std::collections::HashMap;
 /// [`SessionView`] that backs the loop's `mirror_state` commit/prune; the deep
 /// L2 graft (real embeddings) lives in `clawft-service-agent` and is out of this
 /// assembly's render scope (the render grounds on the LLM directly).
+///
+/// Mid-stream gating (WEFT-714/715): [`midstream`](crate::midstream) holds a
+/// token ring + temporal analyzer; partials and [`on_midstream_tick`] feed it
+/// and may emit `ImpulseType::CoherenceAlert` for the loop to drain.
 pub struct TalkForest {
     conv_id: String,
     impulses: Arc<ImpulseQueue>,
@@ -53,6 +59,8 @@ pub struct TalkForest {
     crossrefs: Arc<CrossRefStore>,
     view: Arc<SessionView>,
     talk_loop: Arc<TalkModeLoop>,
+    /// Phase B stall analyzer → CoherenceAlert on the shared impulse queue.
+    midstream: Arc<MidstreamTickGuard>,
 }
 
 impl TalkForest {
@@ -76,6 +84,8 @@ impl TalkForest {
             tick,
             TalkModeConfig::default(),
         ));
+        // Midstream stall guard shares the same impulse queue (analysis only).
+        let midstream = Arc::new(MidstreamTickGuard::new(impulses.clone(), [0u8; 32]));
         Self {
             conv_id,
             impulses,
@@ -83,12 +93,25 @@ impl TalkForest {
             crossrefs,
             view,
             talk_loop,
+            midstream,
         }
     }
 
     /// The kernel impulse queue (P5 capture binds its sink here).
     pub fn impulses(&self) -> &Arc<ImpulseQueue> {
         &self.impulses
+    }
+
+    /// Mid-stream stall / IU partial analyzer (WEFT-714/715).
+    pub fn midstream(&self) -> &Arc<MidstreamTickGuard> {
+        &self.midstream
+    }
+
+    /// CognitiveTick-side stall check: emit `CoherenceAlert` if the recent
+    /// token ring shows a repeat/loop. Call after feeding partials (or from a
+    /// tick hook); never owns floor policy.
+    pub fn on_midstream_tick(&self, hlc: u64) -> Option<StallSignal> {
+        self.midstream.on_tick(hlc)
     }
 
     /// The kernel-global causal graph (the conversation Loom).
@@ -366,6 +389,13 @@ impl ConversationObserver for LoopObserver {
                 // Drive the floor: the barge-in claims back the floor.
                 self.emit_claim();
             }
+            // WEFT-715: feed cumulative STT partials into the midstream token
+            // ring; on stall emit CoherenceAlert for the next CognitiveTick drain.
+            // Still surface-only for graph purposes (no CausalNode write).
+            ConversationEvent::PartialTranscript { text } => {
+                let hlc = self.tick();
+                let _ = self.forest.midstream.on_partial(&text, hlc);
+            }
             // §W1.4 process events are surface-only — not committed graph
             // nodes. SpeculativeFiller (WEFT-658) joins this group: it's an
             // ephemeral "thinking" line, not a reply the loop tracks.
@@ -373,7 +403,6 @@ impl ConversationObserver for LoopObserver {
             // already recorded the decomposition; this is just the "why no
             // reply followed" explanation for the surface.
             ConversationEvent::EndpointFired { .. }
-            | ConversationEvent::PartialTranscript { .. }
             | ConversationEvent::CaptureLevel { .. }
             | ConversationEvent::SpeculativeFiller { .. }
             | ConversationEvent::CueTone { .. }
