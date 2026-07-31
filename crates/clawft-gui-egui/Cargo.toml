@@ -21,6 +21,8 @@ features = ["native"]
 # cargo-dist 0.31 still lists bins that have unmet required-features in the
 # package plan; pin the install/archive binary set per target so weft-demo-lab
 # never ships (demo-lab feature stays opt-in for local A/B theming).
+# Must cover EVERY workspace.metadata.dist target (incl. Windows) or cargo-dist
+# falls back to all [[bin]] entries and fails looking for weft-demo-lab.exe.
 [package.metadata.dist.binaries]
 x86_64-unknown-linux-gnu = ["weft-gui-egui"]
 aarch64-unknown-linux-gnu = ["weft-gui-egui"]
@@ -28,6 +30,7 @@ x86_64-unknown-linux-musl = ["weft-gui-egui"]
 aarch64-unknown-linux-musl = ["weft-gui-egui"]
 x86_64-apple-darwin = ["weft-gui-egui"]
 aarch64-apple-darwin = ["weft-gui-egui"]
+x86_64-pc-windows-msvc = ["weft-gui-egui"]
 
 # wasm-pack settings: enable wasm-opt with `-Oz` (size-optimized)
 # for release builds.
