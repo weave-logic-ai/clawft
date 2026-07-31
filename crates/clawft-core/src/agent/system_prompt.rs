@@ -399,7 +399,9 @@ mod tests {
         .unwrap();
         std::fs::write(clawft.join("IDENTITY.md"), "# IDENTITY\nclawft").unwrap();
 
-        let provider: Arc<dyn IdentityProvider> = Arc::new(FileIdentityProvider::new(tmp.path()));
+        let platform = Arc::new(clawft_platform::NativePlatform::new());
+        let provider: Arc<dyn IdentityProvider> =
+            Arc::new(FileIdentityProvider::new(tmp.path(), platform));
         let builder = SystemPromptBuilder::new(provider, tmp.path().to_path_buf());
 
         let prompt = builder.build().await.expect("build ok");

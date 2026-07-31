@@ -49,6 +49,9 @@
 //! Plan reference: `docs/plans/agent-core-v1.md` Phase D1, F1.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use clawft_platform::Platform;
 
 use crate::runtime::RwLock;
 use async_trait::async_trait;
@@ -156,21 +159,28 @@ pub trait IdentityProvider: Send + Sync + 'static {
 /// Filesystem-backed [`IdentityProvider`] that re-reads on every call
 /// and caches the most recent successful load.
 ///
+/// All IO goes through [`Platform::fs`] (WEFT-95 / MW-17) so the path
+/// is native/WASM portable — the same mock / browser backends used by
+/// the rest of the agent loop exercise identity loads without
+/// `std::fs`.
+///
 /// The cache lets repeated calls within a turn skip the disk hit;
 /// cross-turn changes (the user editing `SOUL.md` between turns) are
 /// picked up on the next call because the loader still tries the disk
 /// first. The cache is only consulted as a fallback when both the
 /// per-instance and fallback paths fail to resolve.
-pub struct FileIdentityProvider {
+pub struct FileIdentityProvider<P: Platform> {
     workspace: PathBuf,
+    platform: Arc<P>,
     cached: RwLock<Option<Identity>>,
 }
 
-impl FileIdentityProvider {
+impl<P: Platform> FileIdentityProvider<P> {
     /// Build a provider rooted at the given workspace directory.
-    pub fn new(workspace: impl Into<PathBuf>) -> Self {
+    pub fn new(workspace: impl Into<PathBuf>, platform: Arc<P>) -> Self {
         Self {
             workspace: workspace.into(),
+            platform,
             cached: RwLock::new(None),
         }
     }
@@ -182,10 +192,10 @@ impl FileIdentityProvider {
 }
 
 #[async_trait]
-impl IdentityProvider for FileIdentityProvider {
+impl<P: Platform + 'static> IdentityProvider for FileIdentityProvider<P> {
     async fn current(&self) -> Result<Identity, IdentityError> {
-        let loader = IdentityLoader::new(self.workspace.clone());
-        match loader.current() {
+        let loader = IdentityLoader::new(self.workspace.clone(), Arc::clone(&self.platform));
+        match loader.current().await {
             Some(id) => {
                 let mut cache = self.cached.write().await;
                 *cache = Some(id.clone());
@@ -210,21 +220,27 @@ impl IdentityProvider for FileIdentityProvider {
     }
 }
 
-/// Resolves and reads identity content from disk.
-pub struct IdentityLoader {
+/// Resolves and reads identity content via [`Platform::fs`] (WEFT-95).
+///
+/// Async so WASM / browser backends (and in-memory mocks) can serve
+/// the same path as native `tokio::fs` without a sync `std::fs` bypass.
+pub struct IdentityLoader<P: Platform> {
     workspace: PathBuf,
+    platform: Arc<P>,
 }
 
-impl IdentityLoader {
+impl<P: Platform> IdentityLoader<P> {
     /// Build a loader rooted at the given workspace directory.
     ///
     /// The workspace is typically the resolved
     /// [`clawft_types::config::AgentsConfig::workspace_root`]
     /// (WEFT-83 / plan §15.4). When that config key is unset, callers
-    /// pass the daemon process CWD.
-    pub fn new(workspace: impl Into<PathBuf>) -> Self {
+    /// pass the daemon process CWD. `platform` supplies
+    /// [`Platform::fs`] for all identity file reads (WEFT-95).
+    pub fn new(workspace: impl Into<PathBuf>, platform: Arc<P>) -> Self {
         Self {
             workspace: workspace.into(),
+            platform,
         }
     }
 
@@ -235,8 +251,9 @@ impl IdentityLoader {
     /// daemons).
     pub fn from_agents_config(
         agents: &clawft_types::config::AgentsConfig,
+        platform: Arc<P>,
     ) -> std::io::Result<Self> {
-        Ok(Self::new(agents.resolve_workspace_root()?))
+        Ok(Self::new(agents.resolve_workspace_root()?, platform))
     }
 
     /// Return the workspace root this loader reads from.
@@ -254,15 +271,24 @@ impl IdentityLoader {
     /// F1 removed the `docs/skills/clawft/` fallback the spike used
     /// while `weaver init` did not yet seed `.clawft/`. Every
     /// initialized workspace now boots with the seed files in place.
-    pub fn current(&self) -> Option<Identity> {
+    ///
+    /// Reads go through [`Platform::fs`] (WEFT-95 / MW-17) — no
+    /// `std::fs` on this path.
+    pub async fn current(&self) -> Option<Identity> {
         self.try_load_from(&self.workspace.join(".clawft"), "clawft")
+            .await
     }
 
-    fn try_load_from(&self, dir: &Path, source: &'static str) -> Option<Identity> {
+    async fn try_load_from(&self, dir: &Path, source: &'static str) -> Option<Identity> {
         let soul_path = dir.join("SOUL.md");
         let identity_path = dir.join("IDENTITY.md");
-        let soul = std::fs::read_to_string(&soul_path).ok()?;
-        let identity = std::fs::read_to_string(&identity_path).ok()?;
+        let soul = self.platform.fs().read_to_string(&soul_path).await.ok()?;
+        let identity = self
+            .platform
+            .fs()
+            .read_to_string(&identity_path)
+            .await
+            .ok()?;
         debug!(?soul_path, ?identity_path, source, "identity loaded");
         let hash = sha256_identity_hash(&soul, &identity);
         Some(Identity {
@@ -302,6 +328,166 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use clawft_platform::fs::{FileSystem, FsMetadata};
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    // ── In-memory platform (WASM-equivalent path, WEFT-95) ─────────
+    //
+    // Exercises IdentityLoader via Platform::fs without std::fs reads —
+    // the same shape browser / WASI backends use.
+
+    struct MockFs {
+        files: StdMutex<HashMap<PathBuf, String>>,
+    }
+
+    impl MockFs {
+        fn new() -> Self {
+            Self {
+                files: StdMutex::new(HashMap::new()),
+            }
+        }
+
+        fn seed(&self, path: impl Into<PathBuf>, content: impl Into<String>) {
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.into(), content.into());
+        }
+    }
+
+    #[async_trait]
+    impl FileSystem for MockFs {
+        async fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            self.files.lock().unwrap().get(path).cloned().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("file not found: {}", path.display()),
+                )
+            })
+        }
+
+        async fn write_string(&self, path: &Path, content: &str) -> std::io::Result<()> {
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), content.to_string());
+            Ok(())
+        }
+
+        async fn append_string(&self, path: &Path, content: &str) -> std::io::Result<()> {
+            let mut files = self.files.lock().unwrap();
+            files.entry(path.to_path_buf()).or_default().push_str(content);
+            Ok(())
+        }
+
+        async fn exists(&self, path: &Path) -> bool {
+            self.files.lock().unwrap().contains_key(path)
+        }
+
+        async fn list_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|p| p.parent() == Some(path))
+                .cloned()
+                .collect())
+        }
+
+        async fn create_dir_all(&self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.files.lock().unwrap().remove(path);
+            Ok(())
+        }
+
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/mock-home"))
+        }
+
+        async fn metadata(&self, path: &Path) -> std::io::Result<FsMetadata> {
+            if let Some(content) = self.files.lock().unwrap().get(path) {
+                return Ok(FsMetadata {
+                    is_dir: false,
+                    len: content.len() as u64,
+                });
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "not found",
+            ))
+        }
+    }
+
+    struct MockEnv;
+    impl clawft_platform::env::Environment for MockEnv {
+        fn get_var(&self, _name: &str) -> Option<String> {
+            None
+        }
+        fn set_var(&self, _name: &str, _value: &str) {}
+        fn remove_var(&self, _name: &str) {}
+    }
+
+    struct MockHttp;
+    #[async_trait]
+    impl clawft_platform::http::HttpClient for MockHttp {
+        async fn request(
+            &self,
+            _method: &str,
+            _url: &str,
+            _headers: &HashMap<String, String>,
+            _body: Option<&[u8]>,
+        ) -> Result<clawft_platform::http::HttpResponse, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Err("MockHttp unused in identity tests".into())
+        }
+    }
+
+    struct MockPlatform {
+        fs: MockFs,
+        env: MockEnv,
+        http: MockHttp,
+    }
+
+    impl MockPlatform {
+        fn new() -> Self {
+            Self {
+                fs: MockFs::new(),
+                env: MockEnv,
+                http: MockHttp,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Platform for MockPlatform {
+        fn http(&self) -> &dyn clawft_platform::http::HttpClient {
+            &self.http
+        }
+        fn fs(&self) -> &dyn FileSystem {
+            &self.fs
+        }
+        fn env(&self) -> &dyn clawft_platform::env::Environment {
+            &self.env
+        }
+        fn process(&self) -> Option<&dyn clawft_platform::process::ProcessSpawner> {
+            None
+        }
+    }
+
+    fn mock_platform() -> Arc<MockPlatform> {
+        Arc::new(MockPlatform::new())
+    }
+
+    #[cfg(feature = "native")]
+    fn native_platform() -> Arc<clawft_platform::NativePlatform> {
+        Arc::new(clawft_platform::NativePlatform::new())
+    }
 
     #[test]
     fn binding_thread_excerpt_is_non_empty() {
@@ -338,16 +524,42 @@ mod tests {
         assert_ne!(h, sha256_identity_hash("hello", "WORLD"));
     }
 
-    #[test]
-    fn loads_from_clawft_when_present() {
+    /// WEFT-95: in-memory Platform::fs path (WASM-equivalent — no std::fs).
+    #[tokio::test]
+    async fn loads_via_platform_fs_mock_no_std_fs() {
+        let platform = mock_platform();
+        let workspace = PathBuf::from("/wasm-ws");
+        let clawft = workspace.join(".clawft");
+        platform
+            .fs
+            .seed(clawft.join("SOUL.md"), "soul content");
+        platform
+            .fs
+            .seed(clawft.join("IDENTITY.md"), "identity content");
+
+        let loader = IdentityLoader::new(&workspace, Arc::clone(&platform));
+        let id = loader.current().await.expect("should load via mock fs");
+        assert_eq!(id.soul, "soul content");
+        assert_eq!(id.identity, "identity content");
+        assert_eq!(id.source, "clawft");
+        assert_eq!(
+            id.hash,
+            sha256_identity_hash("soul content", "identity content")
+        );
+        assert_eq!(id.hash.len(), 64);
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn loads_from_clawft_when_present() {
         let tmp = tempfile::tempdir().unwrap();
         let clawft = tmp.path().join(".clawft");
         std::fs::create_dir_all(&clawft).unwrap();
         std::fs::write(clawft.join("SOUL.md"), "soul content").unwrap();
         std::fs::write(clawft.join("IDENTITY.md"), "identity content").unwrap();
 
-        let loader = IdentityLoader::new(tmp.path());
-        let id = loader.current().expect("should load");
+        let loader = IdentityLoader::new(tmp.path(), native_platform());
+        let id = loader.current().await.expect("should load");
         assert_eq!(id.soul, "soul content");
         assert_eq!(id.identity, "identity content");
         assert_eq!(id.source, "clawft");
@@ -359,8 +571,9 @@ mod tests {
         assert_eq!(id.hash.len(), 64);
     }
 
-    #[test]
-    fn does_not_load_from_docs_skills_anymore() {
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn does_not_load_from_docs_skills_anymore() {
         // F1 removed the docs/skills/clawft/ fallback. Even when only
         // the docs path is populated, the loader returns None — the
         // chat path must emit `identity load failed: ... run `weaver
@@ -371,64 +584,66 @@ mod tests {
         std::fs::write(docs.join("SOUL.md"), "doc soul").unwrap();
         std::fs::write(docs.join("IDENTITY.md"), "doc identity").unwrap();
 
-        let loader = IdentityLoader::new(tmp.path());
+        let loader = IdentityLoader::new(tmp.path(), native_platform());
         assert!(
-            loader.current().is_none(),
+            loader.current().await.is_none(),
             "post-F1: docs/skills/clawft/ must not satisfy the loader"
         );
     }
 
-    #[test]
-    fn returns_none_when_clawft_dir_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let loader = IdentityLoader::new(tmp.path());
-        assert!(loader.current().is_none());
+    #[tokio::test]
+    async fn returns_none_when_clawft_dir_missing() {
+        let loader = IdentityLoader::new(PathBuf::from("/empty-ws"), mock_platform());
+        assert!(loader.current().await.is_none());
     }
 
-    #[test]
-    fn returns_none_when_only_one_file_present() {
+    #[tokio::test]
+    async fn returns_none_when_only_one_file_present() {
         // Half-populated .clawft/ should fail loud, not partial-load.
-        let tmp = tempfile::tempdir().unwrap();
-        let clawft = tmp.path().join(".clawft");
-        std::fs::create_dir_all(&clawft).unwrap();
-        std::fs::write(clawft.join("SOUL.md"), "soul only").unwrap();
+        let platform = mock_platform();
+        let workspace = PathBuf::from("/half-ws");
+        platform
+            .fs
+            .seed(workspace.join(".clawft").join("SOUL.md"), "soul only");
 
-        let loader = IdentityLoader::new(tmp.path());
-        assert!(loader.current().is_none());
+        let loader = IdentityLoader::new(&workspace, platform);
+        assert!(loader.current().await.is_none());
     }
 
-    #[test]
-    fn two_workspaces_load_distinct_identities() {
+    #[tokio::test]
+    async fn two_workspaces_load_distinct_identities() {
         // WEFT-83: configure two workspace roots with different identity
         // files; IdentityLoader (driven by agents.workspace_root) must
         // resolve each independently — not the process CWD.
-        let alpha = tempfile::tempdir().unwrap();
-        let beta = tempfile::tempdir().unwrap();
+        let platform = mock_platform();
+        let alpha = PathBuf::from("/ws-alpha");
+        let beta = PathBuf::from("/ws-beta");
         for (root, soul, id) in [
-            (alpha.path(), "soul-alpha", "id-alpha"),
-            (beta.path(), "soul-beta", "id-beta"),
+            (&alpha, "soul-alpha", "id-alpha"),
+            (&beta, "soul-beta", "id-beta"),
         ] {
             let clawft = root.join(".clawft");
-            std::fs::create_dir_all(&clawft).unwrap();
-            std::fs::write(clawft.join("SOUL.md"), soul).unwrap();
-            std::fs::write(clawft.join("IDENTITY.md"), id).unwrap();
+            platform.fs.seed(clawft.join("SOUL.md"), soul);
+            platform.fs.seed(clawft.join("IDENTITY.md"), id);
         }
 
         let mut cfg_alpha = clawft_types::config::AgentsConfig::default();
-        cfg_alpha.workspace_root = Some(alpha.path().to_path_buf());
+        cfg_alpha.workspace_root = Some(alpha.clone());
         let mut cfg_beta = clawft_types::config::AgentsConfig::default();
-        cfg_beta.workspace_root = Some(beta.path().to_path_buf());
+        cfg_beta.workspace_root = Some(beta.clone());
 
-        let loader_a = IdentityLoader::from_agents_config(&cfg_alpha).unwrap();
-        let loader_b = IdentityLoader::from_agents_config(&cfg_beta).unwrap();
+        let loader_a =
+            IdentityLoader::from_agents_config(&cfg_alpha, Arc::clone(&platform)).unwrap();
+        let loader_b =
+            IdentityLoader::from_agents_config(&cfg_beta, Arc::clone(&platform)).unwrap();
 
-        let id_a = loader_a.current().expect("alpha identity");
-        let id_b = loader_b.current().expect("beta identity");
+        let id_a = loader_a.current().await.expect("alpha identity");
+        let id_b = loader_b.current().await.expect("beta identity");
         assert_eq!(id_a.soul, "soul-alpha");
         assert_eq!(id_b.soul, "soul-beta");
         assert_ne!(id_a.hash, id_b.hash);
-        assert_eq!(loader_a.workspace(), alpha.path());
-        assert_eq!(loader_b.workspace(), beta.path());
+        assert_eq!(loader_a.workspace(), alpha.as_path());
+        assert_eq!(loader_b.workspace(), beta.as_path());
     }
 
     #[test]
@@ -436,7 +651,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let cfg = clawft_types::config::AgentsConfig::default();
         assert!(cfg.workspace_root.is_none());
-        let loader = IdentityLoader::from_agents_config(&cfg).unwrap();
+        let loader = IdentityLoader::from_agents_config(&cfg, mock_platform()).unwrap();
         assert_eq!(loader.workspace(), cwd.as_path());
     }
 
@@ -444,19 +659,19 @@ mod tests {
 
     #[tokio::test]
     async fn file_provider_loads_and_caches() {
-        let tmp = tempfile::tempdir().unwrap();
-        let clawft = tmp.path().join(".clawft");
-        std::fs::create_dir_all(&clawft).unwrap();
-        std::fs::write(clawft.join("SOUL.md"), "soul-1").unwrap();
-        std::fs::write(clawft.join("IDENTITY.md"), "id-1").unwrap();
+        let platform = mock_platform();
+        let workspace = PathBuf::from("/prov-ws");
+        let clawft = workspace.join(".clawft");
+        platform.fs.seed(clawft.join("SOUL.md"), "soul-1");
+        platform.fs.seed(clawft.join("IDENTITY.md"), "id-1");
 
-        let provider = FileIdentityProvider::new(tmp.path());
+        let provider = FileIdentityProvider::new(&workspace, Arc::clone(&platform));
         let first = provider.current().await.expect("first load");
         assert_eq!(first.soul, "soul-1");
 
         // Mutate the files between calls — provider must observe the
         // change because every call re-reads from disk.
-        std::fs::write(clawft.join("SOUL.md"), "soul-2").unwrap();
+        platform.fs.seed(clawft.join("SOUL.md"), "soul-2");
         let second = provider.current().await.expect("second load");
         assert_eq!(second.soul, "soul-2");
         assert_ne!(first.hash, second.hash);
@@ -464,18 +679,26 @@ mod tests {
 
     #[tokio::test]
     async fn file_provider_serves_cache_when_disk_disappears() {
-        let tmp = tempfile::tempdir().unwrap();
-        let clawft = tmp.path().join(".clawft");
-        std::fs::create_dir_all(&clawft).unwrap();
-        std::fs::write(clawft.join("SOUL.md"), "cached-soul").unwrap();
-        std::fs::write(clawft.join("IDENTITY.md"), "cached-id").unwrap();
+        let platform = mock_platform();
+        let workspace = PathBuf::from("/cache-ws");
+        let clawft = workspace.join(".clawft");
+        platform.fs.seed(clawft.join("SOUL.md"), "cached-soul");
+        platform.fs.seed(clawft.join("IDENTITY.md"), "cached-id");
 
-        let provider = FileIdentityProvider::new(tmp.path());
+        let provider = FileIdentityProvider::new(&workspace, Arc::clone(&platform));
         let first = provider.current().await.expect("warm cache");
 
         // Remove the files; the cache should still resolve.
-        std::fs::remove_file(clawft.join("SOUL.md")).unwrap();
-        std::fs::remove_file(clawft.join("IDENTITY.md")).unwrap();
+        platform
+            .fs()
+            .remove_file(&clawft.join("SOUL.md"))
+            .await
+            .unwrap();
+        platform
+            .fs()
+            .remove_file(&clawft.join("IDENTITY.md"))
+            .await
+            .unwrap();
 
         let cached = provider.current().await.expect("cache fallback");
         assert_eq!(cached.soul, first.soul);
@@ -484,8 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_provider_returns_not_found_with_no_cache() {
-        let tmp = tempfile::tempdir().unwrap();
-        let provider = FileIdentityProvider::new(tmp.path());
+        let provider = FileIdentityProvider::new(PathBuf::from("/missing"), mock_platform());
         let err = provider.current().await.unwrap_err();
         assert!(matches!(err, IdentityError::NotFound));
     }

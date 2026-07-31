@@ -729,7 +729,7 @@ pub fn build_browser_pipeline(
 pub async fn build_daemon_agent_loop(
     llm: Arc<clawft_service_llm::LlmClient>,
     tools: Arc<ToolRegistry>,
-    _identity_loader: Arc<crate::agent::identity::IdentityLoader>,
+    _identity_loader: Arc<crate::agent::identity::IdentityLoader<clawft_platform::NativePlatform>>,
     workspace: &std::path::Path,
     agent_id: Option<String>,
     context_router: Option<Arc<dyn crate::agent::context_router::ContextRouter>>,

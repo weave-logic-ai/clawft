@@ -1401,8 +1401,11 @@ pub async fn run(
             }
         };
 
+        // WEFT-95: identity reads go through Platform::fs (NativePlatform).
+        let identity_platform = Arc::new(NativePlatform::new());
         let identity_loader = Arc::new(clawft_core::agent::identity::IdentityLoader::new(
             &workspace,
+            Arc::clone(&identity_platform),
         ));
 
         // M4 Phase C.1: construct the subagent spawn substrate BEFORE
@@ -1754,7 +1757,10 @@ pub async fn run(
         // docs/skills/clawft fallback). The provider caches the most
         // recent successful load so cross-turn IO is cheap.
         let identity_provider: Arc<dyn clawft_core::agent::identity::IdentityProvider> = Arc::new(
-            clawft_core::agent::identity::FileIdentityProvider::new(&workspace),
+            clawft_core::agent::identity::FileIdentityProvider::new(
+                &workspace,
+                Arc::clone(&identity_platform),
+            ),
         );
 
         // agent-core-v1 Phase D2: register a single concierge
