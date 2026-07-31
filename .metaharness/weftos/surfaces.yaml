@@ -1,0 +1,43 @@
+# Machine-readable WeftOS data surfaces under MetaHarness governance (ADR-097)
+schema_version: 1
+plane: WEFT-728
+surfaces:
+  - id: fs.workspace
+    owner: repo-tools
+    policy_examples: [path_allowlists, gitignore]
+  - id: fs.artifacts
+    owner: splatd-graphify
+    policy_examples: [retention, pii_scrub]
+  - id: db.agentdb
+    owner: ruflo
+    policy_examples: [namespace_acl, pattern_keys]
+  - id: db.vector
+    owner: clawft-kernel
+    policy_examples: [index_id, hybrid_promote]
+  - id: sensor.local
+    owner: capture-edge
+    policy_examples: [sample_rate, window_caps]
+  - id: sensor.fusion_view
+    owner: graph-views
+    policy_examples: [viewspec, soft_edge, promote_gate]
+  - id: mesh.peer
+    owner: mesh
+    policy_examples: [trust, topic_acl]
+  - id: substrate.path
+    owner: substrate
+    policy_examples: [read_write_gates]
+  - id: chain.exochain
+    owner: chain
+    policy_examples: [mandatory_event_kinds]
+  - id: ecc.forest
+    owner: ecc
+    policy_examples: [impulse_vs_mutate]
+  - id: spatial.bvh
+    owner: clawft-bvh
+    policy_examples: [leaf_tags, vector_ref]
+  - id: wm.lewm
+    owner: weftos-worldmodel
+    policy_examples: [adr090_r1_r5]
+  - id: plane.board
+    owner: plane-dag
+    policy_examples: [claim_close_rules]
