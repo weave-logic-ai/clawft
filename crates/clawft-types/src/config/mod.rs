@@ -136,6 +136,23 @@ impl Default for PipelineConfig {
 }
 
 impl Config {
+    /// Product display brand (WEFT-176 white-label token).
+    ///
+    /// Delegates to [`KernelConfig::brand`]; defaults to
+    /// [`DEFAULT_BRAND`] (`"WeftOS"`).
+    pub fn brand(&self) -> &str {
+        self.kernel.brand()
+    }
+
+    /// Install this config's brand as the process-wide display token.
+    ///
+    /// Call after loading config so Discord identify, CLI help, and
+    /// boot banners pick up a custom brand without threading `Config`
+    /// through every call site.
+    pub fn install_brand(&self) {
+        install_brand(self.brand());
+    }
+
     /// Get the expanded workspace path.
     ///
     /// On native targets (with the `native` feature), this expands `~/` prefixes
@@ -896,6 +913,21 @@ mod tests {
         // Tool defaults
         assert_eq!(cfg.tools.exec_tool.timeout, 60);
         assert_eq!(cfg.tools.web.search.max_results, 5);
+
+        // WEFT-176 brand default
+        assert_eq!(cfg.brand(), DEFAULT_BRAND);
+        assert_eq!(cfg.kernel.brand(), "WeftOS");
+    }
+
+    #[test]
+    fn config_brand_installs_process_token() {
+        let mut cfg = Config::default();
+        cfg.kernel.brand = "Valtech Agentic Mesh".into();
+        assert_eq!(cfg.brand(), "Valtech Agentic Mesh");
+        cfg.install_brand();
+        assert_eq!(brand(), "Valtech Agentic Mesh");
+        reset_brand_for_test();
+        assert_eq!(brand(), DEFAULT_BRAND);
     }
 
     #[test]

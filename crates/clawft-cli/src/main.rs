@@ -26,11 +26,11 @@ mod mcp_tools;
 /// produced it — the load-bearing signal for the daemon-mismatch guard.
 const BUILD_VERSION: &str = env!("BUILD_VERSION");
 
-/// clawft AI assistant CLI.
+/// Product-branded AI assistant CLI (WEFT-176). Binary name stays `weft`.
 #[derive(Parser)]
 #[command(
     name = "weft",
-    about = "clawft AI assistant CLI",
+    about = "WeftOS AI assistant CLI",
     version = BUILD_VERSION,
     disable_help_subcommand = true
 )]
@@ -167,20 +167,6 @@ enum SessionsCmd {
     Delete {
         /// Session key to delete.
         session_id: String,
-
-        /// Config file path (overrides auto-discovery).
-        #[arg(short, long)]
-        config: Option<String>,
-    },
-
-    /// Remove legacy underscore-encoded session files after migration (WEFT-87).
-    ///
-    /// Only deletes a legacy `{channel}_{chat_id}.jsonl` when a matching
-    /// percent-encoded twin exists and the contents are identical.
-    Gc {
-        /// Show what would be removed without deleting.
-        #[arg(long)]
-        dry_run: bool,
 
         /// Config file path (overrides auto-discovery).
         #[arg(short, long)]
@@ -450,10 +436,6 @@ async fn main() -> anyhow::Result<()> {
                 SessionsCmd::Delete { session_id, config } => {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::sessions::sessions_delete(session_id, &cfg).await?;
-                }
-                SessionsCmd::Gc { dry_run, config } => {
-                    let cfg = commands::load_config(&platform, config.as_deref()).await?;
-                    commands::sessions::sessions_gc(dry_run, &cfg).await?;
                 }
             }
         }

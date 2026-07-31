@@ -7276,6 +7276,45 @@ async fn dispatch(
                 Response::error("crossref store not available")
             }
         }
+        // WEFT-125: operator introspection for the active vector backend.
+        // Returns live backend name + configured parameters so operators
+        // do not have to dig through TOML or trust the build alone.
+        #[cfg(feature = "ecc")]
+        "ecc.vector-config" => {
+            let k = kernel.read().await;
+            let cfg = k.kernel_config().vector.clone();
+            let (backend_name, vector_count, epoch, max_vectors) =
+                match k.ecc_vector_backend() {
+                    Some(vb) => (
+                        Some(vb.backend_name().to_string()),
+                        vb.len(),
+                        vb.current_epoch(),
+                        vb.max_vectors(),
+                    ),
+                    None => (None, 0, 0, None),
+                };
+            let configured_backend = cfg
+                .as_ref()
+                .map(|c| c.backend)
+                .unwrap_or_default();
+            let strict = cfg.as_ref().map(|c| c.strict).unwrap_or(false);
+            Response::success(serde_json::json!({
+                "active": backend_name.is_some(),
+                "backend": backend_name,
+                "configured_backend": configured_backend,
+                "strict": strict,
+                "vector_count": vector_count,
+                "epoch": epoch,
+                "max_vectors": max_vectors,
+                "parameters": {
+                    "hnsw": cfg.as_ref().and_then(|c| c.hnsw.clone()),
+                    "diskann": cfg.as_ref().and_then(|c| c.diskann.clone()),
+                    "hybrid": cfg.as_ref().and_then(|c| c.hybrid.clone()),
+                    "log_quantized": cfg.as_ref().and_then(|c| c.log_quantized.clone()),
+                    "simd_distance": cfg.as_ref().and_then(|c| c.simd_distance.clone()),
+                },
+            }))
+        }
         // ── ADR-067 P0: conversation graph export ──────────────────────
         //
         // `conversation.graph { conv_id, since?: u64, window?: {from_ts, to_ts} }`
@@ -8268,6 +8307,102 @@ mod tests {
             has_edge("TriggeredBy", &b_child_goal.to_string(), &a_uid1.to_string()),
             "cross-conv spawn edge present"
         );
+    }
+
+    /// WEFT-125: `ecc.vector-config` returns the live backend name plus the
+    /// configured parameters from `[kernel.vector]`.
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn ecc_vector_config_returns_active_backend_and_parameters() {
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{
+            Config, KernelConfig, VectorBackendKind, VectorConfig, VectorHnswConfig,
+        };
+        use std::sync::Arc;
+
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = KernelConfig::default();
+        kconfig.vector = Some(VectorConfig {
+            backend: VectorBackendKind::Hnsw,
+            strict: false,
+            hnsw: Some(VectorHnswConfig {
+                ef_construction: 128,
+                m: 12,
+                max_elements: 5_000,
+            }),
+            diskann: None,
+            hybrid: None,
+            log_quantized: None,
+            simd_distance: None,
+        });
+        let kernel = Kernel::boot(Config::default(), kconfig, platform)
+            .await
+            .expect("kernel boots with HNSW vector config");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        let resp = dispatch(
+            "ecc.vector-config".into(),
+            serde_json::json!({}),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok, "ecc.vector-config should succeed: {resp:?}");
+        let result = resp.result.expect("result present");
+
+        assert_eq!(result["active"], true, "vector backend should be active");
+        assert_eq!(
+            result["backend"].as_str(),
+            Some("hnsw"),
+            "live backend_name should be hnsw: {result}"
+        );
+        assert_eq!(
+            result["configured_backend"].as_str(),
+            Some("hnsw"),
+            "configured_backend from VectorConfig: {result}"
+        );
+        assert_eq!(result["strict"], false);
+        assert!(result["vector_count"].as_u64().is_some());
+        assert!(result["epoch"].as_u64().is_some());
+        assert_eq!(result["parameters"]["hnsw"]["ef_construction"], 128);
+        assert_eq!(result["parameters"]["hnsw"]["m"], 12);
+        assert_eq!(result["parameters"]["hnsw"]["max_elements"], 5_000);
+        assert!(result["parameters"]["diskann"].is_null());
+        assert!(result["parameters"]["hybrid"].is_null());
+    }
+
+    /// WEFT-125: default kernel still reports an active HNSW backend
+    /// (boot always constructs a vector backend when ecc is enabled).
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn ecc_vector_config_default_kernel_reports_hnsw() {
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{Config, KernelConfig};
+        use std::sync::Arc;
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        let resp = dispatch(
+            "ecc.vector-config".into(),
+            serde_json::json!({}),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("result");
+        assert_eq!(result["active"], true);
+        assert_eq!(result["backend"].as_str(), Some("hnsw"));
+        // No explicit [kernel.vector] → configured_backend is the default.
+        assert_eq!(result["configured_backend"].as_str(), Some("hnsw"));
     }
 
     /// A conversation with no nodes returns a well-formed empty graph, not an

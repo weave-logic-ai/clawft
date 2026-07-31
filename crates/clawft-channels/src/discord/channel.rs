@@ -277,8 +277,9 @@ impl DiscordChannel {
                                 intents: self.config.intents,
                                 properties: ConnectionProperties {
                                     os: std::env::consts::OS.to_owned(),
-                                    browser: "clawft".into(),
-                                    device: "clawft".into(),
+                                    // WEFT-176: product brand (defaults WeftOS).
+                                    browser: clawft_types::config::brand(),
+                                    device: clawft_types::config::brand(),
                                 },
                             })
                             .unwrap_or_default(),

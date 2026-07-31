@@ -425,13 +425,15 @@ mod tests {
 
     #[test]
     fn serialize_identify() {
+        // WEFT-176: browser/device come from the product brand accessor.
+        let brand = clawft_types::config::brand();
         let identify = IdentifyPayload {
             token: "my-token".into(),
             intents: DEFAULT_GATEWAY_INTENTS,
             properties: ConnectionProperties {
                 os: "linux".into(),
-                browser: "clawft".into(),
-                device: "clawft".into(),
+                browser: brand.clone(),
+                device: brand.clone(),
             },
         };
         let payload = GatewayPayload {
@@ -446,6 +448,32 @@ mod tests {
         assert_eq!(json["d"]["intents"], 37377);
         assert_eq!(json["d"]["intents"], DEFAULT_GATEWAY_INTENTS);
         assert_eq!(json["d"]["properties"]["os"], "linux");
+        assert_eq!(json["d"]["properties"]["browser"], brand);
+        assert_eq!(json["d"]["properties"]["device"], brand);
+    }
+
+    #[test]
+    fn identify_brand_is_configurable() {
+        use clawft_types::config::{install_brand, reset_brand_for_test};
+        install_brand("Valtech Agentic Mesh");
+        assert_eq!(clawft_types::config::brand(), "Valtech Agentic Mesh");
+        let identify = IdentifyPayload {
+            token: "t".into(),
+            intents: DEFAULT_GATEWAY_INTENTS,
+            properties: ConnectionProperties {
+                os: "linux".into(),
+                browser: clawft_types::config::brand(),
+                device: clawft_types::config::brand(),
+            },
+        };
+        let v = serde_json::to_value(&identify).unwrap();
+        assert_eq!(v["properties"]["browser"], "Valtech Agentic Mesh");
+        assert_eq!(v["properties"]["device"], "Valtech Agentic Mesh");
+        reset_brand_for_test();
+        assert_eq!(
+            clawft_types::config::brand(),
+            clawft_types::config::DEFAULT_BRAND
+        );
     }
 
     #[test]

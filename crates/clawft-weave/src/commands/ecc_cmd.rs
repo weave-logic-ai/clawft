@@ -43,6 +43,9 @@ pub enum EccCommand {
     },
     /// Show current tick statistics.
     Tick,
+    /// Show active vector backend config (WEFT-125).
+    #[command(name = "vector-config")]
+    VectorConfig,
 }
 
 pub async fn run(args: EccArgs) -> anyhow::Result<()> {
@@ -290,6 +293,62 @@ pub async fn run(args: EccArgs) -> anyhow::Result<()> {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
             );
+        }
+        EccCommand::VectorConfig => {
+            let resp = client.simple_call("ecc.vector-config").await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let result = resp.result.unwrap_or_default();
+            println!("ECC Vector Backend Config");
+            println!(
+                "  Active:              {}",
+                result
+                    .get("active")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            );
+            println!(
+                "  Live backend:        {}",
+                result
+                    .get("backend")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(none)")
+            );
+            println!(
+                "  Configured backend:  {}",
+                result
+                    .get("configured_backend")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("hnsw")
+            );
+            println!(
+                "  Strict:              {}",
+                result
+                    .get("strict")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            );
+            println!(
+                "  Vector count:        {}",
+                result
+                    .get("vector_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            );
+            println!(
+                "  Epoch:               {}",
+                result.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            if let Some(max) = result.get("max_vectors").filter(|v| !v.is_null()) {
+                println!("  Max vectors:         {max}");
+            } else {
+                println!("  Max vectors:         (unbounded)");
+            }
+            if let Some(params) = result.get("parameters") {
+                println!("  Parameters:");
+                println!("{}", serde_json::to_string_pretty(params)?);
+            }
         }
     }
 

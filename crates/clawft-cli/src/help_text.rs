@@ -5,7 +5,9 @@
 
 /// Return the general help overview (available commands and topics).
 pub fn general_help() -> String {
-    let mut output = String::from("weft -- clawft AI assistant CLI\n\n");
+    // WEFT-176: product brand for white-label (default WeftOS).
+    let brand = clawft_types::config::brand();
+    let mut output = format!("weft -- {brand} AI assistant CLI\n\n");
     output.push_str("Subcommands:\n");
     output.push_str("  agent          Start an interactive agent session or send a message\n");
     output.push_str("  gateway        Start channel gateway (Telegram, Slack, etc.)\n");
@@ -24,7 +26,9 @@ pub fn general_help() -> String {
     output.push_str("  workspace      Manage workspaces\n");
     output.push_str("  onboard        Initialize clawft config and workspace\n");
     output.push_str("  ui             Start the web dashboard\n");
-    output.push_str("  kernel         WeftOS kernel management (status, ps, boot)\n");
+    output.push_str(&format!(
+        "  kernel         {brand} kernel management (status, ps, boot)\n"
+    ));
     output.push_str("  help           Show help for a topic\n");
     output.push_str("  completions    Generate shell completions\n");
     output.push_str(
@@ -32,6 +36,37 @@ pub fn general_help() -> String {
     );
     output.push_str("  Run 'weft help <topic>' for more information on a topic.");
     output
+}
+
+#[cfg(test)]
+mod brand_tests {
+    use super::*;
+    use clawft_types::config::{install_brand, reset_brand_for_test, DEFAULT_BRAND};
+
+    #[test]
+    fn general_help_uses_default_brand() {
+        reset_brand_for_test();
+        let help = general_help();
+        assert!(
+            help.contains(&format!("weft -- {DEFAULT_BRAND} AI assistant CLI")),
+            "default brand missing from help: {help}"
+        );
+    }
+
+    #[test]
+    fn general_help_respects_installed_brand() {
+        install_brand("Valtech Agentic Mesh");
+        let help = general_help();
+        assert!(
+            help.contains("weft -- Valtech Agentic Mesh AI assistant CLI"),
+            "custom brand missing from help: {help}"
+        );
+        assert!(
+            help.contains("Valtech Agentic Mesh kernel management"),
+            "custom brand missing from kernel line: {help}"
+        );
+        reset_brand_for_test();
+    }
 }
 
 /// Return help text for a known topic, or an error message for an unknown one.

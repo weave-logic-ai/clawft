@@ -21,6 +21,60 @@ fn default_enabled() -> bool {
     true
 }
 
+/// Default product display brand (white-label token). WEFT-176.
+pub const DEFAULT_BRAND: &str = "WeftOS";
+
+fn default_brand() -> String {
+    DEFAULT_BRAND.to_string()
+}
+
+/// Process-wide brand slot (set from loaded config at boot / CLI entry).
+fn process_brand_slot() -> &'static std::sync::RwLock<String> {
+    use std::sync::{OnceLock, RwLock};
+    static SLOT: OnceLock<RwLock<String>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(DEFAULT_BRAND.to_string()))
+}
+
+/// Install the process-wide product brand (call after config load).
+///
+/// Empty / whitespace values fall back to [`DEFAULT_BRAND`].
+pub fn install_brand(brand: &str) {
+    let value = {
+        let t = brand.trim();
+        if t.is_empty() {
+            DEFAULT_BRAND
+        } else {
+            t
+        }
+    };
+    if let Ok(mut guard) = process_brand_slot().write() {
+        *guard = value.to_string();
+    }
+}
+
+/// Process-wide display brand for white-label surfaces (CLI help, Discord
+/// identify, boot banner). Defaults to [`DEFAULT_BRAND`] until
+/// [`install_brand`] is called.
+///
+/// Prefer [`KernelConfig::brand`] / [`super::Config::brand`] when a
+/// loaded config is in hand; use this free function on hot paths that
+/// only need the installed process token (e.g. Discord gateway identify).
+pub fn brand() -> String {
+    process_brand_slot()
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| DEFAULT_BRAND.to_string())
+}
+
+/// Reset process brand to [`DEFAULT_BRAND`].
+///
+/// Intended for tests in this crate and dependents (Discord identify,
+/// CLI help). Safe to call from production — equivalent to
+/// `install_brand(DEFAULT_BRAND)`.
+pub fn reset_brand_for_test() {
+    install_brand(DEFAULT_BRAND);
+}
+
 /// Cluster networking configuration for distributed WeftOS nodes.
 ///
 /// Controls the ruvector-powered clustering layer that coordinates
@@ -132,6 +186,14 @@ pub struct KernelConfig {
     )]
     pub health_check_interval_secs: u64,
 
+    /// Product display brand for white-label deployments (WEFT-176).
+    ///
+    /// Used by Discord identify (`browser` / `device`), CLI help text,
+    /// boot banners, and the web UI header. Defaults to `"WeftOS"`.
+    /// Binary/crate names are unchanged — this is display-only.
+    #[serde(default = "default_brand")]
+    pub brand: String,
+
     /// Cluster networking configuration (native coordinator nodes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<ClusterNetworkConfig>,
@@ -213,6 +275,7 @@ impl Default for KernelConfig {
             enabled: true,
             max_processes: default_max_processes(),
             health_check_interval_secs: default_health_check_interval_secs(),
+            brand: default_brand(),
             cluster: None,
             chain: None,
             resource_tree: None,
@@ -224,6 +287,19 @@ impl Default for KernelConfig {
             ipc_tcp: None,
             llm: None,
             agent: None,
+        }
+    }
+}
+
+impl KernelConfig {
+    /// Display brand token; empty / whitespace values fall back to
+    /// [`DEFAULT_BRAND`].
+    pub fn brand(&self) -> &str {
+        let t = self.brand.trim();
+        if t.is_empty() {
+            DEFAULT_BRAND
+        } else {
+            t
         }
     }
 }
@@ -1410,11 +1486,43 @@ mod tests {
     }
 
     #[test]
+    fn brand_defaults_to_weftos() {
+        let cfg = KernelConfig::default();
+        assert_eq!(cfg.brand(), DEFAULT_BRAND);
+        assert_eq!(cfg.brand, "WeftOS");
+        let empty: KernelConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.brand(), DEFAULT_BRAND);
+    }
+
+    #[test]
+    fn brand_accessor_is_configurable() {
+        let mut cfg = KernelConfig::default();
+        cfg.brand = "Valtech Agentic Mesh".into();
+        assert_eq!(cfg.brand(), "Valtech Agentic Mesh");
+        cfg.brand = "   ".into();
+        assert_eq!(cfg.brand(), DEFAULT_BRAND, "whitespace falls back");
+        let json = r#"{"brand": "Acme OS"}"#;
+        let parsed: KernelConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.brand(), "Acme OS");
+    }
+
+    #[test]
+    fn process_brand_install_and_reset() {
+        install_brand("Custom Brand");
+        assert_eq!(brand(), "Custom Brand");
+        install_brand("");
+        assert_eq!(brand(), DEFAULT_BRAND);
+        reset_brand_for_test();
+        assert_eq!(brand(), DEFAULT_BRAND);
+    }
+
+    #[test]
     fn serde_roundtrip() {
         let cfg = KernelConfig {
             enabled: true,
             max_processes: 256,
             health_check_interval_secs: 10,
+            brand: "WeftOS".into(),
             cluster: None,
             chain: None,
             resource_tree: None,
@@ -1431,6 +1539,7 @@ mod tests {
         let restored: KernelConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.enabled, cfg.enabled);
         assert_eq!(restored.max_processes, cfg.max_processes);
+        assert_eq!(restored.brand(), cfg.brand());
     }
 
     #[test]

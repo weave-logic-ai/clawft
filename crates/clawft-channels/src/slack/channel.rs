@@ -292,8 +292,11 @@ impl SlackChannel {
                     msg = ws_read.next() => {
                         match msg {
                             Some(Ok(WsMessage::Text(text))) => {
-                                // Try to parse as an envelope.
-                                match serde_json::from_str::<SlackEnvelope>(&text) {
+                                // Try to parse as an envelope. Parse
+                                // failures bump slack.unknown_envelope
+                                // (WEFT-174) so Slack API drift is
+                                // observable rather than silent.
+                                match super::metrics::parse_socket_envelope(&text) {
                                     Ok(envelope) => {
                                         // Acknowledge the envelope.
                                         let ack = SlackAcknowledge {
@@ -323,7 +326,14 @@ impl SlackChannel {
                                     }
                                     Err(_) => {
                                         // May be a hello or disconnect message.
-                                        debug!(raw = %text, "received non-envelope message");
+                                        // Counter already incremented by
+                                        // parse_socket_envelope.
+                                        debug!(
+                                            raw = %text,
+                                            metric = super::metrics::METRIC_UNKNOWN_ENVELOPE,
+                                            count = super::metrics::unknown_envelope_count(),
+                                            "received non-envelope message"
+                                        );
                                     }
                                 }
                             }

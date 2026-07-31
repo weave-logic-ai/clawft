@@ -355,6 +355,13 @@ fn fetch_webpage(
 /// Chain event kind for URL ingestion.
 pub const EVENT_KIND_GRAPHIFY_INGEST: &str = "graphify.ingest";
 
+/// Chain event kind for saved Q&A query results (WEFT-153).
+///
+/// Emitted by [`save_query_result`]. Mirrors
+/// `clawft_kernel::chain::EVENT_KIND_GRAPHIFY_QUERY_RESULT` and
+/// `clawft_core::chain_event::EVENT_KIND_GRAPHIFY_QUERY_RESULT`.
+pub const EVENT_KIND_GRAPHIFY_QUERY_RESULT: &str = "graphify.query_result";
+
 /// Ingest a URL: fetch, classify, and save to `target_dir`.
 pub fn ingest(
     url: &str,
@@ -506,6 +513,19 @@ pub fn save_query_result(
     let content = lines.join("\n");
     let out_path = memory_dir.join(&filename);
     std::fs::write(&out_path, &content)?;
+
+    // Chain event marker — daemon subscriber forwards to ExoChain (WEFT-153).
+    let source_node_count = source_nodes.map(|n| n.len()).unwrap_or(0);
+    tracing::info!(
+        target: "chain_event",
+        source = "graphify",
+        kind = EVENT_KIND_GRAPHIFY_QUERY_RESULT,
+        query_type = query_type,
+        path = %out_path.display(),
+        source_node_count = source_node_count,
+        "chain"
+    );
+
     Ok(out_path)
 }
 
@@ -613,6 +633,30 @@ mod tests {
         assert!(content.contains("AuthService"));
         assert!(content.contains("question:"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WEFT-153: save_query_result emits graphify.query_result chain kind.
+    #[test]
+    fn save_query_result_emits_chain_event_kind() {
+        // Constant must stay aligned with clawft-kernel / clawft-core.
+        assert_eq!(EVENT_KIND_GRAPHIFY_QUERY_RESULT, "graphify.query_result");
+
+        let dir = std::env::temp_dir().join("graphify_test_query_chain");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Smoke: write succeeds (chain emission is via tracing target;
+        // full bridge coverage is in clawft-weave). Kind constant is the
+        // contract under test here.
+        let path = save_query_result(
+            "What emits the chain event?",
+            "save_query_result does.",
+            &dir,
+            "query",
+            Some(&["GraphifyIngest".to_string()]),
+        )
+        .unwrap();
+        assert!(path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

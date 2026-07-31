@@ -60,9 +60,11 @@ impl SandboxEnforcer {
     /// Validate a tool invocation.
     ///
     /// Returns `Ok(())` if the tool is allowed, or `Err` with a reason.
+    /// Emits a `sandbox.execute` chain event (WEFT-153).
     pub fn check_tool(&self, tool_name: &str) -> Result<(), String> {
         let allowed = self.policy.is_tool_allowed(tool_name);
         self.log_decision("tool_invoke", tool_name, allowed, "tool not in allowlist");
+        self.emit_sandbox_chain_event("tool_invoke", tool_name, allowed);
         if allowed {
             Ok(())
         } else {
@@ -74,9 +76,12 @@ impl SandboxEnforcer {
     }
 
     /// Validate a network connection.
+    ///
+    /// Emits a `sandbox.execute` chain event (WEFT-153).
     pub fn check_network(&self, domain: &str) -> Result<(), String> {
         let allowed = self.policy.is_domain_allowed(domain);
         self.log_decision("network_connect", domain, allowed, "domain not allowed");
+        self.emit_sandbox_chain_event("network_connect", domain, allowed);
         if allowed {
             Ok(())
         } else {
@@ -88,10 +93,13 @@ impl SandboxEnforcer {
     }
 
     /// Validate a file read operation.
+    ///
+    /// Emits a `sandbox.execute` chain event (WEFT-153).
     pub fn check_file_read(&self, path: &std::path::Path) -> Result<(), String> {
         let path_str = path.to_string_lossy();
         let allowed = self.policy.is_path_readable(path);
         self.log_decision("file_read", &path_str, allowed, "path not readable");
+        self.emit_sandbox_chain_event("file_read", &path_str, allowed);
         if allowed {
             Ok(())
         } else {
@@ -103,10 +111,13 @@ impl SandboxEnforcer {
     }
 
     /// Validate a file write operation.
+    ///
+    /// Emits a `sandbox.execute` chain event (WEFT-153).
     pub fn check_file_write(&self, path: &std::path::Path) -> Result<(), String> {
         let path_str = path.to_string_lossy();
         let allowed = self.policy.is_path_writable(path);
         self.log_decision("file_write", &path_str, allowed, "path not writable");
+        self.emit_sandbox_chain_event("file_write", &path_str, allowed);
         if allowed {
             Ok(())
         } else {
@@ -115,6 +126,25 @@ impl SandboxEnforcer {
                 self.policy.agent_id, path_str
             ))
         }
+    }
+
+    /// Emit a sandbox chain event for ExoChain auditing (WEFT-153).
+    ///
+    /// Mirrors the pattern used by [`Self::check_command`]: the daemon
+    /// subscriber forwards `EVENT_KIND_SANDBOX_EXECUTE` to
+    /// `ChainManager::append("sandbox", ...)`.
+    fn emit_sandbox_chain_event(&self, action: &str, target: &str, allowed: bool) {
+        // Bare identifiers as keys so stringify!($key) yields clean names.
+        crate::chain_event!(
+            "sandbox",
+            crate::chain_event::EVENT_KIND_SANDBOX_EXECUTE,
+            {
+                agent_id: self.policy.agent_id,
+                action: action,
+                target: target,
+                allowed: allowed
+            }
+        );
     }
 
     /// Validate a command execution.
@@ -406,6 +436,59 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert!(entries[0].allowed);
         assert!(!entries[1].allowed);
+    }
+
+    /// WEFT-153: check_tool|network|file_read|file_write emit sandbox.execute.
+    #[test]
+    fn sandbox_checks_emit_chain_events() {
+        crate::chain_event::drain_pending_chain_events();
+
+        let enforcer = SandboxEnforcer::new(test_policy());
+        let _ = enforcer.check_tool("read_file");
+        let _ = enforcer.check_network("api.example.com");
+        let _ = enforcer.check_network("evil.com");
+
+        let read_dir = tempfile::tempdir().unwrap();
+        let target = read_dir.path().join("main.rs");
+        std::fs::write(&target, b"fn main() {}").unwrap();
+        let enforcer_fs =
+            SandboxEnforcer::new(test_policy_with_dirs(read_dir.path(), read_dir.path()));
+        let _ = enforcer_fs.check_file_read(&target);
+        let _ = enforcer_fs.check_file_write(std::path::Path::new("/etc/config"));
+
+        let events = crate::chain_event::drain_pending_chain_events();
+        let sandbox_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == crate::chain_event::EVENT_KIND_SANDBOX_EXECUTE)
+            .collect();
+        // tool allow + network allow + network deny + file_read allow + file_write deny
+        assert!(
+            sandbox_events.len() >= 5,
+            "expected ≥5 sandbox.execute events, got {}: {:?}",
+            sandbox_events.len(),
+            sandbox_events
+                .iter()
+                .map(|e| e.payload.as_ref().and_then(|p| p.get("action")).cloned())
+                .collect::<Vec<_>>()
+        );
+        for e in &sandbox_events {
+            assert_eq!(e.source, "sandbox");
+            assert!(e.payload.is_some());
+        }
+        let actions: Vec<String> = sandbox_events
+            .iter()
+            .filter_map(|e| {
+                e.payload
+                    .as_ref()
+                    .and_then(|p| p.get("action"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .collect();
+        assert!(actions.iter().any(|a| a == "tool_invoke"));
+        assert!(actions.iter().any(|a| a == "network_connect"));
+        assert!(actions.iter().any(|a| a == "file_read"));
+        assert!(actions.iter().any(|a| a == "file_write"));
     }
 
     #[test]

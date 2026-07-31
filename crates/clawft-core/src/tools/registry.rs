@@ -514,11 +514,32 @@ impl ToolRegistry {
 
     /// Register a tool with explicit metadata (used for MCP tools whose
     /// metadata comes from JSON declarations rather than the Rust trait).
+    ///
+    /// Emits [`EVENT_KIND_TOOL_REGISTER_METADATA`](crate::chain_event::EVENT_KIND_TOOL_REGISTER_METADATA)
+    /// so the daemon chain bridge records the registration (WEFT-153).
     pub fn register_with_metadata(&mut self, tool: Arc<dyn Tool>, metadata: ToolMetadata) {
         let name = tool.name().to_string();
         debug!(tool = %name, "registering tool with metadata");
+        let permission_level = metadata
+            .required_permission_level
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "none".into());
         self.metadata.insert(name.clone(), metadata);
-        self.tools.insert(name, tool);
+        self.tools.insert(name.clone(), tool);
+
+        // Chain event marker — distinct from plain `tool.register` so auditors
+        // can tell metadata-bearing MCP registrations apart (WEFT-153).
+        // Use bare identifiers as keys so stringify!($key) yields clean names
+        // (quoted string keys become `"\"tool_name\""` under the macro).
+        crate::chain_event!(
+            "tools",
+            crate::chain_event::EVENT_KIND_TOOL_REGISTER_METADATA,
+            {
+                tool_name: name,
+                has_metadata: true,
+                permission_level: permission_level
+            }
+        );
     }
 
     /// Check if a tool with the given name is registered.
@@ -1448,6 +1469,42 @@ mod tests {
 
         let stored = registry.get_metadata("echo").unwrap();
         assert_eq!(stored.required_permission_level, Some(2));
+    }
+
+    /// WEFT-153: register_with_metadata emits tool.register.metadata chain event.
+    #[test]
+    fn test_register_with_metadata_emits_chain_event() {
+        crate::chain_event::drain_pending_chain_events();
+
+        let mut registry = ToolRegistry::new();
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        registry.register_with_metadata(Arc::new(EchoTool), meta);
+
+        let events = crate::chain_event::drain_pending_chain_events();
+        let meta_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == crate::chain_event::EVENT_KIND_TOOL_REGISTER_METADATA)
+            .collect();
+        assert_eq!(
+            meta_events.len(),
+            1,
+            "expected one tool.register.metadata event, got {events:?}"
+        );
+        assert_eq!(meta_events[0].source, "tools");
+        let payload = meta_events[0].payload.as_ref().unwrap();
+        // chain_event! formats values via format!("{}"), so they are strings.
+        assert_eq!(payload.get("tool_name").and_then(|v| v.as_str()), Some("echo"));
+        assert_eq!(
+            payload.get("has_metadata").and_then(|v| v.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            payload.get("permission_level").and_then(|v| v.as_str()),
+            Some("2")
+        );
     }
 
     #[tokio::test]

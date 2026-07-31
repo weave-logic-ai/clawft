@@ -415,9 +415,14 @@ impl std::fmt::Debug for KernelEventLog {
 /// On platforms without OS sandbox support (macOS, etc.), appends a clear
 /// WARN line so operators know `OsSandbox`/`Combined` policies are reduced
 /// to WASM-only isolation (WEFT-70).
+///
+/// Brand text comes from [`clawft_types::config::brand`] (WEFT-176).
 pub fn boot_banner() -> String {
+    let brand = clawft_types::config::brand();
     let mut output = String::new();
-    output.push_str("\n  WeftOS v");
+    output.push_str("\n  ");
+    output.push_str(&brand);
+    output.push_str(" v");
     output.push_str(env!("CARGO_PKG_VERSION"));
     output.push('\n');
     output.push_str("  ");

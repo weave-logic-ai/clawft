@@ -293,6 +293,24 @@ pub const EVENT_KIND_TOOL_DEPLOYED: &str = "tool.deploy";
 /// Tool version revocation event.
 pub const EVENT_KIND_TOOL_VERSION_REVOKED: &str = "tool.version.revoke";
 
+/// TileZero gate permitted an action (WEFT-152).
+///
+/// Emitted by [`crate::gate::TileZeroGate`] when `cognitum-gate-tilezero`
+/// returns `Permit`. Payload: `agent_id`, `action`, `sequence`, `witness_hash`.
+pub const EVENT_KIND_GATE_PERMIT: &str = "gate.permit";
+
+/// TileZero gate deferred an action for review (WEFT-152).
+///
+/// Emitted when coherence is uncertain. Payload: `agent_id`, `action`,
+/// `sequence`, `witness_hash`.
+pub const EVENT_KIND_GATE_DEFER: &str = "gate.defer";
+
+/// TileZero gate denied an action (WEFT-152).
+///
+/// Emitted when coherence is below threshold. Payload: `agent_id`, `action`,
+/// `sequence`, `witness_hash`.
+pub const EVENT_KIND_GATE_DENY: &str = "gate.deny";
+
 /// Sandbox sudo override event (k3:D12).
 ///
 /// Emitted when a sudo override bypasses environment sandbox restrictions.
@@ -589,15 +607,8 @@ pub const EVENT_KIND_SANDBOX_EXECUTE: &str = "sandbox.execute";
 ///
 /// Emitted when a new conversation session is created.
 /// The payload should include `key`.
-pub const EVENT_KIND_SESSION_CREATE: &str = "session.create";
-
-/// Session turn-appended event (WEFT-85 / MW-7).
-///
-/// Emitted when a conversation turn is appended to a session via
-/// `SessionManager::append_turn`. Payload should include `key`, `role`,
-/// and `turn_count` (not message content). Subject to the manager's
-/// optional sample-rate cap (`append_event_every_n`).
 pub const EVENT_KIND_SESSION_APPEND: &str = "session.append";
+pub const EVENT_KIND_SESSION_CREATE: &str = "session.create";
 
 /// Session destroyed event.
 ///
@@ -649,6 +660,19 @@ pub const EVENT_KIND_GRAPHIFY_PIPELINE: &str = "graphify.pipeline";
 /// or uninstalled.
 /// The payload should include `repo_root`, `action` (install / uninstall).
 pub const EVENT_KIND_GRAPHIFY_HOOK: &str = "graphify.hook";
+
+/// Graphify Q&A query result saved for re-extraction (WEFT-153).
+///
+/// Emitted when `save_query_result` writes a markdown Q&A artifact.
+/// The payload should include `query_type`, `path`, `source_node_count`.
+pub const EVENT_KIND_GRAPHIFY_QUERY_RESULT: &str = "graphify.query_result";
+
+/// Tool registered with explicit metadata (WEFT-153).
+///
+/// Emitted by non-kernel `ToolRegistry::register_with_metadata` (MCP tools
+/// whose metadata comes from JSON declarations). Payload: `tool_name`,
+/// `has_metadata`.
+pub const EVENT_KIND_TOOL_REGISTER_METADATA: &str = "tool.register.metadata";
 
 /// Project initialised.
 ///

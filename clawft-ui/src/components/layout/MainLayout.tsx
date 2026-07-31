@@ -10,6 +10,8 @@ import { TalkModeOverlay } from "../voice/talk-overlay";
 import { useBackend } from "../../lib/use-backend.ts";
 import type { BackendCapabilities } from "../../lib/backend-adapter.ts";
 import { CommandPalette, type PaletteItem } from "./command-palette";
+import { brand as productBrand } from "../../lib/brand";
+import { useConfigStore } from "../../stores/config-store";
 
 interface NavItem {
   path: string;
@@ -43,6 +45,16 @@ export function MainLayout() {
   const { wsConnected, setWsConnected } = useAgentStore();
   const { capabilities, mode } = useBackend();
   const navigate = useNavigate();
+  // WEFT-176: product brand from config (defaults WeftOS).
+  const config = useConfigStore((s) => s.config);
+  const fetchConfig = useConfigStore((s) => s.fetchConfig);
+  const displayBrand = productBrand(config);
+
+  useEffect(() => {
+    if (!config) {
+      void fetchConfig();
+    }
+  }, [config, fetchConfig]);
 
   // Filter nav items based on backend capabilities
   const visibleNavItems = useMemo(
@@ -141,7 +153,7 @@ export function MainLayout() {
         <div className="flex items-center justify-between border-b border-gray-200 p-4 dark:border-gray-700">
           {!collapsed && (
             <span className="text-lg font-bold text-gray-900 dark:text-gray-100">
-              ClawFT
+              {displayBrand}
             </span>
           )}
           <button

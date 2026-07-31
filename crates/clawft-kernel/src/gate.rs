@@ -5,6 +5,33 @@
 //! `CapabilityChecker` (binary Permit/Deny). When the `tilezero`
 //! feature is enabled, `TileZeroGate` adds three-way decisions
 //! (Permit/Defer/Deny) with cryptographic receipts logged to the chain.
+//!
+//! # TileZero receipt format (WEFT-152)
+//!
+//! When `TileZeroGate` decides, it serializes the
+//! `cognitum_gate_tilezero::PermitToken` to JSON bytes and attaches them
+//! as the opaque `token` (Permit) or `receipt` (Deny) field on
+//! [`GateDecision`]. Defer carries only a human-readable `reason`.
+//!
+//! ## PermitToken fields
+//!
+//! | Field | Type | Description |
+//! |-------|------|-------------|
+//! | `decision` | enum | `Permit` / `Defer` / `Deny` |
+//! | `action_id` | string (UUID) | Unique action identifier |
+//! | `timestamp` | u64 ns | Issue time (Unix epoch nanoseconds) |
+//! | `ttl_ns` | u64 | Validity window (default 60s) |
+//! | `witness_hash` | `[u8; 32]` hex | BLAKE3 hash of the three-filter witness summary |
+//! | `sequence` | u64 | Monotonic gate sequence |
+//! | `signature` | `[u8; 64]` hex | Ed25519 signature over signable content |
+//!
+//! ## Chain event kinds
+//!
+//! Each decision appends one of
+//! [`EVENT_KIND_GATE_PERMIT`](crate::chain::EVENT_KIND_GATE_PERMIT),
+//! [`EVENT_KIND_GATE_DEFER`](crate::chain::EVENT_KIND_GATE_DEFER), or
+//! [`EVENT_KIND_GATE_DENY`](crate::chain::EVENT_KIND_GATE_DENY) with payload
+//! `{ agent_id, action, sequence, witness_hash }`.
 
 use serde::{Deserialize, Serialize};
 
@@ -232,12 +259,12 @@ mod tilezero_gate {
                 },
             };
 
-            // Log to chain.
+            // Log to chain (WEFT-152: canonical EVENT_KIND_GATE_* kinds).
             if let Some(ref cm) = self.chain {
                 let event_kind = match &decision {
-                    GateDecision::Permit { .. } => "gate.permit",
-                    GateDecision::Defer { .. } => "gate.defer",
-                    GateDecision::Deny { .. } => "gate.deny",
+                    GateDecision::Permit { .. } => crate::chain::EVENT_KIND_GATE_PERMIT,
+                    GateDecision::Defer { .. } => crate::chain::EVENT_KIND_GATE_DEFER,
+                    GateDecision::Deny { .. } => crate::chain::EVENT_KIND_GATE_DENY,
                 };
                 cm.append(
                     "gate",
@@ -1044,20 +1071,58 @@ mod tests {
 
 #[cfg(all(test, feature = "tilezero"))]
 mod tilezero_tests {
+    //! WEFT-152: exercise cognitum-gate-tilezero Permit/Defer/Deny paths
+    //! through `TileZeroGate`, including cryptographic token bytes and
+    //! chain event kinds.
     use super::*;
+    use cognitum_gate_tilezero::GateThresholds;
     use std::sync::Arc;
 
+    /// Default thresholds: empty ReducedGraph starts at cut=100, e=100,
+    /// shift=0 → structural OK, shift OK, evidence Accept → **Permit**.
     fn make_tilezero_gate() -> TileZeroGate {
-        let thresholds = cognitum_gate_tilezero::GateThresholds::default();
-        let tz = Arc::new(cognitum_gate_tilezero::TileZero::new(thresholds));
+        let tz = Arc::new(cognitum_gate_tilezero::TileZero::new(
+            GateThresholds::default(),
+        ));
         TileZeroGate::new(tz, None)
     }
 
-    fn make_tilezero_gate_with_chain() -> TileZeroGate {
-        let thresholds = cognitum_gate_tilezero::GateThresholds::default();
+    fn make_tilezero_gate_with(
+        thresholds: GateThresholds,
+        with_chain: bool,
+    ) -> TileZeroGate {
         let tz = Arc::new(cognitum_gate_tilezero::TileZero::new(thresholds));
-        let cm = Arc::new(crate::chain::ChainManager::new(0, 10));
-        TileZeroGate::new(tz, Some(cm))
+        let chain = if with_chain {
+            Some(Arc::new(crate::chain::ChainManager::new(0, 10)))
+        } else {
+            None
+        };
+        TileZeroGate::new(tz, chain)
+    }
+
+    fn make_tilezero_gate_with_chain() -> TileZeroGate {
+        make_tilezero_gate_with(GateThresholds::default(), true)
+    }
+
+    /// Thresholds that force **Deny** via the structural filter:
+    /// empty graph cut=100 < min_cut=1000.
+    fn deny_thresholds() -> GateThresholds {
+        GateThresholds {
+            min_cut: 1000.0,
+            ..GateThresholds::default()
+        }
+    }
+
+    /// Thresholds that force **Defer** via the evidence filter:
+    /// e=100 sits between tau_deny and tau_permit → Continue → Defer.
+    fn defer_thresholds() -> GateThresholds {
+        GateThresholds {
+            tau_deny: 0.01,
+            tau_permit: 200.0, // e=100 is below this → Continue
+            min_cut: 5.0,      // structural still OK (cut=100)
+            max_shift: 0.5,    // shift still OK (shift=0)
+            ..GateThresholds::default()
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1065,13 +1130,99 @@ mod tilezero_tests {
         let gate = make_tilezero_gate();
         let ctx = serde_json::json!({"pid": 1});
         let decision = gate.check("test-agent", "tool.read_file", &ctx);
-        // With default thresholds and empty graph, TileZero makes a
-        // deterministic decision. We just verify it's one of the three.
+        // Default empty graph → Permit (see module docs / make helpers).
         assert!(
-            decision.is_permit()
-                || decision.is_deny()
-                || matches!(decision, GateDecision::Defer { .. })
+            decision.is_permit(),
+            "default thresholds should Permit, got {decision:?}"
         );
+    }
+
+    /// WEFT-152: explicit Permit path with serialized PermitToken receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tilezero_gate_permit_path() {
+        let gate = make_tilezero_gate_with(GateThresholds::default(), true);
+        let ctx = serde_json::json!({"session_id": "s-permit"});
+        let decision = gate.check("agent-permit", "tool.read_file", &ctx);
+
+        match &decision {
+            GateDecision::Permit { token } => {
+                let bytes = token.as_ref().expect("Permit must carry token bytes");
+                let pt: cognitum_gate_tilezero::PermitToken =
+                    serde_json::from_slice(bytes).expect("token JSON must deserialize");
+                assert_eq!(pt.decision, cognitum_gate_tilezero::GateDecision::Permit);
+                assert_eq!(pt.sequence, 0);
+                // Ed25519 signature is non-zero after signing.
+                assert!(pt.signature.iter().any(|&b| b != 0), "signature must be set");
+                // witness_hash is 32 bytes (hex-serialized as [u8;32]).
+                assert_eq!(pt.witness_hash.len(), 32);
+            }
+            other => panic!("expected Permit, got {other:?}"),
+        }
+
+        let chain = gate.chain().unwrap();
+        let events = chain.tail(1);
+        assert_eq!(events[0].kind, crate::chain::EVENT_KIND_GATE_PERMIT);
+        assert_eq!(events[0].source, "gate");
+        let payload = events[0].payload.as_ref().unwrap();
+        assert_eq!(payload["agent_id"], "agent-permit");
+        assert_eq!(payload["action"], "tool.read_file");
+        assert!(payload.get("sequence").is_some());
+        assert!(payload.get("witness_hash").is_some());
+    }
+
+    /// WEFT-152: explicit Defer path (evidence Continue band).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tilezero_gate_defer_path() {
+        let gate = make_tilezero_gate_with(defer_thresholds(), true);
+        let ctx = serde_json::json!({});
+        let decision = gate.check("agent-defer", "tool.review", &ctx);
+
+        match &decision {
+            GateDecision::Defer { reason } => {
+                assert!(
+                    reason.contains("TileZero deferred"),
+                    "defer reason should mention TileZero: {reason}"
+                );
+                assert!(
+                    reason.contains("seq="),
+                    "defer reason should include sequence: {reason}"
+                );
+            }
+            other => panic!("expected Defer, got {other:?}"),
+        }
+
+        let chain = gate.chain().unwrap();
+        let events = chain.tail(1);
+        assert_eq!(events[0].kind, crate::chain::EVENT_KIND_GATE_DEFER);
+        assert_eq!(events[0].payload.as_ref().unwrap()["agent_id"], "agent-defer");
+    }
+
+    /// WEFT-152: explicit Deny path (structural min_cut failure) with receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tilezero_gate_deny_path() {
+        let gate = make_tilezero_gate_with(deny_thresholds(), true);
+        let ctx = serde_json::json!({});
+        let decision = gate.check("agent-deny", "tool.danger", &ctx);
+
+        match &decision {
+            GateDecision::Deny { reason, receipt } => {
+                assert!(
+                    reason.contains("TileZero denied"),
+                    "deny reason should mention TileZero: {reason}"
+                );
+                let bytes = receipt.as_ref().expect("Deny must carry receipt bytes");
+                let pt: cognitum_gate_tilezero::PermitToken =
+                    serde_json::from_slice(bytes).expect("receipt JSON must deserialize");
+                assert_eq!(pt.decision, cognitum_gate_tilezero::GateDecision::Deny);
+                assert!(pt.signature.iter().any(|&b| b != 0));
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+
+        let chain = gate.chain().unwrap();
+        let events = chain.tail(1);
+        assert_eq!(events[0].kind, crate::chain::EVENT_KIND_GATE_DENY);
+        assert_eq!(events[0].payload.as_ref().unwrap()["action"], "tool.danger");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1089,6 +1240,7 @@ mod tilezero_tests {
                 let pt: cognitum_gate_tilezero::PermitToken =
                     serde_json::from_slice(bytes).unwrap();
                 assert_eq!(pt.sequence, 0);
+                assert_eq!(pt.decision, cognitum_gate_tilezero::GateDecision::Permit);
             }
             GateDecision::Deny { receipt, .. } => {
                 // Deny receipts also carry the signed token
@@ -1104,13 +1256,44 @@ mod tilezero_tests {
     async fn tilezero_gate_logs_to_chain() {
         let gate = make_tilezero_gate_with_chain();
         let ctx = serde_json::json!({"urgency": "high"});
-        let _decision = gate.check("agent-1", "tool.deploy", &ctx);
+        let decision = gate.check("agent-1", "tool.deploy", &ctx);
 
-        // The chain should have a gate event (genesis + gate.permit/deny/defer)
+        // Default thresholds → Permit → gate.permit
+        assert!(decision.is_permit());
         let chain = gate.chain().unwrap();
         let seq = chain.sequence();
         // At minimum: genesis(0) + gate event(1)
         assert!(seq >= 1, "expected chain event, got seq={seq}");
+        let events = chain.tail(1);
+        assert_eq!(events[0].kind, crate::chain::EVENT_KIND_GATE_PERMIT);
+    }
+
+    /// WEFT-152: all three decision branches produce distinct chain kinds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tilezero_gate_three_way_chain_kinds() {
+        // Permit
+        let permit_gate = make_tilezero_gate_with(GateThresholds::default(), true);
+        permit_gate.check("a", "tool.p", &serde_json::json!({}));
+        assert_eq!(
+            permit_gate.chain().unwrap().tail(1)[0].kind,
+            crate::chain::EVENT_KIND_GATE_PERMIT
+        );
+
+        // Defer
+        let defer_gate = make_tilezero_gate_with(defer_thresholds(), true);
+        defer_gate.check("a", "tool.d", &serde_json::json!({}));
+        assert_eq!(
+            defer_gate.chain().unwrap().tail(1)[0].kind,
+            crate::chain::EVENT_KIND_GATE_DEFER
+        );
+
+        // Deny
+        let deny_gate = make_tilezero_gate_with(deny_thresholds(), true);
+        deny_gate.check("a", "tool.n", &serde_json::json!({}));
+        assert_eq!(
+            deny_gate.chain().unwrap().tail(1)[0].kind,
+            crate::chain::EVENT_KIND_GATE_DENY
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1123,11 +1306,22 @@ mod tilezero_tests {
         let d2 = gate.check("agent-1", "tool.b", &ctx);
 
         // Both should return valid decisions
-        let is_valid = |d: &GateDecision| {
-            d.is_permit() || d.is_deny() || matches!(d, GateDecision::Defer { .. })
+        assert!(d1.is_permit());
+        assert!(d2.is_permit());
+
+        // Token sequences should increment (0, then 1)
+        let seq = |d: &GateDecision| -> u64 {
+            match d {
+                GateDecision::Permit { token } => {
+                    let pt: cognitum_gate_tilezero::PermitToken =
+                        serde_json::from_slice(token.as_ref().unwrap()).unwrap();
+                    pt.sequence
+                }
+                _ => panic!("expected Permit"),
+            }
         };
-        assert!(is_valid(&d1));
-        assert!(is_valid(&d2));
+        assert_eq!(seq(&d1), 0);
+        assert_eq!(seq(&d2), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

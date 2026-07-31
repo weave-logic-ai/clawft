@@ -104,6 +104,8 @@ pub async fn load_config_layered<P: Platform>(
             .map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
         let normalized = clawft_platform::config_loader::normalize_keys(value);
         let config: Config = serde_json::from_value(normalized)?;
+        // WEFT-176: install white-label brand for Discord/CLI/banner surfaces.
+        config.install_brand();
         let global_routing = config.routing.clone();
         return Ok(LoadedConfig {
             config,
@@ -130,6 +132,8 @@ pub async fn load_config_layered<P: Platform>(
     };
     let agents_model_source = agents_model_layer_source(&layers);
     let config: Config = serde_json::from_value(layers.merged())?;
+    // WEFT-176: install white-label brand for Discord/CLI/banner surfaces.
+    config.install_brand();
 
     Ok(LoadedConfig {
         config,

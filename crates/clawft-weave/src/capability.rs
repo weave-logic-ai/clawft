@@ -130,6 +130,8 @@ pub fn required_capability(method: &str) -> Capability {
         | "chain.status"
         | "chain.local"
         | "chain.verify"
+        // WEFT-125: active vector backend introspection (read-only).
+        | "ecc.vector-config"
         | "agent.inspect"
         | "agent.list"
         | "agent.proposal.list"
@@ -273,6 +275,12 @@ mod tests {
         // WEFT-256: model enumeration is Read (anonymous-safe).
         assert!(caps.allows_method("llm.models"));
         assert_eq!(required_capability("llm.models"), Capability::Read);
+        // WEFT-125: vector backend introspection is Read (anonymous-safe).
+        assert!(caps.allows_method("ecc.vector-config"));
+        assert_eq!(
+            required_capability("ecc.vector-config"),
+            Capability::Read
+        );
         // WEFT-331: interactive defer decision (panel allow/deny/cancel).
         assert!(caps.allows_method("agent.chat.defer_decide"));
         assert_eq!(
