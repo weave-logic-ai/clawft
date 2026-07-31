@@ -1,0 +1,123 @@
+# Generate CycloneDX SBOMs and attach them to GitHub Releases (WEFT-459).
+#
+# cargo-dist v0.31.0 does not emit SBOMs for our matrix (native support lands
+# with a later dist bump — WEFT-462). This workflow runs cargo-cyclonedx
+# against the cargo-dist packages (clawft-cli / clawft-weave / weftos) and
+# uploads the resulting .cdx.json assets to the same Release as release.yml.
+#
+# Packaging helper: scripts/release/generate-sbom.sh
+
+name: Release SBOM
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_CYCLONEDX_VERSION: "0.5.9"
+
+jobs:
+  sbom:
+    name: Generate & upload CycloneDX SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + cargo-cyclonedx
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-cyclonedx
+          key: ${{ runner.os }}-cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}-
+            ${{ runner.os }}-cargo-cyclonedx-
+
+      - name: Install cargo-cyclonedx
+        run: |
+          set -euo pipefail
+          if cargo cyclonedx --version >/dev/null 2>&1; then
+            cargo cyclonedx --version
+          else
+            cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"
+          fi
+
+      - name: Generate CycloneDX SBOMs
+        id: sbom
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          OUT="dist-sbom"
+          # shellcheck disable=SC1091
+          eval "$(scripts/release/generate-sbom.sh generate \
+            --tag "$TAG" \
+            --out-dir "$OUT" \
+            --git-sha "${GITHUB_SHA}")"
+          {
+            echo "out_dir=${out_dir}"
+            echo "primary=${primary}"
+            echo "assets=${assets}"
+            echo "sha256sums=${sha256sums}"
+            echo "workspace_version=${workspace_version}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "## CycloneDX SBOM (WEFT-459)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | \`${tag}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Workspace version | \`${workspace_version}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Primary | \`$(basename "${primary}")\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Assets" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la "${out_dir}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest SBOM provenance (sigstore)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            ${{ steps.sbom.outputs.out_dir }}/weft-cli-${{ steps.sbom.outputs.tag }}.cdx.json
+            ${{ steps.sbom.outputs.out_dir }}/weaver-${{ steps.sbom.outputs.tag }}.cdx.json
+            ${{ steps.sbom.outputs.out_dir }}/weftos-${{ steps.sbom.outputs.tag }}.cdx.json
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          OUT="${{ steps.sbom.outputs.out_dir }}"
+
+          # Wait for the release to exist (created by release.yml host job).
+          for i in $(seq 1 90); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG found"
+              break
+            fi
+            echo "Waiting for release $TAG to be created... ($i/90)"
+            sleep 20
+          done
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG not found after 30 minutes"
+            exit 1
+          fi
+
+          # Upload every file produced under dist-sbom (JSON + meta + checksums).
+          # shellcheck disable=SC2086
+          gh release upload "$TAG" ${OUT}/* --clobber
+          echo "Uploaded CycloneDX SBOM assets from ${OUT} to release ${TAG}"

@@ -1,9 +1,9 @@
 # Release Process
 
 WeftOS releases are tag-driven. Pushing a SemVer-shaped tag (`vX.Y.Z`) to
-the `master` branch fans out into five workflows that produce binaries,
-WASM artifacts, knowledge-base bundles, the crates.io publish, and the
-multi-arch Docker image. A sixth workflow gates the result and flips the
+the `master` branch fans out into parallel workflows that produce binaries,
+WASM artifacts, knowledge-base bundles, CycloneDX SBOMs, the crates.io
+publish, and the multi-arch Docker image. A gate workflow flips the
 release to "prerelease" if any leg fails.
 
 ## Version Numbering
@@ -86,8 +86,9 @@ changelog entry, not the version-bump commit immediately before it.
 
 ## Release Workflows
 
-Five tag-triggered workflows run in parallel; one gate workflow sweeps up
-afterwards.
+Six tag-triggered workflows run in parallel (binaries, WASI, browser WASM,
+knowledge base, crates.io, and CycloneDX SBOM); Docker publishes after
+`Release` succeeds, and one gate workflow sweeps up afterwards.
 
 ### 1. `Release` (cargo-dist) -- `release.yml`
 
@@ -183,7 +184,46 @@ playground tour guide:
 Uses `tools/build-kb` to walk `docs/src/content/docs/` and emit a single
 RVF file. Attached to the same Release.
 
-### 5. `Publish Crates` -- `publish-crates.yml`
+### 5. `Release SBOM` -- `release-sbom.yml` (WEFT-459)
+
+Produces [CycloneDX](https://cyclonedx.org/) Software Bill of Materials
+for the cargo-dist packages and attaches them to the GitHub Release.
+cargo-dist v0.31 does not emit SBOMs for our matrix (native support is
+tracked with the dist version bump in WEFT-462); this workflow fills the
+gap with [`cargo-cyclonedx`](https://crates.io/crates/cargo-cyclonedx).
+
+| Asset | Notes |
+|-------|--------|
+| `weft-cli-<tag>.cdx.json` | CycloneDX 1.5 JSON for the `weft` binary (clawft-cli) — primary |
+| `weaver-<tag>.cdx.json` | CycloneDX 1.5 JSON for `weaver` (clawft-weave) |
+| `weftos-<tag>.cdx.json` | CycloneDX 1.5 JSON for the `weftos` binary |
+| `weftos-<tag>.sbom-meta.json` | Tag, git SHA, workspace version, per-file SHA-256 |
+| `*.cdx.json.sha256` / `weftos-<tag>.cdx.SHA256SUMS` | Detached checksums |
+
+Generation helper: `scripts/release/generate-sbom.sh generate --tag <tag>`.
+Locally:
+
+```bash
+# Install once (pinned in CI as CARGO_CYCLONEDX_VERSION=0.5.9)
+cargo install cargo-cyclonedx --locked --version 0.5.9
+
+scripts/release/generate-sbom.sh generate --tag v0.8.0 --out-dir dist-sbom
+```
+
+Each SBOM also receives a GitHub Attestations / sigstore provenance
+attachment (same pattern as WASI / browser WASM). Verify:
+
+```bash
+gh attestation verify weft-cli-v0.8.0.cdx.json \
+  --repo weave-logic-ai/weftos
+```
+
+Downstream consumers can feed the `.cdx.json` into any CycloneDX-aware
+SCA scanner (Dependency-Track, Grype, Trivy, etc.). When cargo-dist
+gains first-class SBOM generation (WEFT-462), this workflow may fold into
+`release.yml`; until then it is the authoritative source of release SBOMs.
+
+### 6. `Publish Crates` -- `publish-crates.yml`
 
 Publishes every `publish = true` workspace crate to crates.io, in
 dependency-topological order, via `cargo-workspaces`. The job:
@@ -197,7 +237,7 @@ Once all crates land on crates.io, the published rustdoc on docs.rs gets
 the WeftOS ecosystem cross-link table because every distributable crate
 sets `[package.metadata.docs.rs]` with `all-features = true`.
 
-### 6. `Release (Docker)` -- `release-docker.yml`
+### 7. `Release (Docker)` -- `release-docker.yml`
 
 Triggered by the `Release` workflow's `workflow_run` event (orchestration
 gate: only publish Docker after a successful tag Release). The image
@@ -224,7 +264,7 @@ Post-publish smoke: `GET /api/health` (WEFT-550). See
 [`docker.md`](docker.md) for image internals, local builds, and macOS
 runtimes (Docker Desktop / OrbStack / Apple container CLI).
 
-### 7. `Release Gate` -- `release-gate.yml`
+### 8. `Release Gate` -- `release-gate.yml`
 
 The supervisor. Triggers on `workflow_run` from `Publish Crates` and
 `Release (Docker)`. If either of those failed, the gate:
@@ -293,6 +333,25 @@ curl -fsSL -o sha256sums \
   "https://github.com/weave-logic-ai/weftos/releases/download/v0.6.19/sha256sums"
 sha256sum -c sha256sums --ignore-missing
 ```
+
+### Software Bill of Materials (CycloneDX)
+
+Every version tag also attaches CycloneDX 1.5 JSON SBOMs (WEFT-459).
+Download the primary SBOM for the CLI:
+
+```bash
+TAG=v0.8.0
+curl -fsSL -o "weft-cli-${TAG}.cdx.json" \
+  "https://github.com/weave-logic-ai/weftos/releases/download/${TAG}/weft-cli-${TAG}.cdx.json"
+curl -fsSL -o "weft-cli-${TAG}.cdx.json.sha256" \
+  "https://github.com/weave-logic-ai/weftos/releases/download/${TAG}/weft-cli-${TAG}.cdx.json.sha256"
+sha256sum -c "weft-cli-${TAG}.cdx.json.sha256"
+```
+
+Companion BOMs `weaver-<tag>.cdx.json` and `weftos-<tag>.cdx.json`
+cover the other cargo-dist binaries. See
+[Release SBOM](#5-release-sbom----release-sbomyml-weft-459) above for
+the full asset list and attestation verification.
 
 ## Installing from a Release
 
