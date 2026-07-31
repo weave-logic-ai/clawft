@@ -121,6 +121,15 @@ pub trait SystemService: Send + Sync {
     /// Perform a health check.
     async fn health_check(&self) -> HealthStatus;
 
+    /// Optional operator-facing detail (metrics, endpoints, …).
+    ///
+    /// Surfaced next to health in `kernel.services` / `weft status`
+    /// without changing the Healthy/Degraded/Unhealthy classification.
+    /// Default: `None` (no extra detail). WEFT-333.
+    fn health_detail(&self) -> Option<String> {
+        None
+    }
+
     /// Liveness probe (K2b-G2, os-patterns).
     ///
     /// Returns whether the service process is alive. Default implementation

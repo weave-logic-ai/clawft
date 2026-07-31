@@ -58,6 +58,7 @@ pub mod routing_log;
 pub mod soul_journal;
 pub mod substrate_budget;
 pub mod substrate_sink;
+pub mod system_service;
 pub mod text_structure;
 pub mod turn_classifier;
 pub mod verbalize;
@@ -86,6 +87,10 @@ pub use protocol::{
 };
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError, ReplySubmitter};
 pub use session_tier::SessionTier;
+pub use system_service::{
+    AgentChatMetrics, AgentChatStatusSnapshot, AgentChatSystemService,
+    AGENT_CHAT_CONTRACT_METHODS, AGENT_CHAT_SERVICE_NAME,
+};
 pub use routing_log::SubstrateRouterDecisionLog;
 pub use soul_journal::{SubstrateSoulJournal, SubstrateSoulJournalReader};
 pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};

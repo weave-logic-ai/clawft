@@ -129,6 +129,12 @@ pub struct ServiceInfo {
     pub pid: Option<u64>,
     pub restarts: u64,
     pub uptime_ms: u64,
+    /// Optional operator-facing metrics / detail from
+    /// [`clawft_kernel::SystemService::health_detail`] (WEFT-333).
+    /// Empty when the service provides none. Backward-compatible:
+    /// older daemons omit the key; clients default to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// A single log entry for `kernel.logs` / `kernel.logs_stream`.

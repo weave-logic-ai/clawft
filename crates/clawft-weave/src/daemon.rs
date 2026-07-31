@@ -2257,6 +2257,62 @@ pub async fn run(
                 );
             }
         }
+        // WEFT-333: register agent.chat as a first-class kernel
+        // SystemService so last-completion / in-flight / lock
+        // contention surface in `kernel.services` and `weft status`.
+        {
+            let chat_svc = Arc::new(clawft_service_agent::AgentChatSystemService::new(
+                service.metrics(),
+                Arc::clone(&_agent_service_flag),
+                service.shutting_down_flag(),
+            ));
+            let k = kernel.read().await;
+            let methods: Vec<String> = clawft_service_agent::AGENT_CHAT_CONTRACT_METHODS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            let registered = {
+                #[cfg(feature = "exochain")]
+                {
+                    match k.chain_manager() {
+                        Some(cm) => k
+                            .services()
+                            .register_with_contract(chat_svc.clone(), methods, cm),
+                        None => k.services().register(chat_svc.clone()),
+                    }
+                }
+                #[cfg(not(feature = "exochain"))]
+                {
+                    let _ = methods;
+                    k.services().register(chat_svc.clone())
+                }
+            };
+            match registered {
+                Ok(()) => {
+                    let entry = clawft_kernel::ServiceEntry {
+                        name: clawft_service_agent::AGENT_CHAT_SERVICE_NAME.to_string(),
+                        owner_pid: None,
+                        endpoint: clawft_kernel::ServiceEndpoint::External {
+                            url: "rpc:agent.chat".to_string(),
+                        },
+                        audit_level: clawft_kernel::ServiceAuditLevel::Full,
+                        registered_at: chrono::Utc::now(),
+                    };
+                    if let Err(e) = k.services().register_entry(entry) {
+                        warn!(
+                            error = %e,
+                            "agent.chat service entry registration failed (the SystemService is still live)"
+                        );
+                    }
+                    info!("agent.chat SystemService registered (WEFT-333)");
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    "agent.chat SystemService registration failed — agent.chat still works, but it won't appear in kernel.services / weft status"
+                ),
+            }
+        }
+
         let _ = DAEMON_AGENT.set(service);
         info!("agent service wired (agent.chat dispatches through clawft-service-agent)");
         info!("subagent spawner wired (agent_spawn dispatches child conversations)");
@@ -5401,9 +5457,12 @@ async fn dispatch(
                 restart_counts.lock().map(|m| m.clone()).unwrap_or_default();
             let mut infos: Vec<ServiceInfo> = Vec::with_capacity(services.len());
             for (name, stype) in services {
-                let (state, health_label) = match k.services().get(&name) {
+                let (state, health_label, detail) = match k.services().get(&name) {
                     Some(svc) => {
                         let h = svc.health_check().await;
+                        // WEFT-333: optional metrics/detail (e.g. agent.chat
+                        // last_completion / in_flight / lock_contentions).
+                        let detail = svc.health_detail();
                         let (state, label) = match &h {
                             clawft_kernel::HealthStatus::Healthy => {
                                 ("running", "healthy".to_string())
@@ -5419,9 +5478,9 @@ async fn dispatch(
                             }
                             _ => ("unknown", "unknown".to_string()),
                         };
-                        (state.to_string(), label)
+                        (state.to_string(), label, detail)
                     }
-                    None => ("unknown".to_string(), "registered".to_string()),
+                    None => ("unknown".to_string(), "registered".to_string(), None),
                 };
                 let restarts = restart_snapshot.get(&name).copied().unwrap_or(0);
                 let uptime_ms = if state == "running" {
@@ -5439,6 +5498,7 @@ async fn dispatch(
                     pid: Some(daemon_pid),
                     restarts,
                     uptime_ms,
+                    detail,
                 });
             }
             Response::success(serde_json::to_value(infos).unwrap())

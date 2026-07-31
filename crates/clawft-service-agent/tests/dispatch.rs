@@ -537,3 +537,84 @@ async fn cancel_of_in_flight_turn_does_not_kill_the_queued_resubmit() {
         other => panic!("expected B to generate the steer, got {other:?}"),
     }
 }
+
+// -- WEFT-333: agent.chat metrics (last-completion / lock contention) -------
+
+#[tokio::test]
+async fn dispatch_records_last_completion_time() {
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(Arc::clone(&release)));
+    let svc = Arc::new(AgentService::new(Arc::clone(&stub)));
+
+    assert_eq!(
+        svc.metrics().snapshot().last_completion_unix_ms,
+        0,
+        "no completions yet"
+    );
+
+    let svc_c = Arc::clone(&svc);
+    let handle = tokio::spawn(async move { svc_c.dispatch(params_for("c", "hi")).await });
+
+    // Wait until the stub is blocked on Notify so our wake is observed.
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while stub.in_progress.load(Ordering::Acquire) == 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("dispatch never entered handle_turn");
+        }
+        tokio::task::yield_now().await;
+    }
+    release.notify_waiters();
+
+    let r = handle.await.unwrap().unwrap();
+    assert!(r.assistant_text.contains("hi"));
+
+    let snap = svc.metrics().snapshot();
+    assert!(
+        snap.last_completion_unix_ms > 0,
+        "completion must stamp last_completion"
+    );
+    assert_eq!(snap.in_flight, 0);
+}
+
+#[tokio::test]
+async fn same_conv_contention_increments_lock_contentions() {
+    // Two concurrent dispatches on the same conv_id: the second must wait
+    // on the per-conv mutex and bump lock_contentions.
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(Arc::clone(&release)));
+    let svc = Arc::new(AgentService::new(Arc::clone(&stub)));
+
+    let svc1 = Arc::clone(&svc);
+    let h1 = tokio::spawn(async move { svc1.dispatch(params_for("c-lock", "first")).await });
+
+    // Wait until first is inside handle_turn (holds the lock).
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while stub.in_progress.load(Ordering::Acquire) == 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("first dispatch never entered handle_turn");
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let svc2 = Arc::clone(&svc);
+    let h2 = tokio::spawn(async move { svc2.dispatch(params_for("c-lock", "second")).await });
+
+    // Give second time to block on the lock (contention path).
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    // Drain both.
+    for _ in 0..32 {
+        release.notify_waiters();
+        tokio::task::yield_now().await;
+    }
+    let _ = h1.await.unwrap().unwrap();
+    let _ = h2.await.unwrap().unwrap();
+
+    let snap = svc.metrics().snapshot();
+    assert!(
+        snap.lock_contentions >= 1,
+        "expected at least one per-conv lock contention, got {}",
+        snap.lock_contentions
+    );
+    assert!(snap.last_completion_unix_ms > 0);
+}

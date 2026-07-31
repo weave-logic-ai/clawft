@@ -33,7 +33,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use clawft_core::agent::cost_budget::{BudgetUsage, ConversationBudget};
@@ -48,6 +48,7 @@ use tracing::{debug, warn};
 use crate::interrupt_router::{InterruptAction, InterruptCtx, InterruptOutcome};
 use crate::protocol::{AgentChatParams, AgentChatResult};
 use crate::session_tier::SessionTier;
+use crate::system_service::AgentChatMetrics;
 use clawft_types::agent_chat::{AGENT_LOOP_RESULT_META_KEY, AgentLoopResultMeta};
 
 /// Errors returned by [`AgentService::dispatch`].
@@ -181,14 +182,19 @@ pub struct AgentService<H: AgentLoopHandle> {
     conv_locks: DashMap<String, Arc<Mutex<()>>>,
     cancel_tokens: DashMap<String, CancellationToken>,
     /// Set by [`Self::shutdown`]. Once true, new dispatches return
-    /// [`AgentServiceError::ShuttingDown`].
-    shutting_down: AtomicBool,
+    /// [`AgentServiceError::ShuttingDown`]. Shared with
+    /// [`crate::AgentChatSystemService`] so health probes see drain.
+    shutting_down: Arc<AtomicBool>,
     /// Number of dispatches currently inside `handle_turn`. The
     /// shutdown waiter blocks on `drain` until this reads zero.
+    /// Also shared into [`AgentChatMetrics`].
     in_flight: Arc<AtomicUsize>,
     /// Notified each time `in_flight` decrements. Lets
     /// [`Self::shutdown`] avoid a polling loop.
     drain: Arc<Notify>,
+    /// WEFT-333: last-completion / lock-contention metrics for
+    /// `agent.chat` SystemService / `weft status`.
+    metrics: Arc<AgentChatMetrics>,
     /// Optional [`ConversationBudget`] handle so `agent.chat.reset_budget`
     /// can clear `circuit_open` for a tripped conv (WEFT-322 item 3).
     /// Held here in addition to the agent loop so the daemon RPC layer
@@ -226,18 +232,33 @@ impl<H: AgentLoopHandle> AgentService<H> {
         agent_loop: Arc<H>,
         defer_broker: Option<Arc<crate::defer_broker::InteractiveDeferBroker>>,
     ) -> Self {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let metrics = Arc::new(AgentChatMetrics::with_in_flight(Arc::clone(&in_flight)));
         Self {
             agent_loop,
             conv_locks: DashMap::new(),
             cancel_tokens: DashMap::new(),
-            shutting_down: AtomicBool::new(false),
-            in_flight: Arc::new(AtomicUsize::new(0)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            in_flight,
             drain: Arc::new(Notify::new()),
+            metrics,
             cost_budget: None,
             session_tier: None,
             reply_submitter: OnceLock::new(),
             defer_broker,
         }
+    }
+
+    /// Shared metrics handle (WEFT-333) — clone into
+    /// [`crate::AgentChatSystemService`] at registration time.
+    pub fn metrics(&self) -> Arc<AgentChatMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// Shared shutting-down flag (WEFT-333) — clone into
+    /// [`crate::AgentChatSystemService`] so health probes reflect drain.
+    pub fn shutting_down_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutting_down)
     }
 
     /// Deliver a human defer decision (WEFT-331 / `agent.chat.defer_decide`).
@@ -392,7 +413,17 @@ impl<H: AgentLoopHandle> AgentService<H> {
         // Hold the per-conv guard for the whole dispatch so the
         // next caller waits until this turn is fully reflected in
         // the sink (Phase C3) before starting its own.
-        let _guard = lock.lock().await;
+        // WEFT-333: if try_lock fails, another turn holds the lock —
+        // count as per-conv lock contention and time the wait.
+        let _guard = match lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                let started = Instant::now();
+                let g = lock.lock().await;
+                self.metrics.record_lock_contention(started.elapsed());
+                g
+            }
+        };
 
         // Re-check shutdown after waiting for the lock — we may
         // have queued behind other dispatches that ran during
@@ -422,6 +453,11 @@ impl<H: AgentLoopHandle> AgentService<H> {
         // Bump in-flight only once we've actually committed to
         // running the loop. The drop-guard rolls it back.
         let _flight = InFlightGuard::new(Arc::clone(&self.in_flight), Arc::clone(&self.drain));
+        // WEFT-333: stamp last-completion on every terminal exit after
+        // the loop has been entered (success, cancel, or loop error).
+        let _completion = CompletionRecorder {
+            metrics: Arc::clone(&self.metrics),
+        };
 
         let inbound = inbound_from_params(&params, &conv_id);
 
@@ -661,6 +697,19 @@ impl Drop for InFlightGuard {
         // Acquire ordering, which pairs with this AcqRel store.
         self.counter.fetch_sub(1, Ordering::AcqRel);
         self.drain.notify_waiters();
+    }
+}
+
+/// RAII guard that stamps [`AgentChatMetrics::record_completion`] on
+/// drop so every terminal exit after the loop is entered updates
+/// `last_completion` (WEFT-333).
+struct CompletionRecorder {
+    metrics: Arc<AgentChatMetrics>,
+}
+
+impl Drop for CompletionRecorder {
+    fn drop(&mut self) {
+        self.metrics.record_completion();
     }
 }
 

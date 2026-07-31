@@ -407,10 +407,18 @@ fn print_daemon_services(infos: &[protocol::ServiceInfo]) {
 
     let mut table = Table::new();
     table.load_preset(presets::UTF8_FULL_CONDENSED);
-    table.set_header(vec!["Name", "Type", "Health"]);
+    // WEFT-333: Detail column carries agent.chat metrics (and any
+    // other SystemService::health_detail payload).
+    table.set_header(vec!["Name", "Type", "Health", "Detail"]);
 
     for info in infos {
-        table.add_row(vec![&info.name, &info.service_type, &info.health]);
+        let detail = info.detail.as_deref().unwrap_or("-");
+        table.add_row(vec![
+            info.name.as_str(),
+            info.service_type.as_str(),
+            info.health.as_str(),
+            detail,
+        ]);
     }
 
     println!("{table}");
