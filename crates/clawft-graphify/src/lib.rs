@@ -26,6 +26,8 @@ pub mod export;
 pub mod extract;
 pub mod hooks;
 pub mod ingest;
+#[cfg(feature = "rdf-ingest")]
+pub use ingest::rdf;
 pub mod layout;
 pub mod model;
 pub mod pipeline;

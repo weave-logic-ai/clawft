@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["code-domain"]
+default = ["code-domain", "rdf-ingest"]
 ast-extract = ["dep:tree-sitter"]
 semantic-extract = []
 vision-extract = []
@@ -20,9 +20,12 @@ kernel-bridge = ["dep:clawft-kernel", "dep:async-trait"]
 # Real HTTP for URL ingest (reqwest + rustls). Production binaries
 # (weaver) enable this; unit tests keep StubHttpClient / mock clients.
 http-client = ["dep:reqwest"]
+# OWL/RDF ingest (Turtle, JSON-LD) via Oxigraph stack (WEFT-358 / OG-2).
+# Default-on so ontology pipelines work without extra feature flags.
+rdf-ingest = ["dep:oxrdfio", "dep:oxrdf"]
 full = ["ast-extract", "semantic-extract", "vision-extract", "code-domain",
         "forensic-domain", "html-export", "neo4j-export", "kernel-bridge",
-        "http-client", "lang-all"]
+        "http-client", "lang-all", "rdf-ingest"]
 
 lang-python = ["ast-extract", "dep:tree-sitter-python"]
 lang-javascript = ["ast-extract", "dep:tree-sitter-javascript"]
@@ -79,6 +82,11 @@ notify = { workspace = true, optional = true }
 # rustls-tls matches workspace (musl/static builds); `blocking` because the
 # graphify `HttpClient` trait is intentionally non-async.
 reqwest = { workspace = true, optional = true, default-features = false, features = ["blocking", "rustls-tls", "json"] }
+
+# WEFT-358 / OG-2: Oxigraph RDF I/O stack (Turtle + JSON-LD parsers).
+# Optional behind `rdf-ingest` (enabled by default).
+oxrdfio = { version = "0.2.5", optional = true }
+oxrdf = { version = "0.3.3", optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

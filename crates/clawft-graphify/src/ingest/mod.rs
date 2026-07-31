@@ -1,8 +1,20 @@
-//! URL ingestion: fetch URLs (tweets, arXiv, PDFs, webpages) and save as
-//! annotated markdown ready for extraction into the knowledge graph.
+//! Ingestion sources for graphify knowledge graphs.
 //!
-//! Ported from Python `graphify/ingest.py`. Security: blocks private IPs and
-//! `file://` schemes to prevent SSRF.
+//! - URL ingestion: fetch URLs (tweets, arXiv, PDFs, webpages) and save as
+//!   annotated markdown ready for extraction into the knowledge graph
+//!   (ported from Python `graphify/ingest.py`). Security: blocks private IPs
+//!   and `file://` schemes to prevent SSRF.
+//! - OWL/RDF ingestion ([`rdf`], feature `rdf-ingest`): Turtle and JSON-LD →
+//!   entities + relationships (WEFT-358 / OG-2).
+
+#[cfg(feature = "rdf-ingest")]
+pub mod rdf;
+
+#[cfg(feature = "rdf-ingest")]
+pub use rdf::{
+    local_name, parse_json_ld, parse_rdf, parse_rdf_file, parse_rdf_str, parse_turtle,
+    RdfIngestFormat, RdfIngestOptions, RdfIngestStats, ONTOLOGY_DOMAIN,
+};
 
 use std::path::{Path, PathBuf};
 
