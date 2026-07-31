@@ -20,6 +20,8 @@ how it differs from the native platform.
 
 ## Data Flow
 
+### Main thread (default harness)
+
 ```
 Browser JS                 WASM Module                  External
 ----------                 -----------                  --------
@@ -58,6 +60,41 @@ Browser JS                 WASM Module                  External
   Display in
   chat UI
 ```
+
+### Web Worker (WEFT-400)
+
+Long LLM / tool work on the main thread freezes the tab. The worker harness
+keeps the agent loop off-thread; the host uses a versioned `postMessage`
+protocol (`protocol.js`). HTTP already prefers `WorkerGlobalScope::fetch`
+when the global is a worker.
+
+```
+Main thread                    Module Worker                 External
+-----------                    -------------                 --------
+
+  main-worker.js
+  ClawftWorkerClient
+       |
+       | postMessage({ id, type: "send", text })
+       v
+                            worker.js
+                            send_message / stream_chat
+                               |
+                               v
+                            AgentLoop + pipeline
+                               |
+                               v
+                            BrowserHttpClient
+                            (WorkerGlobalScope::fetch) ----> LLM API
+                               |
+       |<-- { id, type: "ok", result } / { type: "chunk" }
+       v
+  Update chat UI (main thread free during fetch)
+```
+
+Files: `crates/clawft-wasm/www/{protocol,worker,worker-client,main-worker}.js`,
+`index-worker.html`. Full protocol table: [`web-worker.md`](web-worker.md).
+
 
 ## Feature Flag Architecture
 

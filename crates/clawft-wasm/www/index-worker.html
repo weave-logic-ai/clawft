@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>clawft-wasm Browser Test Harness</title>
+  <title>clawft-wasm Web Worker Harness (WEFT-400)</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -24,6 +24,7 @@
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      flex-wrap: wrap;
     }
 
     #status-indicator {
@@ -42,7 +43,24 @@
       color: #8b949e;
     }
 
-    /* Config panel */
+    .badge {
+      font-size: 0.65rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #a371f7;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    a.switch {
+      font-size: 0.75rem;
+      color: #8b949e;
+      margin-left: auto;
+    }
+    a.switch:hover { color: #58a6ff; }
+
     #config-panel {
       display: flex;
       flex-direction: column;
@@ -63,7 +81,7 @@
     }
     #config-textarea:focus { outline: none; border-color: #58a6ff; }
 
-    #init-btn {
+    #init-btn, #stream-toggle {
       align-self: flex-start;
       background: #238636;
       color: #fff;
@@ -77,7 +95,22 @@
     #init-btn:hover { background: #2ea043; }
     #init-btn:disabled { background: #484f58; cursor: not-allowed; }
 
-    /* Chat area */
+    #btn-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    #stream-toggle {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+    }
+    #stream-toggle.active {
+      background: #1f3a5f;
+      border-color: #388bfd;
+      color: #58a6ff;
+    }
+
     #chat-display {
       flex: 1;
       overflow-y: auto;
@@ -127,7 +160,6 @@
       font-style: italic;
     }
 
-    /* Input bar */
     #input-bar {
       display: flex;
       gap: 0.5rem;
@@ -163,9 +195,10 @@
   <header>
     <h1>
       clawft-wasm
+      <span class="badge">web worker</span>
       <span id="status-indicator"></span>
-      <span id="status-text">not initialized</span>
-      <a href="./index-worker.html" style="margin-left:auto;font-size:0.75rem;color:#8b949e;font-weight:normal;">web worker harness →</a>
+      <span id="status-text">starting worker…</span>
+      <a class="switch" href="./index.html">main-thread harness →</a>
     </h1>
   </header>
 
@@ -188,16 +221,19 @@
     }
   }
 }</textarea>
-    <button id="init-btn">Initialize</button>
+    <div id="btn-row">
+      <button id="init-btn">Initialize (worker)</button>
+      <button id="stream-toggle" type="button" title="Use stream_chat via CHUNK events">stream: off</button>
+    </div>
   </section>
 
   <section id="chat-display"></section>
 
   <section id="input-bar">
-    <input id="msg-input" type="text" placeholder="Type a message..." disabled />
+    <input id="msg-input" type="text" placeholder="Type a message (runs off main thread)…" disabled />
     <button id="send-btn" disabled>Send</button>
   </section>
 
-  <script type="module" src="./main.js"></script>
+  <script type="module" src="./main-worker.js"></script>
 </body>
 </html>

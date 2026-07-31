@@ -3,6 +3,11 @@
 clawft-wasm exports wasm-bindgen functions for browser use (`init`,
 `send_message`, `set_env`, `get_env`, plus tool introspection helpers).
 
+To run the same surface **off the main thread**, use the Web Worker harness
+and `ClawftWorkerClient` (`crates/clawft-wasm/www/`) — see
+[`web-worker.md`](web-worker.md) (WEFT-400). The worker protocol mirrors
+these entry points via `postMessage` (`init`, `send`, `stream`, `set_env`, …).
+
 ## Lifecycle
 
 The expected call order is:

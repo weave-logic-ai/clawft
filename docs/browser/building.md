@@ -113,7 +113,21 @@ The server must serve files with correct MIME types. In particular, `.wasm` file
 
 ### 3. Open
 
-Navigate to `http://localhost:8080` and use the test harness UI to initialize and interact with clawft-wasm.
+| URL | Harness |
+|-----|---------|
+| `http://localhost:8080/` | Main-thread UI (`index.html`) |
+| `http://localhost:8080/index-worker.html` | **Web Worker** UI (WEFT-400 — agent off main thread) |
+
+Initialize with provider config and chat. Prefer the worker harness when
+profiling UI jank or exercising long LLM calls. See
+[`web-worker.md`](web-worker.md) for the message protocol and
+`ClawftWorkerClient` API.
+
+Protocol unit tests (no browser):
+
+```bash
+node --test crates/clawft-wasm/www/protocol.test.mjs
+```
 
 ### 4. Iterate
 

@@ -77,6 +77,12 @@ npx serve crates/clawft-wasm/ --listen 8080
 
 Open `http://localhost:8080/test.html` in a browser.
 
+For a UI that keeps the page responsive during LLM calls, use the **Web
+Worker harness** instead: build with `scripts/build.sh browser`, serve with
+`scripts/build.sh serve`, then open
+`http://localhost:8080/index-worker.html`. Details:
+[`web-worker.md`](web-worker.md).
+
 ## 4. Expected output
 
 ```
