@@ -204,15 +204,14 @@ Numbered for reference.
   show the graph: Whisper Actor ← (reads) sensor/mic/pcm_chunk on
   `n-6f3a9c` → publishes derived/transcript under daemon. Uses
   `ui://graph` primitive.
-- **Viewer**: `GraphViewer`.
-- **Object Type**: a new `Lineage` type (not proposed in this pass —
-  flagging as a follow-up).
-- **Class**: **READS-ONLY** in principle, but requires the lineage to
-  be recorded somewhere the Explorer can read. Actors and nodes need
-  to emit lineage tags alongside their derived-path publishes.
-- **Needs**: convention for lineage metadata (e.g. derived publishes
-  carry `{ lineage: { source_paths: [...], via_actor: "..." } }`).
-  Separate work.
+- **Viewer**: `LineageViewer` (delegates graph paint to `GraphViewer`).
+- **Object Type**: `Lineage` (`ontology/types/lineage.rs`) — **landed
+  WEFT-275**.
+- **Class**: **READS-ONLY**. Publishers write lineage at the sibling
+  path `<derived-path>/meta/lineage` (see sign-off §6 Q3).
+- **Schema**: `{ "kind": "lineage", "source_paths": [...], "via_actor"?,
+  "target_path"?, "derivation"?, "ts"? }` at the sibling path.
+  Decision memo: `docs/plans/wave-0-WEFT-275-lineage-metadata.md`.
 
 ### 15. Tap-to-listen on a mic sensor
 
@@ -303,10 +302,14 @@ list already exists and viewers don't need type surgery.
    look like in the Workshop JSON? Alternative: parameters are
    injected at mount-time, not baked in. Sign-off needed on the
    template syntax.
-3. **Lineage metadata placement.** Should derived-path publishes
+3. **Lineage metadata placement.** ~~Should derived-path publishes
    carry `lineage` as an inline field, or at a sibling
-   `<derived-path>/meta/lineage`? Proposal: sibling path, so the
-   main publish envelope stays small. Sign-off needed.
+   `<derived-path>/meta/lineage`?~~ **SIGNED OFF (WEFT-275):** sibling
+   path is primary (`<derived-path>/meta/lineage`). Flat document shape
+   `{ kind:"lineage", source_paths:[…], via_actor?, target_path?,
+   derivation?, ts? }`. Inline (`payload.lineage`) remains an opt-in for
+   per-emission sinks and does **not** reclassify the parent value.
+   Decision memo: `docs/plans/wave-0-WEFT-275-lineage-metadata.md`.
 4. **"Open in Workshop" button on every viewer?** When a user is
    looking at a `NodeViewer`, should there be a "convert to
    Workshop" button that materializes an equivalent composition at

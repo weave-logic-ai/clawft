@@ -12,6 +12,7 @@
 pub mod audio_stream;
 pub mod chain_event;
 pub mod health_report;
+pub mod lineage;
 pub mod mesh;
 pub mod node;
 pub mod sensor;

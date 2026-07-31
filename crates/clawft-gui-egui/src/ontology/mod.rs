@@ -131,6 +131,15 @@ pub fn infer(value: &Value) -> Option<InferredType> {
     // source ordering here is the tie-breaker.
     //
     // [[OBJECT_TYPES_REGISTRATIONS_INSERT]]
+    // Lineage (priority 13) ahead of HealthReport (12) so a derived
+    // path's sibling meta/lineage document is never misread as health.
+    // WEFT-275.
+    if types::lineage::Lineage::matches(value) > 0 {
+        return Some(InferredType {
+            name: types::lineage::Lineage::name(),
+            display: types::lineage::Lineage::display_name(),
+        });
+    }
     if types::health_report::HealthReport::matches(value) > 0 {
         return Some(InferredType {
             name: types::health_report::HealthReport::name(),
@@ -240,5 +249,33 @@ mod integration {
         });
         let inferred = infer(&v).expect("should infer something");
         assert_eq!(inferred.name, "audio_stream");
+    }
+
+    #[test]
+    fn infers_lineage_from_sibling_meta_document() {
+        // WEFT-275 smoke: derived path + lineage attached at meta sibling.
+        let v = json!({
+            "kind": "lineage",
+            "source_paths": ["substrate/n-6f3a9c/sensor/mic"],
+            "via_actor": "whisper",
+            "target_path": "substrate/n-daemon/derived/transcript/n-6f3a9c/mic",
+            "derivation": "transform",
+            "ts": 1_700_000_000_000_u64,
+        });
+        let inferred = infer(&v).expect("lineage should infer");
+        assert_eq!(inferred.name, "lineage");
+        assert_eq!(inferred.display, "Lineage");
+    }
+
+    #[test]
+    fn lineage_does_not_steal_parent_payload_with_nested_lineage() {
+        let v = json!({
+            "text": "hello world",
+            "lineage": {
+                "source_paths": ["substrate/n-1/sensor/mic"],
+                "via_actor": "whisper"
+            }
+        });
+        assert!(infer(&v).is_none());
     }
 }

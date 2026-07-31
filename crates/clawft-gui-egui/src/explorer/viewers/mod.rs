@@ -17,6 +17,7 @@ pub mod connection_badge;
 pub mod depth_map;
 pub mod graph;
 pub mod health;
+pub mod lineage;
 pub mod mesh_nodes;
 pub mod pcm_chunk;
 pub mod process_table;
@@ -38,6 +39,13 @@ pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     // [[VIEWERS_REGISTRATIONS_INSERT]]
     if pcm_chunk::PcmChunkViewer::matches(value) > 0 {
         pcm_chunk::PcmChunkViewer::paint(ui, path, value);
+        return;
+    }
+    // LineageViewer (priority 13) ahead of HealthViewer (12) so a
+    // sibling `<derived>/meta/lineage` document is never misread as
+    // health. WEFT-275.
+    if lineage::LineageViewer::matches(value) > 0 {
+        lineage::LineageViewer::paint(ui, path, value);
         return;
     }
     // HealthViewer (priority 12) ahead of waveform/audio so that a
