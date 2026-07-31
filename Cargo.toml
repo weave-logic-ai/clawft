@@ -383,6 +383,14 @@ targets = [
     # transport lands; tracked in
     # `docs/weftos/weftos-deferred-requirements.md`.
     # "x86_64-pc-windows-msvc",
+    #
+    # WEFT-476 / HP-16: wasm32-wasip2 is *not* listed here. cargo-dist
+    # v0.31–v0.32 known triples include only legacy `wasm32-wasi` and
+    # `wasm32-unknown-unknown`, and clawft-wasm is a cdylib (not a dist
+    # binary). The WASI artefact is built by the hand-patched
+    # `build-wasi` job in release.yml (reusable release-wasi.yml) in
+    # parallel with the cargo-dist matrix. When upstream adds wasip2 +
+    # WASM library packaging, add the triple here and retire build-wasi.
 ]
 # Installers to generate (Windows powershell installer is a no-op
 # without a Windows binary; keep the entry for when WEFT-483 lands).

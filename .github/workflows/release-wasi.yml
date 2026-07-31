@@ -1,7 +1,20 @@
-# Build clawft-wasm for wasm32-wasip2 and attach to GitHub Releases.
+# Build clawft-wasm for wasm32-wasip2 and stage artifacts for the main Release.
 #
-# cargo-dist v0.31.0 does not support wasip2 in its target matrix (HP-16),
-# so this workflow runs independently alongside release.yml.
+# WEFT-476: cargo-dist (v0.31–v0.32) still does not list wasm32-wasip2 in its
+# known target triples (only the legacy wasm32-wasi and wasm32-unknown-unknown).
+# clawft-wasm is also a cdylib, not a cargo-dist binary package. Until upstream
+# supports wasip2 + WASM library packaging, this reusable workflow is the
+# source of truth for the WASI release artefact and is invoked from release.yml
+# as a parallel job (no 30-minute poll loop).
+#
+# Triggers:
+#   - workflow_call — primary path (release.yml build-wasi job)
+#   - workflow_dispatch — re-attach WASI assets to an existing GitHub Release
+#     without re-running the full cargo-dist matrix
+#
+# Tag-push is intentionally NOT a trigger (scoped down by WEFT-476). The main
+# Release workflow owns the tag fan-out so wall-clock is max(native, wasi)
+# rather than native + wasi + up-to-30-min poll.
 #
 # WEFT-405 supply-chain parity (shared with wasm-browser.yml):
 #   - VERSION.json (tag, git sha, workspace version, target)
@@ -17,19 +30,49 @@ permissions:
   attestations: write
 
 on:
-  push:
-    tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+  # Primary entry: called from release.yml (WEFT-476). Builds, packages,
+  # attests, and uploads a GHA artifact named artifacts-wasi-wasm32-wasip2
+  # for the host job to attach to the GitHub Release.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag (empty on PR / dry-run builds)"
+        required: false
+        type: string
+        default: ""
+      publishing:
+        description: "True when a tag release is being published"
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      artifact_name:
+        description: "Name of the uploaded GHA artifact"
+        value: ${{ jobs.build-wasi.outputs.artifact_name }}
+  # Fallback: re-attach WASI assets to an existing release without the full
+  # cargo-dist matrix.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing GitHub Release tag to attach WASI assets to"
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
   TARGET: wasm32-wasip2
   PROFILE: release
+  WASI_ARTIFACT_NAME: artifacts-wasi-wasm32-wasip2
 
 jobs:
   build-wasi:
-    name: Build & upload WASI binary
+    name: Build & package WASI binary
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ env.WASI_ARTIFACT_NAME }}
+      asset: ${{ steps.package.outputs.asset }}
+      version_json: ${{ steps.package.outputs.version_json }}
+      sha256sums: ${{ steps.package.outputs.sha256sums }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,11 +129,24 @@ jobs:
           echo "| Raw | ${SIZE_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Gzipped | ${GZIP_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Resolve tag for packaging
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            # PR / plan-only: label with workspace version for package-wasi
+            TAG="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved package tag: $TAG"
+
       - name: Package, version, and checksum
         id: package
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.tag.outputs.tag }}"
           OUT="dist-wasi"
           mkdir -p "$OUT"
           # shellcheck disable=SC1091
@@ -104,6 +160,7 @@ jobs:
             echo "version_json=${version_json}"
             echo "sha256sums=${sha256sums}"
             echo "workspace_version=${workspace_version}"
+            echo "out_dir=$OUT"
           } >> "$GITHUB_OUTPUT"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -124,33 +181,40 @@ jobs:
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.version_json }}
 
-      - name: Upload to GitHub Release
+      # Stage for release.yml host job (pattern artifacts-*). Also useful on
+      # PR / workflow_call dry-runs so operators can inspect the package.
+      - name: Upload GHA artifact for Release host job
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.WASI_ARTIFACT_NAME }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.version_json }}
+            ${{ steps.package.outputs.asset }}.sha256
+            ${{ steps.package.outputs.version_json }}.sha256
+            ${{ steps.package.outputs.sha256sums }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # Fallback path only: workflow_dispatch attach to an already-created
+      # release. When invoked via workflow_call from release.yml, the host job
+      # attaches these files and this step is skipped.
+      - name: Upload to existing GitHub Release (fallback)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          OUT="dist-wasi"
+          TAG="${{ steps.tag.outputs.tag }}"
           ASSET="${{ steps.package.outputs.asset }}"
           VER_JSON="${{ steps.package.outputs.version_json }}"
-
-          # Wait for the release to exist (created by release.yml, takes ~15 min)
-          for i in $(seq 1 90); do
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "Release $TAG found"
-              break
-            fi
-            echo "Waiting for release $TAG to be created... ($i/90)"
-            sleep 20
-          done
+          SUMS="${{ steps.package.outputs.sha256sums }}"
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::Release $TAG not found after 30 minutes"
+            echo "::error::Release $TAG not found — create it first (or use the main Release workflow)"
             exit 1
           fi
 
-          # Upload binary + version manifest + detached checksums
-          SUMS="${{ steps.package.outputs.sha256sums }}"
           gh release upload "$TAG" \
             "$ASSET" \
             "$VER_JSON" \

@@ -125,7 +125,7 @@ Attestation is CI-only (needs `id-token: write` + `attestations: write`).
 | Path | Role |
 |------|------|
 | [`.github/workflows/wasm-browser.yml`](../../.github/workflows/wasm-browser.yml) | Browser build, package, attest, upload |
-| [`.github/workflows/release-wasi.yml`](../../.github/workflows/release-wasi.yml) | WASI build, package, attest, upload (template parity) |
+| [`.github/workflows/release-wasi.yml`](../../.github/workflows/release-wasi.yml) | WASI build/package/attest (reusable; called from `release.yml` build-wasi — WEFT-476) |
 | [`scripts/release/package-wasm-artifact.sh`](../../scripts/release/package-wasm-artifact.sh) | Shared VERSION.json + SHA-256 helper |
 
 ## Related

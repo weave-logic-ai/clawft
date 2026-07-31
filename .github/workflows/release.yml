@@ -24,6 +24,15 @@
 # out of job outputs, expose a dedicated matrix output, and refuse to
 # host/announce a publishing run unless local+global builds succeeded.
 # Re-apply this patch if you regenerate release.yml via `dist generate`.
+#
+# WEFT-476 (hand-patch): parallel `build-wasi` job calls the reusable
+# release-wasi.yml workflow and stages wasm32-wasip2 artefacts under the
+# `artifacts-*` name pattern. The host job requires build-wasi success on
+# publish and includes those files in `gh release create` — eliminating the
+# old 30-minute poll loop in the standalone tag-push WASI workflow.
+# cargo-dist v0.31–v0.32 still lacks wasm32-wasip2 in its known target
+# list (only legacy wasm32-wasi / wasm32-unknown-unknown); revisit adding
+# wasip2 to [workspace.metadata.dist].targets when upstream ships support.
 
 name: Release
 permissions:
@@ -231,6 +240,26 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  # WEFT-476: wasm32-wasip2 build in parallel with cargo-dist local targets.
+  # cargo-dist does not yet accept wasip2 in [workspace.metadata.dist].targets
+  # (known triples include wasm32-wasi / wasm32-unknown-unknown only; clawft-wasm
+  # is a cdylib). The reusable workflow stages GHA artifacts named
+  # artifacts-wasi-wasm32-wasip2 for the host job's `artifacts-*` download.
+  build-wasi:
+    name: build-wasi (wasm32-wasip2)
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' || needs.plan.outputs.pr-run-mode == 'upload' }}
+    uses: ./.github/workflows/release-wasi.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+      publishing: ${{ needs.plan.outputs.publishing == 'true' }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
     needs:
@@ -283,11 +312,14 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - build-wasi
     # WEFT-593: when publishing, require local+global builds to have *succeeded*
     # (not merely skipped). The stock cargo-dist template treated skip as OK,
     # which is how v0.6.21 announced an empty release after the plan output
     # was secret-scrubbed and build-local-artifacts was skipped.
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
+    # WEFT-476: also require build-wasi so the GitHub Release always ships the
+    # wasm32-wasip2 artefact without a post-hoc poll/upload race.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' && needs.build-wasi.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

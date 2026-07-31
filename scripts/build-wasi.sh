@@ -6,9 +6,10 @@
 #   scripts/build-wasi.sh --debug      # dev profile (faster iteration)
 #   scripts/build-wasi.sh --optimize   # release-wasm + wasm-opt
 #
-# The wasm32-wasip2 target is HP-16's canonical WASM target. cargo-dist v0.31.0
-# does not support it in its target matrix, so this script (and the companion
-# release-wasi.yml workflow) handle the build independently.
+# The wasm32-wasip2 target is HP-16's canonical WASM target. cargo-dist
+# v0.31–v0.32 does not list wasip2 in its known triples, so this script (and
+# the reusable release-wasi.yml workflow called from release.yml as build-wasi
+# — WEFT-476) handle the build independently of cargo-dist.
 #
 # What compiles for wasip2 (--no-default-features):
 #   clawft-types, clawft-platform, clawft-plugin, clawft-llm,
