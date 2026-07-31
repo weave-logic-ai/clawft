@@ -119,6 +119,76 @@ impl ResourceTree {
         self.nodes.get_mut(id)
     }
 
+    /// Load all node-attached ACL policies and delegation certs into a
+    /// [`crate::permission::CapabilityChecker`] (WEFT-554).
+    ///
+    /// Existing checker entries are not cleared — call
+    /// [`CapabilityChecker::new`] first for a clean load.
+    pub fn load_acl_into(&self, checker: &crate::permission::CapabilityChecker) {
+        for (id, node) in &self.nodes {
+            for policy in &node.rbac_policies {
+                checker.add_policy(id.clone(), policy.clone());
+            }
+            for cert in &node.delegation_certs {
+                checker.add_delegation(id.clone(), cert.clone());
+            }
+        }
+    }
+
+    /// Attach a delegation cert to a node and mirror it into `checker`.
+    pub fn grant_delegation(
+        &mut self,
+        resource: &ResourceId,
+        cert: crate::delegation::DelegationCert,
+        checker: &crate::permission::CapabilityChecker,
+    ) -> TreeResult<()> {
+        let node = self
+            .nodes
+            .get_mut(resource)
+            .ok_or_else(|| TreeError::NotFound {
+                id: resource.clone(),
+            })?;
+        node.delegation_certs.push(cert.clone());
+        node.updated_at = chrono::Utc::now();
+        checker.add_delegation(resource.clone(), cert);
+        Ok(())
+    }
+
+    /// Revoke delegations for `grantee` on a node (and mirror into checker).
+    pub fn revoke_delegation(
+        &mut self,
+        resource: &ResourceId,
+        grantee: &crate::permission::Principal,
+        checker: &crate::permission::CapabilityChecker,
+    ) -> TreeResult<usize> {
+        let node = self
+            .nodes
+            .get_mut(resource)
+            .ok_or_else(|| TreeError::NotFound {
+                id: resource.clone(),
+            })?;
+        let before = node.delegation_certs.len();
+        node.delegation_certs
+            .retain(|c| c.grantee != grantee.as_str());
+        let removed_node = before - node.delegation_certs.len();
+        node.updated_at = chrono::Utc::now();
+        let removed_checker = checker.revoke_delegation(resource, grantee);
+        Ok(removed_node.max(removed_checker))
+    }
+
+    /// Permission check via a [`CapabilityChecker`] (SPARC §5.1 / WEFT-554).
+    pub fn check(
+        &self,
+        checker: &crate::permission::CapabilityChecker,
+        principal: &crate::permission::Principal,
+        role: &crate::model::Role,
+        action: &crate::model::Action,
+        resource: &ResourceId,
+    ) -> crate::permission::Decision {
+        let _ = self; // tree identity reserved for future direct node walks
+        checker.check_permission(principal, role, action, resource)
+    }
+
     /// Return all direct children of a node.
     pub fn children(&self, id: &ResourceId) -> TreeResult<Vec<&ResourceNode>> {
         let node = self
@@ -1109,5 +1179,78 @@ mod tests {
         assert_eq!(n, 11);
         assert!(!tree.get(&ResourceId::new("/b1")).unwrap().dirty);
         assert!(!tree.get(&ResourceId::new("/b3/d2")).unwrap().dirty);
+    }
+
+    // --- WEFT-554: tree ↔ CapabilityChecker ACL wiring ---
+
+    #[test]
+    fn grant_delegation_on_node_and_check() {
+        use crate::delegation::DelegationCert;
+        use crate::did::Did;
+        use crate::model::{Action, Role};
+        use crate::permission::{CapabilityChecker, Decision, Principal};
+        use chrono::{Duration, Utc};
+        use ed25519_dalek::SigningKey;
+
+        let mut tree = ResourceTree::new();
+        let apps = ResourceId::new("/apps");
+        tree.insert(apps.clone(), ResourceKind::Namespace, ResourceId::root())
+            .unwrap();
+
+        let checker = CapabilityChecker::new();
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        let worker = Principal::from_did(Did::weft("worker").unwrap());
+        let cert = DelegationCert::grant(
+            "did:weft:admin",
+            worker.as_str(),
+            apps.clone(),
+            &key,
+            Some(Utc::now() + Duration::hours(1)),
+            None,
+        );
+        tree.grant_delegation(&apps, cert, &checker).unwrap();
+        assert_eq!(tree.get(&apps).unwrap().delegation_certs().len(), 1);
+
+        let d = tree.check(
+            &checker,
+            &worker,
+            &Role::Operator,
+            &Action::Read,
+            &apps,
+        );
+        assert_eq!(d, Decision::Delegate);
+
+        let n = tree
+            .revoke_delegation(&apps, &worker, &checker)
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            tree.check(&checker, &worker, &Role::Operator, &Action::Read, &apps),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn load_acl_into_checker_from_node_policies() {
+        use crate::model::Action;
+        use crate::permission::{AclPolicy, CapabilityChecker, Decision, Principal};
+        use crate::model::Role;
+
+        let mut tree = ResourceTree::new();
+        let path = ResourceId::new("/svc");
+        tree.insert(path.clone(), ResourceKind::Service, ResourceId::root())
+            .unwrap();
+        let alice = Principal::from_did(crate::did::Did::weft("alice").unwrap());
+        tree.get_mut(&path)
+            .unwrap()
+            .rbac_policies
+            .push(AclPolicy::allow(alice.clone(), Action::Read));
+
+        let checker = CapabilityChecker::new();
+        tree.load_acl_into(&checker);
+        assert_eq!(
+            checker.check_permission(&alice, &Role::Viewer, &Action::Read, &path),
+            Decision::Allow
+        );
     }
 }

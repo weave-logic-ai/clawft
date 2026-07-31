@@ -11,8 +11,9 @@
 //! # K0 Scope
 //! Tree CRUD, Merkle, mutation log, bootstrap.
 //!
-//! # K1 Scope (stubs in K0)
-//! Permission engine, delegation certificates.
+//! # K1 Scope (WEFT-130 scaffold + WEFT-554 Did / delegation foundation)
+//! Permission engine ([`CapabilityChecker`]), DID principals ([`Did`]),
+//! [`DelegationCert`] lifecycle (WEFT-131), local consent evaluate.
 //!
 //! ## Crate Ecosystem
 //!
@@ -32,7 +33,9 @@
 //! Source: <https://github.com/weave-logic-ai/weftos>
 
 pub mod boot;
+pub mod consent;
 pub mod delegation;
+pub mod did;
 pub mod error;
 pub mod merkle;
 pub mod model;
@@ -42,7 +45,12 @@ pub mod scoring;
 pub mod tree;
 
 pub use boot::{bootstrap_fresh, from_checkpoint, to_checkpoint};
+pub use consent::{
+    ConsentDecision, ConsentEffect, ConsentPolicy, ConsentProof, RiskScore,
+    create_consent_proof, evaluate as evaluate_consent,
+};
 pub use delegation::{DelegationCert, DelegationError, validate_chain};
+pub use did::{Did, DidError};
 pub use error::{TreeError, TreeResult};
 pub use merkle::{
     DiffNodePayload, MerkleDiff, MerkleDiffEntry, MerkleDiffKind, MerkleInclusionProof,
@@ -52,7 +60,7 @@ pub use model::{Action, ResourceId, ResourceKind, ResourceNode, Role};
 pub use mutation::{MutationEvent, MutationLog};
 pub use permission::{
     AclPolicy, CapabilityChecker, Decision, Effect, EffectiveAclCache, Principal,
-    check as check_permission,
+    check as check_permission, resource_in_scope,
 };
 pub use scoring::NodeScoring;
 pub use tree::ResourceTree;

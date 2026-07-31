@@ -106,6 +106,16 @@ pub struct ResourceNode {
     pub created_at: DateTime<Utc>,
     /// When this node was last modified.
     pub updated_at: DateTime<Utc>,
+    /// ACL policies attached to this node (WEFT-554 / SPARC §3.3).
+    ///
+    /// Stored on the node for checkpoint persistence; the live
+    /// [`crate::permission::CapabilityChecker`] is the evaluation engine
+    /// and may mirror these entries.
+    #[serde(default)]
+    pub rbac_policies: Vec<crate::permission::AclPolicy>,
+    /// Active delegation certificates on this node (WEFT-131 / WEFT-554).
+    #[serde(default)]
+    pub delegation_certs: Vec<crate::delegation::DelegationCert>,
     /// Runtime dirty flag for incremental Merkle updates (WEFT-145).
     ///
     /// Not persisted — checkpoints store only committed hashes. Set by
@@ -132,8 +142,20 @@ impl ResourceNode {
             scoring: NodeScoring::default(),
             created_at: now,
             updated_at: now,
+            rbac_policies: Vec::new(),
+            delegation_certs: Vec::new(),
             dirty: true,
         }
+    }
+
+    /// Immutable view of ACL policies on this node.
+    pub fn rbac_policies(&self) -> &[crate::permission::AclPolicy] {
+        &self.rbac_policies
+    }
+
+    /// Immutable view of delegation certificates on this node.
+    pub fn delegation_certs(&self) -> &[crate::delegation::DelegationCert] {
+        &self.delegation_certs
     }
 }
 
