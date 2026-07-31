@@ -83,12 +83,12 @@ pub struct Desktop {
     /// Explorer tray chip opens this; see `.planning/explorer/PROJECT-PLAN.md`.
     pub explorer: Explorer,
 
-    /// Standalone Terminal sidebar app state (WEFT-587). Independent
-    /// instance from `explorer.terminal_view` (which backs the
-    /// substrate-sentinel dispatch path inside the Explorer detail
-    /// pane). Two separate panels by design — different UX surfaces,
-    /// no shared session.
-    pub terminal: explorer::terminal::Terminal,
+    /// Standalone Terminal sidebar app state (WEFT-587 + WEFT-263
+    /// multi-tab). Independent instance from `explorer.terminal_view`
+    /// (which backs the substrate-sentinel dispatch path inside the
+    /// Explorer detail pane). Two separate panels by design —
+    /// different UX surfaces, no shared session.
+    pub terminal: explorer::terminal::TerminalPanel,
 
     /// Standalone Chat sidebar app state (WEFT-588 + WEFT-254).
     /// Independent multi-conversation panel from `explorer.chat_view`
@@ -274,7 +274,7 @@ impl Default for Desktop {
             app_surfaces,
             chip_surfaces,
             explorer: Explorer::default(),
-            terminal: explorer::terminal::Terminal::default(),
+            terminal: explorer::terminal::TerminalPanel::default(),
             chat: explorer::chat::ChatPanel::default(),
             sidebar: sidebar::Sidebar::default(),
             // Initialise to whatever the sidebar starts on (Files) so

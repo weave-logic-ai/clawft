@@ -310,12 +310,12 @@ pub struct Explorer {
     /// should start with an empty session list rather than inherit the
     /// previous panel's turns.
     chat_view: chat::ChatPanel,
-    /// Live terminal panel state. Reset (and the daemon-side session
-    /// closed) when selection moves off the terminal sentinel — see
-    /// [`Explorer::on_select`] and [`Explorer::close`]. Held inside
-    /// the Explorer so a single PTY survives across frames; multi-tab
-    /// would replace this with a `HashMap<SessionId, Terminal>`.
-    terminal_view: terminal::Terminal,
+    /// Live multi-tab terminal panel state (WEFT-263). Reset (and all
+    /// daemon-side sessions closed) when selection moves off the
+    /// terminal sentinel — see [`Explorer::on_select`] and
+    /// [`Explorer::close`]. `HashMap<SessionKey, Terminal>` lives
+    /// inside [`terminal::TerminalPanel`]; each tab owns its own PTY.
+    terminal_view: terminal::TerminalPanel,
     /// Most recent copy-action confirmation, paired with the instant at
     /// which it fired. Rendered as a small label next to the action row
     /// for [`COPY_TOAST_DURATION`]; cleared on the first paint after
@@ -354,7 +354,7 @@ impl Default for Explorer {
             last_slow_tick: epoch_minus(SLOW_TICK * 2),
             workshop_view: workshop::WorkshopView::default(),
             chat_view: chat::ChatPanel::default(),
-            terminal_view: terminal::Terminal::default(),
+            terminal_view: terminal::TerminalPanel::default(),
             last_copy_msg: None,
             tree_filters: tree::TreeFilters::default(),
         }
@@ -420,14 +420,14 @@ impl Explorer {
         // scope, the daemon's response is ignored). In-memory only —
         // there is no on-disk conversation to restore.
         self.chat_view = chat::ChatPanel::default();
-        // Tear down the terminal session if we were on the terminal
-        // sentinel and are navigating away. If we're navigating to a
-        // (different) terminal sentinel the next paint re-spawns; if
-        // we're navigating to anything else the daemon-side child
-        // shell dies promptly rather than waiting for the daemon to
-        // shut down.
+        // Tear down every multi-tab terminal session if we were on the
+        // terminal sentinel and are navigating away. If we're
+        // navigating to a (different) terminal sentinel the next paint
+        // re-spawns; if we're navigating to anything else the
+        // daemon-side child shells die promptly rather than waiting
+        // for the daemon to shut down.
         self.terminal_view.close(live);
-        self.terminal_view = terminal::Terminal::default();
+        self.terminal_view = terminal::TerminalPanel::default();
     }
 
     /// Clear the subscription handle. Called by the mount site when
@@ -442,11 +442,11 @@ impl Explorer {
         // Drop chat state on close — same reason as Workshop: hidden
         // panels shouldn't keep an in-flight RPC against the daemon.
         self.chat_view = chat::ChatPanel::default();
-        // Same teardown as `on_select`: kill the daemon-side shell
-        // when the Explorer is hidden so a forgotten terminal panel
-        // doesn't leak a session.
+        // Same teardown as `on_select`: kill every daemon-side shell
+        // when the Explorer is hidden so a forgotten multi-tab
+        // terminal panel doesn't leak sessions.
         self.terminal_view.close(live);
-        self.terminal_view = terminal::Terminal::default();
+        self.terminal_view = terminal::TerminalPanel::default();
         // Keep expanded + tree_children so reopening is instant.
     }
 

@@ -4,11 +4,12 @@
 //! sidebar 9.
 //!
 //! The renderer + RPC machinery (alacritty grid, vte parser, mouse
-//! selection, scrollback wheel handler, etc.) live in
-//! `explorer::terminal`. This module is a thin host: it owns nothing
-//! itself, paints the canonical heading, and delegates the body rect
-//! to the standalone [`Terminal`](crate::explorer::terminal::Terminal)
-//! instance kept on the [`Desktop`].
+//! selection, scrollback wheel handler, multi-tab panel, etc.) live
+//! in `explorer::terminal`. This module is a thin host: it owns
+//! nothing itself, paints the canonical heading, and delegates the
+//! body rect to the standalone
+//! [`TerminalPanel`](crate::explorer::terminal::TerminalPanel)
+//! instance kept on the [`Desktop`] (WEFT-263 multi-tab).
 //!
 //! State-lifting note: `desk.terminal` is independent from
 //! `desk.explorer.terminal_view` (which still backs the
@@ -50,7 +51,7 @@ pub fn show(
     // heading. `scope_builder` (vs. raw `new_child`) wraps the child
     // Ui so its widget entry is finalised against actual bounds —
     // important for the focus + click-and-drag plumbing inside
-    // `Terminal::paint`.
+    // `TerminalPanel::paint` / `Terminal::paint_ui`.
     ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
         desk.terminal.paint(ui, live);
     });

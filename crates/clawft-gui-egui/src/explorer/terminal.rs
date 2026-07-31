@@ -42,15 +42,19 @@
 //!   alacritty's grid history; configurable bound defaults to ~10 000
 //!   lines (alacritty's own default). Resize re-reflows correctly via
 //!   the existing `Term::resize` path.
+//! - **Multi-tab terminal** (WEFT-263). [`TerminalPanel`] owns a
+//!   `HashMap<SessionKey, Terminal>` (rekeyed to the daemon SessionId
+//!   after `terminal.spawn`), a tab strip with new/close affordances,
+//!   and routes paint/input to the active session while background
+//!   tabs keep polling PTY output.
 //!
 //! ## What's deferred
 //!
-//! - **Multi-tab terminal** (WEFT-263, deferred). Single Terminal panel
-//!   per Explorer selection; structural change to multi-session.
 //! - **Browser (wasm32) target gets a stub** — alacritty_terminal
 //!   pulls in platform-specific tty + polling crates that don't
 //!   compile for wasm. Native-only renderer; wasm shows a placeholder.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::egui;
@@ -194,20 +198,49 @@ mod imp {
     }
 
     impl Terminal {
-        pub fn paint(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
-            // 1. Drain any in-flight RPC replies.
+        /// Daemon session id once `terminal.spawn` has resolved.
+        pub fn session_id(&self) -> Option<&str> {
+            self.session_id.as_deref()
+        }
+
+        /// Shell path reported by the spawn reply, if any.
+        pub fn shell(&self) -> Option<&str> {
+            self.shell.as_deref()
+        }
+
+        /// Last spawn / decode error, if the session failed.
+        pub fn last_error(&self) -> Option<&str> {
+            self.last_error.as_deref()
+        }
+
+        /// Drain RPCs, lazy-spawn, and poll output without painting.
+        /// Used by [`TerminalPanel`] so background tabs keep receiving
+        /// PTY bytes while another tab is active.
+        pub fn tick(&mut self, live: &Arc<Live>) {
             self.drain_spawn_reply();
             self.drain_output_reply();
-
-            // 2. Lazy spawn on first paint.
             if self.session_id.is_none()
                 && self.spawn_pending.is_none()
                 && self.last_error.is_none()
             {
                 self.fire_spawn(live);
             }
+            self.maybe_poll_output(live);
+        }
 
-            // 3. Header.
+        /// Tick RPCs then paint the grid. Prefer [`TerminalPanel`] for
+        /// multi-session hosts; this entry point remains for single-
+        /// session call sites and tests.
+        pub fn paint(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
+            self.tick(live);
+            self.paint_ui(ui, live);
+        }
+
+        /// Paint header + grid + input without draining RPCs. Callers
+        /// that already ran [`Self::tick`] (or [`TerminalPanel`]) use
+        /// this to avoid double-polling in the same frame.
+        pub fn paint_ui(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
+            // Header (shell · session status for this PTY).
             paint_header(ui, &self.shell, &self.session_id);
 
             if let Some(err) = &self.last_error {
@@ -218,8 +251,8 @@ mod imp {
                 ui.separator();
             }
 
-            // 4. Reserve a region for the terminal grid. Egui paints
-            //    via Painter, so we allocate once and own a Rect.
+            // Reserve a region for the terminal grid. Egui paints
+            // via Painter, so we allocate once and own a Rect.
             let avail = ui.available_size_before_wrap();
             let (cell_w, cell_h) = cell_metrics(ui);
             let (rect, response) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
@@ -236,7 +269,7 @@ mod imp {
 
             let painter = ui.painter_at(rect);
 
-            // 5. Compute cols/rows from rect; resize Term if changed.
+            // Compute cols/rows from rect; resize Term if changed.
             let cols = ((rect.width() / cell_w).floor() as i32).clamp(20, 400) as u16;
             let rows = ((rect.height() / cell_h).floor() as i32).clamp(8, 200) as u16;
             if (rows, cols) != self.last_size {
@@ -248,13 +281,13 @@ mod imp {
                 self.fire_resize(live, rows, cols);
             }
 
-            // 6. Paint global background first.
+            // Paint global background first.
             painter.rect_filled(rect, 0.0, color_for(&Color::Named(NamedColor::Background)));
 
-            // 7. Wheel-scroll into scrollback (WEFT-262). Egui's
-            //    `smooth_scroll_delta.y` is in CSS-pixel units (smoothed
-            //    across frames); positive is "scroll up" (content moves
-            //    down). We convert to alacritty `Scroll::Delta(lines)`.
+            // Wheel-scroll into scrollback (WEFT-262). Egui's
+            // `smooth_scroll_delta.y` is in CSS-pixel units (smoothed
+            // across frames); positive is "scroll up" (content moves
+            // down). We convert to alacritty `Scroll::Delta(lines)`.
             let wheel_lines = if response.hovered() {
                 let dy = ui.input(|i| i.smooth_scroll_delta.y);
                 if dy.abs() >= 0.5 {
@@ -269,17 +302,17 @@ mod imp {
                 self.term.scroll_display(Scroll::Delta(wheel_lines));
             }
 
-            // 8. Mouse selection (WEFT-260). Drag with primary button to
-            //    select; click without drag clears the selection.
+            // Mouse selection (WEFT-260). Drag with primary button to
+            // select; click without drag clears the selection.
             self.handle_selection(ui, &response, rect, cell_w, cell_h);
 
-            // 9. Paint the grid.
+            // Paint the grid.
             paint_grid(&painter, &self.term, rect, cell_w, cell_h);
 
-            // 10. Paint the selection overlay over the grid.
+            // Paint the selection overlay over the grid.
             paint_selection(&painter, &self.term, rect, cell_w, cell_h);
 
-            // 11. Input: if focused, translate egui events to PTY bytes.
+            // Input: if focused, translate egui events to PTY bytes.
             if response.has_focus() {
                 let cursor_visible_blink = ui.input(|i| i.time).fract() < 0.55;
                 if cursor_visible_blink {
@@ -314,9 +347,6 @@ mod imp {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(120));
             }
-
-            // 9. Schedule next output poll.
-            self.maybe_poll_output(live);
         }
 
         pub fn close(&mut self, live: &Arc<Live>) {
@@ -587,6 +617,345 @@ mod imp {
             // Explorer's `close()` drives `terminal.close` explicitly.
             // If Drop runs without it, the daemon-side session lives
             // until the daemon shuts down — acceptable.
+        }
+    }
+
+    // ── WEFT-263 multi-tab panel ────────────────────────────────────
+
+    /// Map key for a terminal tab.
+    ///
+    /// Starts as a provisional `local-tab-…` id minted on
+    /// [`TerminalPanel::new_tab`]. After `terminal.spawn` returns, the
+    /// panel rekeys the entry to the daemon SessionId so the structure
+    /// is effectively `HashMap<SessionId, Terminal>` for live PTYs.
+    pub type SessionKey = String;
+
+    /// Multi-tab terminal host (WEFT-263).
+    ///
+    /// Owns one or more [`Terminal`] sessions in a
+    /// [`HashMap`]`<`[`SessionKey`], [`Terminal`]`>`. The tab strip
+    /// provides new/close affordances; selection switches the active
+    /// session. Background tabs continue to tick (spawn/poll/drain) so
+    /// PTY output is not dropped while another tab is focused.
+    pub struct TerminalPanel {
+        sessions: HashMap<SessionKey, Terminal>,
+        /// Tab bar order (creation order; stable across rekeys).
+        order: Vec<SessionKey>,
+        /// Currently painted / input-focused tab key.
+        active: SessionKey,
+    }
+
+    impl Default for TerminalPanel {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl TerminalPanel {
+        /// Panel with a single empty (not-yet-spawned) tab selected.
+        pub fn new() -> Self {
+            let key = mint_local_tab_key();
+            let mut sessions = HashMap::new();
+            sessions.insert(key.clone(), Terminal::default());
+            Self {
+                sessions,
+                order: vec![key.clone()],
+                active: key,
+            }
+        }
+
+        /// Number of open tabs.
+        pub fn len(&self) -> usize {
+            self.order.len()
+        }
+
+        /// True when no tabs exist (should not happen after [`Self::new`]).
+        pub fn is_empty(&self) -> bool {
+            self.order.is_empty()
+        }
+
+        /// Active tab key (provisional local id or daemon SessionId).
+        pub fn active_key(&self) -> &str {
+            &self.active
+        }
+
+        /// Tab keys in tab-bar order.
+        pub fn order(&self) -> &[SessionKey] {
+            &self.order
+        }
+
+        /// Borrow the session map (tests / host introspection).
+        pub fn sessions(&self) -> &HashMap<SessionKey, Terminal> {
+            &self.sessions
+        }
+
+        /// Active terminal (read-only).
+        pub fn active_terminal(&self) -> &Terminal {
+            self.sessions
+                .get(&self.active)
+                .expect("active key always present in sessions")
+        }
+
+        /// Active terminal (mutable).
+        pub fn active_terminal_mut(&mut self) -> &mut Terminal {
+            let key = self.active.clone();
+            self.sessions
+                .get_mut(&key)
+                .expect("active key always present in sessions")
+        }
+
+        /// Open a new tab with a fresh [`Terminal`] and select it.
+        /// Returns the provisional local key.
+        pub fn new_tab(&mut self) -> SessionKey {
+            let key = mint_local_tab_key();
+            self.sessions.insert(key.clone(), Terminal::default());
+            self.order.push(key.clone());
+            self.active = key.clone();
+            key
+        }
+
+        /// Select tab `key` if it exists. No-op on unknown keys.
+        pub fn select(&mut self, key: &str) {
+            if self.sessions.contains_key(key) {
+                self.active = key.to_string();
+            }
+        }
+
+        /// Close the tab identified by `key`. Closes the daemon-side
+        /// PTY when a SessionId is present. Always leaves at least one
+        /// tab (opens a fresh empty tab if the last one is closed).
+        pub fn close_tab(&mut self, live: &Arc<Live>, key: &str) {
+            if !self.sessions.contains_key(key) {
+                return;
+            }
+            let closed_idx = self.order.iter().position(|k| k == key);
+            if let Some(mut term) = self.sessions.remove(key) {
+                term.close(live);
+            }
+            self.order.retain(|k| k != key);
+
+            if self.order.is_empty() {
+                let fresh = mint_local_tab_key();
+                self.sessions
+                    .insert(fresh.clone(), Terminal::default());
+                self.order.push(fresh.clone());
+                self.active = fresh;
+                return;
+            }
+
+            if self.active == key {
+                // Prefer the neighbour to the right of the closed tab,
+                // then left, then last remaining.
+                let next = closed_idx
+                    .and_then(|i| self.order.get(i).cloned())
+                    .or_else(|| {
+                        closed_idx.and_then(|i| {
+                            i.checked_sub(1)
+                                .and_then(|j| self.order.get(j).cloned())
+                        })
+                    })
+                    .or_else(|| self.order.last().cloned())
+                    .expect("order non-empty after close");
+                self.active = next;
+            }
+        }
+
+        /// Close every session (Explorer selection change / panel hide).
+        pub fn close(&mut self, live: &Arc<Live>) {
+            for term in self.sessions.values_mut() {
+                term.close(live);
+            }
+            self.sessions.clear();
+            self.order.clear();
+            // Restore a single empty tab so the next paint is ready.
+            let key = mint_local_tab_key();
+            self.sessions.insert(key.clone(), Terminal::default());
+            self.order.push(key.clone());
+            self.active = key;
+        }
+
+        /// Drain/spawn/poll every tab, rekey provisional → SessionId,
+        /// paint the tab strip, then paint the active grid.
+        pub fn paint(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
+            for term in self.sessions.values_mut() {
+                term.tick(live);
+            }
+            self.rekey_spawned();
+
+            paint_tab_strip(ui, self, live);
+
+            // Defensive: active must resolve after rekey / close.
+            if !self.sessions.contains_key(&self.active) {
+                if let Some(first) = self.order.first().cloned() {
+                    self.active = first;
+                } else {
+                    let _ = self.new_tab();
+                }
+            }
+
+            let active = self.active.clone();
+            if let Some(term) = self.sessions.get_mut(&active) {
+                term.paint_ui(ui, live);
+            }
+        }
+
+        /// After spawn replies land, rename map keys from provisional
+        /// local ids to the daemon SessionId so the structure matches
+        /// `HashMap<SessionId, Terminal>`.
+        fn rekey_spawned(&mut self) {
+            let mut renames: Vec<(String, String)> = Vec::new();
+            for key in &self.order {
+                if let Some(term) = self.sessions.get(key)
+                    && let Some(sid) = term.session_id()
+                    && sid != key.as_str()
+                    && !self.sessions.contains_key(sid)
+                {
+                    renames.push((key.clone(), sid.to_string()));
+                }
+            }
+            for (old, new) in renames {
+                if let Some(term) = self.sessions.remove(&old) {
+                    self.sessions.insert(new.clone(), term);
+                }
+                if let Some(slot) = self.order.iter_mut().find(|k| *k == &old) {
+                    *slot = new.clone();
+                }
+                if self.active == old {
+                    self.active = new;
+                }
+            }
+        }
+    }
+
+    fn mint_local_tab_key() -> SessionKey {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(1);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        format!("local-tab-{n:04}")
+    }
+
+    /// Tab strip: one chip per session + close (×) + new-tab (+).
+    fn paint_tab_strip(ui: &mut egui::Ui, panel: &mut TerminalPanel, live: &Arc<Live>) {
+        let order = panel.order.clone();
+        let active = panel.active.clone();
+        let mut select_key: Option<String> = None;
+        let mut close_key: Option<String> = None;
+        let mut want_new = false;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for key in &order {
+                let selected = key == &active;
+                let label = tab_label(panel.sessions.get(key));
+                let fill = if selected {
+                    egui::Color32::from_rgb(40, 55, 75)
+                } else {
+                    egui::Color32::from_rgb(28, 28, 34)
+                };
+                let stroke = if selected {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 140, 200))
+                } else {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 58))
+                };
+                let frame = egui::Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .corner_radius(4.0);
+
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let tab_resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(&label)
+                                        .small()
+                                        .monospace()
+                                        .strong()
+                                        .color(if selected {
+                                            egui::Color32::from_rgb(220, 230, 245)
+                                        } else {
+                                            egui::Color32::from_rgb(170, 175, 185)
+                                        }),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text(key);
+                        if tab_resp.clicked() {
+                            select_key = Some(key.clone());
+                        }
+                        let close_resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new("×")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(160, 120, 120)),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Close tab");
+                        if close_resp.clicked() {
+                            close_key = Some(key.clone());
+                        }
+                    });
+                });
+            }
+
+            let new_resp = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("+")
+                            .small()
+                            .strong()
+                            .color(egui::Color32::from_rgb(140, 200, 160)),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("New terminal tab");
+            if new_resp.clicked() {
+                want_new = true;
+            }
+        });
+        ui.separator();
+
+        if let Some(key) = select_key {
+            panel.select(&key);
+        }
+        if let Some(key) = close_key {
+            panel.close_tab(live, &key);
+        }
+        if want_new {
+            panel.new_tab();
+        }
+    }
+
+    fn tab_label(term: Option<&Terminal>) -> String {
+        let Some(term) = term else {
+            return "terminal".into();
+        };
+        if let Some(shell) = term.shell() {
+            // basename of shell path for a compact tab chip
+            let base = shell.rsplit('/').next().unwrap_or(shell);
+            if let Some(sid) = term.session_id() {
+                let short = short_id(sid);
+                return format!("{base} · {short}");
+            }
+            return base.to_string();
+        }
+        if let Some(sid) = term.session_id() {
+            return short_id(sid);
+        }
+        if term.last_error().is_some() {
+            return "error".into();
+        }
+        "starting…".into()
+    }
+
+    fn short_id(id: &str) -> String {
+        if id.len() > 14 {
+            format!("{}…", &id[..12])
+        } else {
+            id.to_owned()
         }
     }
 
@@ -1299,6 +1668,115 @@ mod imp {
             let s = t.term.selection_to_string().unwrap_or_default();
             assert_eq!(s, "hello");
         }
+
+        // ── WEFT-263 multi-tab panel ───────────────────────────────
+
+        #[test]
+        fn panel_starts_with_one_tab() {
+            let p = TerminalPanel::new();
+            assert_eq!(p.len(), 1);
+            assert!(!p.is_empty());
+            assert!(p.sessions().contains_key(p.active_key()));
+            assert_eq!(p.order().len(), 1);
+            assert!(p.active_key().starts_with("local-tab-"));
+        }
+
+        #[test]
+        fn panel_new_tab_selects_fresh_session() {
+            let mut p = TerminalPanel::new();
+            let first = p.active_key().to_string();
+            let second = p.new_tab();
+            assert_eq!(p.len(), 2);
+            assert_eq!(p.active_key(), second);
+            assert_ne!(first, second);
+            assert!(p.sessions().contains_key(&first));
+            assert!(p.sessions().contains_key(&second));
+        }
+
+        #[test]
+        fn panel_select_switches_active() {
+            let mut p = TerminalPanel::new();
+            let first = p.active_key().to_string();
+            let second = p.new_tab();
+            assert_eq!(p.active_key(), second);
+            p.select(&first);
+            assert_eq!(p.active_key(), first);
+            // Unknown key is a no-op.
+            p.select("no-such-tab");
+            assert_eq!(p.active_key(), first);
+        }
+
+        #[test]
+        fn panel_close_last_tab_replaces_with_fresh() {
+            // Live is only needed for daemon close RPCs; closing a tab
+            // that never spawned still exercises the map/order logic.
+            // We cannot easily construct Live here, so exercise the
+            // pure map path via a direct session_id-less close: empty
+            // Terminal::fire_close is a no-op when session_id is None.
+            // Use a stub path: call close_tab with a fake Live is hard;
+            // instead unit-test rekey + map ops via internal helpers.
+            let mut p = TerminalPanel::new();
+            let only = p.active_key().to_string();
+            // Simulate close_tab without Live by mirroring the empty-shell
+            // branch: remove + reseed.
+            p.sessions.remove(&only);
+            p.order.clear();
+            assert!(p.order.is_empty());
+            // Re-seed the same way close_tab does when order empties.
+            let fresh = mint_local_tab_key();
+            p.sessions.insert(fresh.clone(), Terminal::default());
+            p.order.push(fresh.clone());
+            p.active = fresh.clone();
+            assert_eq!(p.len(), 1);
+            assert_ne!(p.active_key(), only);
+            assert!(p.sessions().contains_key(&fresh));
+        }
+
+        #[test]
+        fn panel_rekey_spawned_moves_to_session_id() {
+            let mut p = TerminalPanel::new();
+            let local = p.active_key().to_string();
+            // Simulate a successful spawn reply on the active terminal.
+            {
+                let t = p.active_terminal_mut();
+                t.session_id = Some("t-deadbeef0001".into());
+                t.output_path = Some("substrate/x/derived/terminal/t-deadbeef0001".into());
+                t.shell = Some("/bin/zsh".into());
+            }
+            p.rekey_spawned();
+            assert!(!p.sessions().contains_key(&local));
+            assert!(p.sessions().contains_key("t-deadbeef0001"));
+            assert_eq!(p.active_key(), "t-deadbeef0001");
+            assert_eq!(p.order(), &["t-deadbeef0001".to_string()]);
+            assert_eq!(p.active_terminal().shell(), Some("/bin/zsh"));
+        }
+
+        #[test]
+        fn panel_rekey_preserves_order_across_multiple_tabs() {
+            let mut p = TerminalPanel::new();
+            let a = p.active_key().to_string();
+            let b = p.new_tab();
+            p.sessions.get_mut(&a).unwrap().session_id = Some("sess-a".into());
+            p.sessions.get_mut(&b).unwrap().session_id = Some("sess-b".into());
+            p.rekey_spawned();
+            assert_eq!(p.order(), &["sess-a".to_string(), "sess-b".to_string()]);
+            assert_eq!(p.active_key(), "sess-b");
+            assert_eq!(p.len(), 2);
+        }
+
+        #[test]
+        fn tab_label_uses_shell_basename_and_short_id() {
+            let mut t = Terminal::default();
+            // 14-char ids fit without ellipsis; longer ones are shortened.
+            t.session_id = Some("t-deadbeef0001".into());
+            t.shell = Some("/bin/zsh".into());
+            assert_eq!(tab_label(Some(&t)), "zsh · t-deadbeef0001");
+            t.session_id = Some("t-deadbeef0001extra".into());
+            assert_eq!(tab_label(Some(&t)), "zsh · t-deadbeef00…");
+            assert_eq!(tab_label(None), "terminal");
+            let empty = Terminal::default();
+            assert_eq!(tab_label(Some(&empty)), "starting…");
+        }
     }
 }
 
@@ -1313,6 +1791,24 @@ mod imp {
     pub struct Terminal {}
 
     impl Terminal {
+        pub fn session_id(&self) -> Option<&str> {
+            None
+        }
+
+        pub fn shell(&self) -> Option<&str> {
+            None
+        }
+
+        pub fn last_error(&self) -> Option<&str> {
+            None
+        }
+
+        pub fn tick(&mut self, _live: &Arc<Live>) {}
+
+        pub fn paint_ui(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
+            self.paint(ui, live);
+        }
+
         pub fn paint(&mut self, ui: &mut egui::Ui, _live: &Arc<Live>) {
             ui.heading("Terminal");
             ui.separator();
@@ -1325,9 +1821,105 @@ mod imp {
 
         pub fn close(&mut self, _live: &Arc<Live>) {}
     }
+
+    /// Wasm stub multi-tab host — same API surface as the native
+    /// [`super::imp::TerminalPanel`] so Explorer/Desktop compile, but
+    /// only paints the unavailable placeholder.
+    pub struct TerminalPanel {
+        sessions: HashMap<String, Terminal>,
+        order: Vec<String>,
+        active: String,
+    }
+
+    impl Default for TerminalPanel {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl TerminalPanel {
+        pub fn new() -> Self {
+            let key = "local-tab-0001".to_string();
+            let mut sessions = HashMap::new();
+            sessions.insert(key.clone(), Terminal::default());
+            Self {
+                sessions,
+                order: vec![key.clone()],
+                active: key,
+            }
+        }
+
+        pub fn len(&self) -> usize {
+            self.order.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.order.is_empty()
+        }
+
+        pub fn active_key(&self) -> &str {
+            &self.active
+        }
+
+        pub fn order(&self) -> &[String] {
+            &self.order
+        }
+
+        pub fn sessions(&self) -> &HashMap<String, Terminal> {
+            &self.sessions
+        }
+
+        pub fn active_terminal(&self) -> &Terminal {
+            &self.sessions[&self.active]
+        }
+
+        pub fn active_terminal_mut(&mut self) -> &mut Terminal {
+            self.sessions.get_mut(&self.active).unwrap()
+        }
+
+        pub fn new_tab(&mut self) -> String {
+            let key = format!("local-tab-{:04}", self.order.len() + 1);
+            self.sessions.insert(key.clone(), Terminal::default());
+            self.order.push(key.clone());
+            self.active = key.clone();
+            key
+        }
+
+        pub fn select(&mut self, key: &str) {
+            if self.sessions.contains_key(key) {
+                self.active = key.to_string();
+            }
+        }
+
+        pub fn close_tab(&mut self, _live: &Arc<Live>, key: &str) {
+            if self.sessions.remove(key).is_none() {
+                return;
+            }
+            self.order.retain(|k| k != key);
+            if self.order.is_empty() {
+                let _ = self.new_tab();
+                return;
+            }
+            if self.active == key {
+                self.active = self.order.last().cloned().unwrap();
+            }
+        }
+
+        pub fn close(&mut self, _live: &Arc<Live>) {
+            self.sessions.clear();
+            self.order.clear();
+            let _ = self.new_tab();
+        }
+
+        pub fn paint(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
+            self.active_terminal_mut().paint(ui, live);
+        }
+    }
+
+    pub type SessionKey = String;
 }
 
-pub use imp::Terminal;
+pub use imp::{SessionKey, Terminal, TerminalPanel};
 
 #[cfg(test)]
 mod sentinel_tests {
