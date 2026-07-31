@@ -1,7 +1,7 @@
 {
-  "name": "ClawFT Agent Dashboard",
-  "short_name": "ClawFT",
-  "description": "Browser-mode AI agent runtime and dashboard for ClawFT.",
+  "name": "WeftOS Agent Dashboard",
+  "short_name": "WeftOS",
+  "description": "Browser-mode AI agent runtime and dashboard for WeftOS / ClawFT.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -13,10 +13,22 @@
   "categories": ["productivity", "developer", "utilities"],
   "icons": [
     {
-      "src": "/vite.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

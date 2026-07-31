@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
- * A fuzzy-search command palette (Cmd+K / Ctrl+K), WEFT-308.
+ * A fuzzy-search command palette (Cmd+K / Ctrl+K), WEFT-308 + WEFT-568.
  *
- * Indexes route nav items, recent navigations, and ad-hoc commands.
- * Keyboard navigable (arrow up/down, enter, escape), focus-trapped
- * via `autoFocus` on the input plus the `Escape` keydown handler in
- * the parent. Recent items are persisted to localStorage so the
- * palette feels stateful across sessions and across both Axum and
- * WASM adapter modes (the storage key is namespaced).
+ * Indexes route nav items, live agents/sessions/tools/skills/channels,
+ * and ad-hoc commands. Keyboard navigable (arrow up/down, enter, escape)
+ * with a real focus trap (Tab cycles within the dialog). Recent items
+ * are persisted to localStorage.
  */
 
 export interface PaletteItem {
@@ -82,24 +80,67 @@ function fuzzyScore(query: string, target: string): number {
   return qi === q.length ? gaps + (t.length - q.length) * 0.1 : Number.POSITIVE_INFINITY;
 }
 
+/** Collect focusable elements inside a root (WEFT-568 focus trap). */
+function focusableWithin(root: HTMLElement): HTMLElement[] {
+  const nodes = root.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  );
+  return Array.from(nodes).filter(
+    (el) => !el.hasAttribute("disabled") && el.offsetParent !== null,
+  );
+}
+
 export function CommandPalette({ open, onClose, items }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const [recents, setRecents] = useState<string[]>(() => loadRecents());
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
 
-  // Reset query + selection each time the palette opens.
-  // The setState calls here are guarded by `open` going true and are
-  // the standard React idiom for resetting modal-local state on open.
+  // Reset query + selection each time the palette opens; restore focus on close.
   useEffect(() => {
     if (open) {
+      previouslyFocused.current = document.activeElement as HTMLElement | null;
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setQuery("");
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveIdx(0);
-      // Defer focus until after the modal mounts.
       requestAnimationFrame(() => inputRef.current?.focus());
+    } else if (previouslyFocused.current) {
+      previouslyFocused.current.focus?.();
+      previouslyFocused.current = null;
     }
+  }, [open]);
+
+  // Focus trap: keep Tab/Shift+Tab inside the dialog (WEFT-568).
+  useEffect(() => {
+    if (!open) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !dialogRef.current) return;
+      const focusables = focusableWithin(dialogRef.current);
+      if (focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (e.shiftKey) {
+        if (active === first || !dialogRef.current.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !dialogRef.current.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [open]);
 
   // Filter + rank items by fuzzy score, surfacing recents first when
@@ -132,8 +173,6 @@ export function CommandPalette({ open, onClose, items }: CommandPaletteProps) {
   }, [items, query, recents]);
 
   // Clamp the active index whenever the ranked list shrinks.
-  // The setState here is the standard React pattern for syncing a
-  // selection index with a derived collection length.
   useEffect(() => {
     if (activeIdx >= ranked.length) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -169,6 +208,7 @@ export function CommandPalette({ open, onClose, items }: CommandPaletteProps) {
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-50 flex items-start justify-center pt-24"
       role="dialog"
       aria-modal="true"
@@ -179,6 +219,7 @@ export function CommandPalette({ open, onClose, items }: CommandPaletteProps) {
         className="fixed inset-0 bg-black/50"
         onClick={onClose}
         aria-label="Close command palette"
+        tabIndex={-1}
       />
       <div className="relative z-50 w-full max-w-lg rounded-lg border border-gray-200 bg-white shadow-2xl dark:border-gray-700 dark:bg-gray-800">
         <input
@@ -221,7 +262,7 @@ export function CommandPalette({ open, onClose, items }: CommandPaletteProps) {
                   onClick={() => runItem(item)}
                   onMouseEnter={() => setActiveIdx(idx)}
                   className={
-                    "flex w-full items-center gap-3 px-4 py-2 text-left text-sm transition-colors " +
+                    "flex w-full items-center gap-3 px-4 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 " +
                     (active
                       ? "bg-blue-50 text-blue-900 dark:bg-blue-900/30 dark:text-blue-100"
                       : "text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700")

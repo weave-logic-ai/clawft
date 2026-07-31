@@ -15,6 +15,13 @@ use tokio::sync::{RwLock, broadcast};
 /// Each topic has a [`broadcast::Sender`] with a fixed capacity. Clients
 /// subscribe by obtaining a [`broadcast::Receiver`] via [`subscribe`]. The
 /// gateway dispatch loop (or any other producer) publishes via [`publish`].
+///
+/// ## Lifecycle / leak prevention (WEFT-565)
+///
+/// Topic slots are created on first subscribe. When every receiver for a
+/// topic has dropped, the next `publish` (or an explicit [`prune_empty`])
+/// removes the idle `Sender` from the map so high-cardinality names
+/// (`sessions:<uuid>`, `agents:<id>`) cannot accumulate forever.
 #[derive(Clone)]
 pub struct TopicBroadcaster {
     /// Map of topic name to broadcast sender.
@@ -47,12 +54,17 @@ impl TopicBroadcaster {
     /// Publish a message to a topic.
     ///
     /// If no subscribers are currently listening on the topic, the message is
-    /// silently dropped.
+    /// silently dropped and the idle topic slot is pruned (WEFT-565).
     pub async fn publish(&self, topic: &str, message: serde_json::Value) {
-        let topics = self.topics.read().await;
+        let mut topics = self.topics.write().await;
         if let Some(tx) = topics.get(topic) {
             // Ignore send errors (no active subscribers).
             let _ = tx.send(message.to_string());
+            // Opportunistic prune: if nobody is listening after the send,
+            // drop the topic slot so high-cardinality names cannot leak.
+            if tx.receiver_count() == 0 {
+                topics.remove(topic);
+            }
         }
     }
 
@@ -62,6 +74,21 @@ impl TopicBroadcaster {
     pub async fn subscribe(&self, topic: &str) -> broadcast::Receiver<String> {
         let tx = self.get_or_create(topic).await;
         tx.subscribe()
+    }
+
+    /// Remove topic slots that currently have zero receivers.
+    ///
+    /// Safe to call from a background task or after bulk disconnects.
+    pub async fn prune_empty(&self) {
+        let mut topics = self.topics.write().await;
+        topics.retain(|_, tx| tx.receiver_count() > 0);
+    }
+
+    /// Number of topic slots currently retained (including idle ones until pruned).
+    #[cfg(test)]
+    pub async fn topic_count(&self) -> usize {
+        let topics = self.topics.read().await;
+        topics.len()
     }
 
     /// List all topic names that currently have channels.
@@ -126,5 +153,49 @@ mod tests {
         let mut topics = bc.topics().await;
         topics.sort();
         assert_eq!(topics, vec!["agents", "sessions"]);
+    }
+
+    /// WEFT-565: dropping the last receiver + publish prunes the topic slot.
+    #[tokio::test]
+    async fn publish_prunes_idle_topic_after_last_receiver_drops() {
+        let bc = TopicBroadcaster::new();
+        {
+            let _rx = bc.subscribe("sessions:uuid-abc").await;
+            assert_eq!(bc.topic_count().await, 1);
+        }
+        // Receiver dropped; slot still present until opportunistic prune.
+        assert_eq!(bc.topic_count().await, 1);
+
+        bc.publish("sessions:uuid-abc", serde_json::json!({"type": "noop"}))
+            .await;
+        assert_eq!(
+            bc.topic_count().await,
+            0,
+            "idle topic must be removed on publish when receiver_count==0"
+        );
+    }
+
+    /// WEFT-565: prune_empty removes all zero-receiver slots without a publish.
+    #[tokio::test]
+    async fn prune_empty_removes_zero_receiver_topics() {
+        let bc = TopicBroadcaster::new();
+        {
+            let _a = bc.subscribe("agents:1").await;
+            let _b = bc.subscribe("agents:2").await;
+            assert_eq!(bc.topic_count().await, 2);
+        }
+        assert_eq!(bc.topic_count().await, 2);
+        bc.prune_empty().await;
+        assert_eq!(bc.topic_count().await, 0);
+    }
+
+    /// Active subscribers keep the topic alive across publish.
+    #[tokio::test]
+    async fn publish_keeps_topic_with_active_receivers() {
+        let bc = TopicBroadcaster::new();
+        let mut rx = bc.subscribe("agents").await;
+        bc.publish("agents", serde_json::json!({"ok": true})).await;
+        assert_eq!(bc.topic_count().await, 1);
+        let _ = rx.recv().await.unwrap();
     }
 }

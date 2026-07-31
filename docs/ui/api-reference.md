@@ -1147,9 +1147,11 @@ PUT /api/config
 
 Replace the current configuration. Accepts a full `ConfigData` JSON object.
 
-**Status:** Stub (always returns error "config saving not yet implemented")
+**Status:** Live (WEFT-168 / WEFT-303 / WEFT-566)
 
 **Request body:** Full `ConfigData` JSON object (same shape as GET response).
+Secrets may be supplied as plain values; the bridge validates the payload
+against the typed `clawft_types::config::Config` schema before writing.
 
 **Response:**
 
@@ -1160,7 +1162,36 @@ Replace the current configuration. Accepts a full `ConfigData` JSON object.
 Or on error:
 
 ```json
-{ "success": false, "error": "config saving not yet implemented" }
+{ "success": false, "error": "config validation failed: …" }
+```
+
+#### Hot-reload semantics (WEFT-566)
+
+`PUT /api/config` → `ConfigBridge::save_config` **persists to disk only**.
+It does **not** push a hot-reload signal into the running daemon process.
+
+| Field class | Effect of save | When it takes effect |
+|-------------|----------------|----------------------|
+| Provider API keys / base URLs | Written to the canonical config file (atomic write-tmp-then-rename) | **Daemon restart** (or process that re-reads config on boot) |
+| Channel enable/disable toggles | Written to disk | **Daemon restart** — channel adapters are wired at startup from `ChannelsConfig` |
+| Agent defaults (model, max_tokens, temperature) | Written to disk | **Daemon restart** for in-memory agent defaults; new sessions after a full reload pick them up |
+| Gateway port / `api_enabled` | Written to disk | **Daemon restart** (bind happens at boot) |
+| Routing strategy | Written to disk | **Daemon restart** |
+
+**Operator guidance:** after a successful `PUT /api/config`, restart the
+gateway / `weft` daemon (or redeploy the process) for changes to become
+live. The HTTP response `{ "success": true }` only means the file was
+validated and written.
+
+**Follow-up:** a true hot-reload path (in-process `Config` swap + selective
+channel rebind) is **not** implemented. Track under a future `ws09` item if
+operators need zero-downtime config edits.
+
+When the bridge was constructed without a discovered `save_path`
+(read-only / embedded), the call fails with:
+
+```json
+{ "success": false, "error": "config saving is disabled: no canonical config path was discovered at boot" }
 ```
 
 ---

@@ -9,7 +9,10 @@
  */
 
 import { useState, useCallback, useEffect } from "react";
-import { validateCorsProxyUrl } from "../../lib/url-validator.ts";
+import {
+  validateCorsProxyUrl,
+  validateProviderUrl,
+} from "../../lib/url-validator.ts";
 
 // ---------------------------------------------------------------------------
 // Provider and model configuration
@@ -139,23 +142,35 @@ export function BrowserConfig({ onConfigured }: BrowserConfigProps) {
   const selectedProvider = PROVIDERS.find((p) => p.value === provider);
   const needsProxy = !selectedProvider?.browserDirect;
 
-  // Re-validate the proxy URL whenever the input changes (covers the legacy-
-  // stored values surfaced after `useEffect` below restores them).
+  // Re-validate proxy + custom base URL whenever inputs change (covers legacy
+  // stored values restored after mount, and WEFT-571 customBaseUrl HTTPS).
   useEffect(() => {
-    if (!needsProxy) {
-      setError(null);
-      return;
+    if (needsProxy) {
+      const result = validateCorsProxyUrl(corsProxy);
+      if (!result.valid) {
+        setError(result.error ?? "Invalid CORS proxy URL.");
+        return;
+      }
     }
-    const result = validateCorsProxyUrl(corsProxy);
-    if (!result.valid) {
-      setError(result.error ?? "Invalid CORS proxy URL.");
-    } else if (error?.startsWith("HTTP CORS proxy") || error?.startsWith("Unsupported")) {
+    if (provider === "custom") {
+      const base = validateProviderUrl(customBaseUrl);
+      if (!base.valid) {
+        setError(base.error ?? "Invalid provider base URL.");
+        return;
+      }
+    }
+    if (
+      error?.startsWith("HTTP CORS proxy") ||
+      error?.startsWith("HTTP provider base") ||
+      error?.startsWith("Unsupported") ||
+      error?.includes("is not a valid URL")
+    ) {
       // Clear the validator-specific error once the user fixes it.
       setError(null);
     }
     // We intentionally exclude `error` from deps to avoid clear/set ping-pong.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [corsProxy, needsProxy]);
+  }, [corsProxy, needsProxy, customBaseUrl, provider]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -169,6 +184,16 @@ export function BrowserConfig({ onConfigured }: BrowserConfigProps) {
         const result = validateCorsProxyUrl(corsProxy);
         if (!result.valid) {
           setError(result.error ?? "Invalid CORS proxy URL.");
+          setSaving(false);
+          return;
+        }
+      }
+
+      // WEFT-571: same HTTPS-or-loopback rule for custom provider base URL.
+      if (provider === "custom") {
+        const base = validateProviderUrl(customBaseUrl);
+        if (!base.valid) {
+          setError(base.error ?? "Invalid provider base URL.");
           setSaving(false);
           return;
         }
@@ -328,7 +353,7 @@ export function BrowserConfig({ onConfigured }: BrowserConfigProps) {
             </div>
           )}
 
-          {/* Custom base URL */}
+          {/* Custom base URL (WEFT-571: HTTPS-or-loopback validated) */}
           {provider === "custom" && (
             <div className="space-y-2">
               <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -340,6 +365,9 @@ export function BrowserConfig({ onConfigured }: BrowserConfigProps) {
                 placeholder="https://api.example.com/v1"
                 className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
               />
+              <p className="text-xs text-gray-400 dark:text-gray-500">
+                Must be HTTPS in production. HTTP is only allowed for localhost.
+              </p>
             </div>
           )}
 

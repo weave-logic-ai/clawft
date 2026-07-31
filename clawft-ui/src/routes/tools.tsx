@@ -1,21 +1,35 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api-client";
 import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
-import type { ToolInfo } from "../lib/types";
+import { useBackend } from "../lib/use-backend.ts";
+import type { ToolInfo as AdapterToolInfo } from "../lib/backend-adapter.ts";
 
-function ToolCard({ tool }: { tool: ToolInfo }) {
+/** Tool row with optional lazily-loaded schema (BackendAdapter). */
+type ToolRow = AdapterToolInfo & {
+  schema?: Record<string, unknown> | null;
+};
+
+function ToolCard({
+  tool,
+  onToggleSchema,
+  schemaLoading,
+}: {
+  tool: ToolRow;
+  onToggleSchema: (name: string) => void;
+  schemaLoading: boolean;
+}) {
   const [showSchema, setShowSchema] = useState(false);
+  const hasSchema = tool.schema !== undefined && tool.schema !== null;
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-start justify-between">
           <CardTitle className="text-base">{tool.name}</CardTitle>
-          {tool.schema && (
+          {hasSchema && (
             <Badge variant="outline" className="text-xs">
               schema
             </Badge>
@@ -27,23 +41,30 @@ function ToolCard({ tool }: { tool: ToolInfo }) {
           {tool.description || "No description available"}
         </p>
 
-        {tool.schema && (
-          <div className="mt-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowSchema(!showSchema)}
-            >
-              {showSchema ? "Hide Schema" : "View Schema"}
-            </Button>
+        <div className="mt-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              if (!showSchema && tool.schema === undefined) {
+                onToggleSchema(tool.name);
+              }
+              setShowSchema(!showSchema);
+            }}
+          >
+            {showSchema ? "Hide Schema" : "View Schema"}
+          </Button>
 
-            {showSchema && (
-              <pre className="mt-2 max-h-64 overflow-auto rounded-md bg-gray-100 p-3 text-xs text-gray-800 dark:bg-gray-900 dark:text-gray-300">
-                {JSON.stringify(tool.schema, null, 2)}
-              </pre>
-            )}
-          </div>
-        )}
+          {showSchema && (
+            <pre className="mt-2 max-h-64 overflow-auto rounded-md bg-gray-100 p-3 text-xs text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+              {schemaLoading && tool.schema === undefined
+                ? "Loading schema…"
+                : tool.schema
+                  ? JSON.stringify(tool.schema, null, 2)
+                  : "No schema available for this tool."}
+            </pre>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -66,13 +87,39 @@ function ToolSkeletonCard() {
 export function ToolsPage() {
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  // Schemas loaded on demand via BackendAdapter.getToolSchema (WEFT-567).
+  const [schemas, setSchemas] = useState<
+    Record<string, Record<string, unknown> | null>
+  >({});
+  const [loadingSchema, setLoadingSchema] = useState<string | null>(null);
+  const { adapter } = useBackend();
 
-  const { data: tools, isLoading, isError, error } = useQuery<ToolInfo[]>({
-    queryKey: ["tools"],
-    queryFn: api.tools.list,
+  const { data: tools, isLoading, isError, error } = useQuery<ToolRow[]>({
+    queryKey: ["tools", adapter.mode],
+    queryFn: async () => {
+      const list = await adapter.listTools();
+      return list.map((t) => ({ ...t }));
+    },
   });
 
-  const filtered = (tools ?? []).filter(
+  const loadSchema = async (name: string) => {
+    if (name in schemas) return;
+    setLoadingSchema(name);
+    try {
+      const schema = await adapter.getToolSchema(name);
+      setSchemas((prev) => ({ ...prev, [name]: schema }));
+    } catch {
+      setSchemas((prev) => ({ ...prev, [name]: null }));
+    } finally {
+      setLoadingSchema(null);
+    }
+  };
+
+  const withSchemas: ToolRow[] = (tools ?? []).map((t) =>
+    t.name in schemas ? { ...t, schema: schemas[t.name] } : t,
+  );
+
+  const filtered = withSchemas.filter(
     (t) =>
       t.name.toLowerCase().includes(search.toLowerCase()) ||
       t.description?.toLowerCase().includes(search.toLowerCase()),
@@ -133,7 +180,12 @@ export function ToolsPage() {
                 <ToolSkeletonCard key={i} />
               ))
             : filtered.map((tool) => (
-                <ToolCard key={tool.name} tool={tool} />
+                <ToolCard
+                  key={tool.name}
+                  tool={tool}
+                  onToggleSchema={loadSchema}
+                  schemaLoading={loadingSchema === tool.name}
+                />
               ))}
         </div>
       ) : (
@@ -148,7 +200,12 @@ export function ToolsPage() {
             ) : (
               <div className="divide-y divide-gray-200 dark:divide-gray-700">
                 {filtered.map((tool) => (
-                  <ToolListRow key={tool.name} tool={tool} />
+                  <ToolListRow
+                    key={tool.name}
+                    tool={tool}
+                    onToggleSchema={loadSchema}
+                    schemaLoading={loadingSchema === tool.name}
+                  />
                 ))}
               </div>
             )}
@@ -167,7 +224,15 @@ export function ToolsPage() {
   );
 }
 
-function ToolListRow({ tool }: { tool: ToolInfo }) {
+function ToolListRow({
+  tool,
+  onToggleSchema,
+  schemaLoading,
+}: {
+  tool: ToolRow;
+  onToggleSchema: (name: string) => void;
+  schemaLoading: boolean;
+}) {
   const [showSchema, setShowSchema] = useState(false);
 
   return (
@@ -187,20 +252,27 @@ function ToolListRow({ tool }: { tool: ToolInfo }) {
           <span className="max-w-sm truncate text-sm text-gray-500 dark:text-gray-400">
             {tool.description}
           </span>
-          {tool.schema && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowSchema(!showSchema)}
-            >
-              {showSchema ? "Hide" : "Schema"}
-            </Button>
-          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              if (!showSchema && tool.schema === undefined) {
+                onToggleSchema(tool.name);
+              }
+              setShowSchema(!showSchema);
+            }}
+          >
+            {showSchema ? "Hide" : "Schema"}
+          </Button>
         </div>
       </div>
-      {showSchema && tool.schema && (
+      {showSchema && (
         <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-gray-100 p-3 text-xs text-gray-800 dark:bg-gray-900 dark:text-gray-300">
-          {JSON.stringify(tool.schema, null, 2)}
+          {schemaLoading && tool.schema === undefined
+            ? "Loading schema…"
+            : tool.schema
+              ? JSON.stringify(tool.schema, null, 2)
+              : "No schema available for this tool."}
         </pre>
       )}
     </div>
