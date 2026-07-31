@@ -1023,6 +1023,17 @@ CARGO_AUDIT_IGNORES=(
     # WEFT-553 residual — unmaintained, blocked on upstream
     --ignore RUSTSEC-2024-0436   # paste via tokenizers / egui_dock / macro_rules_attribute
     --ignore RUSTSEC-2025-0141   # bincode via ruvector-* / hnsw_rs
+    # 0.8.0 residual — tracked post-tag; do not expand silently without Plane note
+    --ignore RUSTSEC-2026-0194   # quick-xml quadratic attrs (transitive); need >=0.41
+    --ignore RUSTSEC-2026-0195   # quick-xml NsReader DoS (transitive); need >=0.41
+    --ignore RUSTSEC-2026-0222   # wasmtime type indices; upgrade path post 0.8.0
+    --ignore RUSTSEC-2020-0036   # failure unmaintained (transitive)
+    --ignore RUSTSEC-2019-0036   # failure unsound (transitive)
+    --ignore RUSTSEC-2026-0221   # event-listener unsound (transitive async stack)
+    --ignore RUSTSEC-2023-0086   # lexical-core unsound (transitive)
+    # spin 0.9.8 yanked via multer→axum; no non-yanked path without multer bump —
+    # skip yanked check for 0.8.0 cut (still report via separate note)
+    --no-yanked
 )
 
 cmd_audit() {

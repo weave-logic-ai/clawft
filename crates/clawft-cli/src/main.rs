@@ -181,6 +181,17 @@ enum SessionsCmd {
         #[arg(short, long)]
         config: Option<String>,
     },
+
+    /// Garbage-collect legacy underscore-encoded session files after migration.
+    Gc {
+        /// Report what would be removed without deleting.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Config file path (overrides auto-discovery).
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 }
 
 /// Subcommands for `weft memory`.
@@ -445,6 +456,10 @@ async fn main() -> anyhow::Result<()> {
                 SessionsCmd::Delete { session_id, config } => {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::sessions::sessions_delete(session_id, &cfg).await?;
+                }
+                SessionsCmd::Gc { dry_run, config } => {
+                    let cfg = commands::load_config(&platform, config.as_deref()).await?;
+                    commands::sessions::sessions_gc(dry_run, &cfg).await?;
                 }
             }
         }
