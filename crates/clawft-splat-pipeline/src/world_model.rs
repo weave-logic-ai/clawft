@@ -1,11 +1,16 @@
-//! ADR-078 / WEFT-708 — W0 world-model export on package.
+//! ADR-078 / WEFT-708 W0 + WEFT-709 W1 — world-model export on package.
 //!
-//! Writes a portable `world_model.json` stub when a splat job finishes.
-//! Object/surface/volume counts stay at 0 until W1+ structure stages land.
-//! BVH publish is deferred (`bvh_published: false`); live leaves need
-//! clawft-bvh + daemon wiring (tag `SPLAT_SCENE` = 0x5350_0001).
+//! Writes a portable `world_model.json` when a splat job finishes.
+//! - W0: `SPLAT_SCENE` shell + scene AABB.
+//! - W1: geometric partition → non-zero surfaces/objects/volumes when a
+//!   point cloud is available (ADR-078 / splat-to-world-model.md).
+//! BVH publish stays deferred (`bvh_published: false`) until live insert.
+//! Leaf records always set `vector: null` (ADR-088).
 
 use crate::job::JobDirs;
+use crate::partition::{
+    PartitionParams, Point3, partition_points, partition_to_json_leaves,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -45,11 +50,21 @@ impl SceneAabb {
     }
 }
 
-/// Build the W0 world-model stub (ADR-078 / splat-to-world-model.md §10).
+/// Build the W0-only world-model stub (no partition). Kept for callers/tests.
 pub fn build_world_model_stub(
     job_id: &str,
     aabb: Option<SceneAabb>,
     artifact_names: &BTreeMap<String, String>,
+) -> Value {
+    build_world_model(job_id, aabb, artifact_names, None)
+}
+
+/// Build world-model JSON (W0 scene + optional W1 partition leaves).
+pub fn build_world_model(
+    job_id: &str,
+    aabb: Option<SceneAabb>,
+    artifact_names: &BTreeMap<String, String>,
+    partition_points_opt: Option<&[Point3]>,
 ) -> Value {
     // Relative paths under artifacts/ for known appearance products.
     let mut scene_artifacts = serde_json::Map::new();
@@ -60,13 +75,24 @@ pub fn build_world_model_stub(
         scene_artifacts.insert("ply".into(), json!(ply));
     }
 
+    let (surfaces, objects, volumes) = if let Some(pts) = partition_points_opt {
+        if pts.is_empty() {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            let part = partition_points(pts, &PartitionParams::default());
+            partition_to_json_leaves(&part)
+        }
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
     json!({
         "frame": "scene_local",
         "scale_m": null,
-        "objects": 0,
-        "surfaces": 0,
-        "volumes": 0,
-        // W0 does not insert into a live BVH tree — export only.
+        "objects": objects.len(),
+        "surfaces": surfaces.len(),
+        "volumes": volumes.len(),
+        // Export only — live BVH insert is a separate publish path.
         "bvh_published": false,
         "scene": {
             "tag": "SPLAT_SCENE",
@@ -74,30 +100,48 @@ pub fn build_world_model_stub(
             "job_id": job_id,
             "aabb": aabb.map(SceneAabb::to_json),
             "artifacts": scene_artifacts,
-        }
+        },
+        "surface_leaves": surfaces,
+        "object_leaves": objects,
+        "volume_leaves": volumes,
     })
+}
+
+/// Load scene points from COLMAP sparse model, else ASCII PLY.
+pub fn load_scene_points(dirs: &JobDirs) -> Vec<Point3> {
+    let model0 = dirs.sparse().join("0");
+    if let Some(pts) = points_from_colmap_model(&model0) {
+        if !pts.is_empty() {
+            return pts;
+        }
+    }
+    points_from_ply(&dirs.artifacts().join("splat.ply")).unwrap_or_default()
 }
 
 /// Best-effort scene AABB from COLMAP sparse cloud, then splat PLY.
 pub fn compute_scene_aabb(dirs: &JobDirs) -> Option<SceneAabb> {
-    let model0 = dirs.sparse().join("0");
-    if let Some(a) = aabb_from_colmap_model(&model0) {
-        return Some(a);
+    let pts = load_scene_points(dirs);
+    if pts.is_empty() {
+        return None;
     }
-    aabb_from_ply(&dirs.artifacts().join("splat.ply"))
+    let mut aabb = SceneAabb::from_point([pts[0].x, pts[0].y, pts[0].z]);
+    for p in pts.iter().skip(1) {
+        aabb.expand([p.x, p.y, p.z]);
+    }
+    aabb.is_valid().then_some(aabb)
 }
 
-fn aabb_from_colmap_model(model: &Path) -> Option<SceneAabb> {
-    if let Some(a) = aabb_from_points3d_txt(&model.join("points3D.txt")) {
-        return Some(a);
+fn points_from_colmap_model(model: &Path) -> Option<Vec<Point3>> {
+    if let Some(pts) = points_from_points3d_txt(&model.join("points3D.txt")) {
+        return Some(pts);
     }
-    aabb_from_points3d_bin(&model.join("points3D.bin"))
+    points_from_points3d_bin(&model.join("points3D.bin"))
 }
 
 /// COLMAP `points3D.txt` lines: `POINT3D_ID X Y Z R G B ERROR TRACK…`
-fn aabb_from_points3d_txt(path: &Path) -> Option<SceneAabb> {
+fn points_from_points3d_txt(path: &Path) -> Option<Vec<Point3>> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut aabb: Option<SceneAabb> = None;
+    let mut pts = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -108,17 +152,13 @@ fn aabb_from_points3d_txt(path: &Path) -> Option<SceneAabb> {
         let x: f64 = parts.next()?.parse().ok()?;
         let y: f64 = parts.next()?.parse().ok()?;
         let z: f64 = parts.next()?.parse().ok()?;
-        let p = [x, y, z];
-        match &mut aabb {
-            Some(a) => a.expand(p),
-            None => aabb = Some(SceneAabb::from_point(p)),
-        }
+        pts.push(Point3::new(x, y, z));
     }
-    aabb.filter(|a| a.is_valid())
+    Some(pts)
 }
 
 /// COLMAP little-endian `points3D.bin` (see COLMAP Reconstruction format).
-fn aabb_from_points3d_bin(path: &Path) -> Option<SceneAabb> {
+fn points_from_points3d_bin(path: &Path) -> Option<Vec<Point3>> {
     let mut f = std::fs::File::open(path).ok()?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
@@ -127,7 +167,7 @@ fn aabb_from_points3d_bin(path: &Path) -> Option<SceneAabb> {
     }
     let mut off = 0usize;
     let n = read_u64_le(&buf, &mut off)?;
-    let mut aabb: Option<SceneAabb> = None;
+    let mut pts = Vec::with_capacity(n as usize);
     for _ in 0..n {
         // point3D_id
         let _ = read_u64_le(&buf, &mut off)?;
@@ -146,17 +186,13 @@ fn aabb_from_points3d_bin(path: &Path) -> Option<SceneAabb> {
         if off > buf.len() {
             return None;
         }
-        let p = [x, y, z];
-        match &mut aabb {
-            Some(a) => a.expand(p),
-            None => aabb = Some(SceneAabb::from_point(p)),
-        }
+        pts.push(Point3::new(x, y, z));
     }
-    aabb.filter(|a| a.is_valid())
+    Some(pts)
 }
 
-/// Minimal ASCII PLY bounds (Brush export). Binary PLY left for later.
-fn aabb_from_ply(path: &Path) -> Option<SceneAabb> {
+/// Minimal ASCII PLY vertices (Brush export). Binary PLY left for later.
+fn points_from_ply(path: &Path) -> Option<Vec<Point3>> {
     let text = std::fs::read_to_string(path).ok()?;
     if !text.starts_with("ply") {
         return None;
@@ -187,7 +223,7 @@ fn aabb_from_ply(path: &Path) -> Option<SceneAabb> {
     let ix = props.iter().position(|p| p == "x")?;
     let iy = props.iter().position(|p| p == "y")?;
     let iz = props.iter().position(|p| p == "z")?;
-    let mut aabb: Option<SceneAabb> = None;
+    let mut pts = Vec::with_capacity(n_verts);
     for _ in 0..n_verts {
         let line = lines.next()?;
         let vals: Vec<&str> = line.split_whitespace().collect();
@@ -197,13 +233,9 @@ fn aabb_from_ply(path: &Path) -> Option<SceneAabb> {
         let x: f64 = vals.get(ix)?.parse().ok()?;
         let y: f64 = vals.get(iy)?.parse().ok()?;
         let z: f64 = vals.get(iz)?.parse().ok()?;
-        let p = [x, y, z];
-        match &mut aabb {
-            Some(a) => a.expand(p),
-            None => aabb = Some(SceneAabb::from_point(p)),
-        }
+        pts.push(Point3::new(x, y, z));
     }
-    aabb.filter(|a| a.is_valid())
+    Some(pts)
 }
 
 fn read_u64_le(buf: &[u8], off: &mut usize) -> Option<u64> {
@@ -229,13 +261,24 @@ fn read_f64_le(buf: &[u8], off: &mut usize) -> Option<f64> {
 }
 
 /// Write `artifacts/world_model.json` and register it on the job record.
+///
+/// Runs W1 geometric partition when points are available (WEFT-709).
 pub fn write_world_model(
     dirs: &JobDirs,
     job_id: &str,
     artifacts: &mut BTreeMap<String, String>,
 ) -> std::io::Result<Value> {
-    let aabb = compute_scene_aabb(dirs);
-    let wm = build_world_model_stub(job_id, aabb, artifacts);
+    let pts = load_scene_points(dirs);
+    let aabb = if pts.is_empty() {
+        None
+    } else {
+        let mut a = SceneAabb::from_point([pts[0].x, pts[0].y, pts[0].z]);
+        for p in pts.iter().skip(1) {
+            a.expand([p.x, p.y, p.z]);
+        }
+        a.is_valid().then_some(a)
+    };
+    let wm = build_world_model(job_id, aabb, artifacts, Some(&pts));
     let path = dirs.artifacts().join("world_model.json");
     std::fs::write(
         &path,
@@ -359,7 +402,9 @@ mod tests {
         let parsed: Value = serde_json::from_str(&on_disk).unwrap();
         assert_eq!(parsed["scene"]["job_id"], "job-w");
         assert_eq!(parsed["bvh_published"], false);
+        // No point cloud → W1 leaves empty.
         assert_eq!(wm["objects"], 0);
+        assert_eq!(wm["surfaces"], 0);
     }
 
     #[tokio::test]
@@ -396,7 +441,10 @@ mod tests {
         assert_eq!(wm["scene"]["tag"], "SPLAT_SCENE");
         assert_eq!(wm["scene"]["aabb"]["min"][0], -1.0);
         assert_eq!(wm["scene"]["aabb"]["max"][2], 3.0);
-        assert_eq!(wm["objects"], 0);
+        // Two-point cloud is below RANSAC/cluster thresholds → still may be 0 leaves.
+        // Counts must match leaf arrays; vector always null when present.
+        let n_obj = wm["objects"].as_u64().unwrap();
+        assert_eq!(wm["object_leaves"].as_array().unwrap().len() as u64, n_obj);
 
         let manifest: Value = serde_json::from_str(
             &std::fs::read_to_string(dirs.artifacts().join("manifest.json")).unwrap(),
@@ -405,6 +453,63 @@ mod tests {
         assert_eq!(manifest["artifacts"]["world_model"], "world_model.json");
         // Summary also embedded for quick clients.
         assert_eq!(manifest["world_model"]["bvh_published"], false);
-        assert_eq!(manifest["world_model"]["objects"], 0);
+        assert_eq!(manifest["world_model"]["objects"], wm["objects"]);
+    }
+
+    #[test]
+    fn w1_partition_on_rich_cloud() {
+        let (_hold, dirs) = temp_job("w1");
+        let model = dirs.sparse().join("0");
+        std::fs::create_dir_all(&model).unwrap();
+        // Synthetic room-ish cloud (enough points for RANSAC + cluster).
+        let mut lines = String::new();
+        let mut id = 1u64;
+        for x in 0..20 {
+            for z in 0..20 {
+                lines.push_str(&format!(
+                    "{id} {} 0.0 {} 0 0 0 0\n",
+                    x as f64 * 0.1,
+                    z as f64 * 0.1
+                ));
+                id += 1;
+            }
+        }
+        for x in 0..15 {
+            for y in 0..12 {
+                lines.push_str(&format!(
+                    "{id} {} {} 0.0 0 0 0 0\n",
+                    x as f64 * 0.1,
+                    y as f64 * 0.1
+                ));
+                id += 1;
+            }
+        }
+        for i in 0..40 {
+            let t = i as f64 * 0.02;
+            lines.push_str(&format!(
+                "{id} {} {} {} 0 0 0 0\n",
+                1.0 + t,
+                0.4 + t * 0.2,
+                1.0 + t * 0.1
+            ));
+            id += 1;
+        }
+        std::fs::write(model.join("points3D.txt"), lines).unwrap();
+        let mut arts = BTreeMap::new();
+        let wm = write_world_model(&dirs, "job-w1", &mut arts).unwrap();
+        assert!(
+            wm["surfaces"].as_u64().unwrap() > 0 || wm["objects"].as_u64().unwrap() > 0,
+            "expected W1 surfaces or objects, got {wm}"
+        );
+        assert!(wm["volumes"].as_u64().unwrap() > 0, "expected free volume");
+        for leaf in wm["surface_leaves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(wm["object_leaves"].as_array().unwrap())
+            .chain(wm["volume_leaves"].as_array().unwrap())
+        {
+            assert!(leaf["vector"].is_null(), "ADR-088: vector must be null");
+        }
     }
 }

@@ -85,6 +85,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-087](adr-087-spatiotemporal-dual-branch-sensors.md) | Spatio-temporal dual-branch for sensor systems (K-STEMIT) | Proposed (Candidate) | Architecture | WEFT-372 phase2 survey (planned as ADR-053; 053 taken by voice STT) |
 | [ADR-088](adr-088-bvh-leaf-vector-ref.md) | Optional VectorRef on BVH spatial leaf payloads (before WEFT-709) | Accepted | Architecture | Design note `bvh_schema_updates.md`; amends ADR-056 |
 | [ADR-089](adr-089-exochain-dag-merge-split-brain.md) | ExoChain DAG merge strategy + split-brain (not leader consensus) | Accepted | Architecture | WEFT-109 (K5 Q1/Q5) |
+| [ADR-093](adr-093-bvh-hnsw-phase-f-join.md) | BVH × HNSW Phase F dual-index join (spatial-first / feature-first) | Accepted | Architecture | WEFT-723; builds on ADR-088 |
 
 ## Categories
 
@@ -92,7 +93,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 |----------|------|-------------|
 | **Release** | 001, 002, 012, 029, 037, 044 | Versioning, distribution, and build decisions |
 | **GUI** | 003, 004, 005, 006, 007, 013, 016, 038, 055, 073 | UI/UX technology and architecture decisions |
-| **Architecture** | 010, 017, 019, 020, 021, 022, 023, 026, 027, 030, 031, 033, 034, 035, 036, 039, 040, 041, 042, 045, 046, 047, 048, 049, 053, 056, 061, 068, 070, 074, 078, 079, 080, 082, 084, 085, 086, 087, 088, 089 | Core system design decisions |
+| **Architecture** | 010, 017, 019, 020, 021, 022, 023, 026, 027, 030, 031, 033, 034, 035, 036, 039, 040, 041, 042, 045, 046, 047, 048, 049, 053, 056, 061, 068, 070, 074, 078, 079, 080, 082, 084, 085, 086, 087, 088, 089, 093 | Core system design decisions |
 | **Security** | 024, 025, 028, 043, 057, 071, 072 | Cryptography, identity, and chain-integrity decisions |
 | **Performance** | 009, 011, 032 | Algorithmic and optimization decisions |
 | **Integration** | 008, 018, 054, 075, 076, 077, 081 | External system integration decisions |
