@@ -379,14 +379,17 @@ scripts/build.sh wasi      # wasm32-wasip2 (edge / wasmtime hosts)
 # All tests (full features)
 cargo test -p clawft-kernel --features "native,exochain,cluster,mesh,wasm-sandbox"
 
-# Phase gate verification (K3-K6)
-scripts/k6-gate.sh
+# Production / merge gate (also what CI enforces via pr-gates.yml)
+scripts/build.sh gate
 
 # Build check
 scripts/build.sh check
 
 # Lint
 scripts/build.sh clippy
+
+# Optional: local K3–K6 phase rehearsal only (WEFT-464 — not wired into CI)
+scripts/k6-gate.sh
 ```
 
 ## Documentation

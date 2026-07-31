@@ -107,7 +107,7 @@ mod integration {
 
 Key files:
 - `scripts/build.sh` — all build, test, check, lint operations
-- `scripts/k6-gate.sh` — K6 phase gate script
+- `scripts/k6-gate.sh` — K3–K6 phase **developer-rehearsal** only (WEFT-464; not CI). Production gate: `scripts/build.sh gate` + `pr-gates.yml`.
 - `crates/clawft-kernel/src/lib.rs` — feature gates
 - `crates/clawft-kernel/Cargo.toml` — feature definitions
 

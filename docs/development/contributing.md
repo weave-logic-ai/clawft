@@ -160,6 +160,24 @@ cargo build --workspace
 
 All commands must succeed with zero errors and zero warnings.
 
+### Optional: K3–K6 phase rehearsal (`scripts/k6-gate.sh`)
+
+**Status (WEFT-464): developer-rehearsal only — not part of CI.**
+
+`scripts/k6-gate.sh` runs a short list of named kernel acceptance tests for
+historical phases K3 (WASM sandbox), K4 (containers), K5 (app framework), and
+K6 (distributed fabric). Use it when you are changing those subsystems and
+want a focused local checklist.
+
+| Gate | Authority |
+|------|-----------|
+| Merge / production | `scripts/build.sh gate` + `.github/workflows/pr-gates.yml` |
+| Local K3–K6 rehearsal | `scripts/k6-gate.sh` (optional; never required for merge) |
+
+A green `k6-gate.sh` run is **not** a substitute for `scripts/build.sh gate`.
+Details and rationale live in the script header and
+[`docs/deployment/release.md`](../deployment/release.md) (CI gates section).
+
 
 ## Code Style Guidelines
 

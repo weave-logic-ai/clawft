@@ -479,6 +479,12 @@ blocks merge.
 | `Assessment`                     | assess         | Runs `weft assess run --scope ci`.                                     |
 | `Integration smoke test`         | smoke-test     | **WEFT-550**: builds Docker image, starts `weft gateway`, probes `/api/health` with a 30s deadline; fails on first-3s crash. |
 
+**Not a CI gate (WEFT-464):** `scripts/k6-gate.sh` is a **developer-rehearsal**
+script only. It re-runs named K3–K6 acceptance tests with explicit feature
+flags for local kernel-phase work. Merge protection is
+`scripts/build.sh gate` + the jobs above; do not add `k6-gate.sh` to required
+status checks. See the script header and `docs/development/contributing.md`.
+
 To make any of these jobs **required for merge** in repository
 settings, add the job name to `Settings -> Branches -> master ->
 Require status checks to pass`. Job names match the `name:` field in

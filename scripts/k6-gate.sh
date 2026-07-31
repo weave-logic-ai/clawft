@@ -1,7 +1,34 @@
 #!/usr/bin/env bash
+# =============================================================================
+# WEFT-464: developer-rehearsal only — NOT a CI / production gate
+# =============================================================================
+#
+# Status: developer-rehearsal (local optional)
+# CI / merge gate:  scripts/build.sh gate
+#                   .github/workflows/pr-gates.yml
+#
+# This script runs named K3–K6 acceptance tests with explicit feature sets
+# (wasm-sandbox, exochain, cluster, mesh). It is useful when iterating on
+# kernel phase work locally so you can re-run the historical phase checklist
+# without the full workspace gate.
+#
+# It is intentionally NOT wired into GitHub Actions:
+#   - Default clawft-kernel features already cover native,exochain,cluster,mesh
+#     for most of these tests under `cargo test --workspace` / pr-gates.
+#   - Re-invoking cargo per named test recompiles multiple feature combos and
+#     would duplicate CI cost without tightening the merge gate.
+#   - wasm-sandbox K3 checks remain available here for focused local rehearsal.
+#
+# Do not treat a green k6-gate as a substitute for `scripts/build.sh gate`.
+# See docs/deployment/release.md (CI gates) and docs/development/contributing.md.
+# =============================================================================
 set -euo pipefail
 
-echo "=== WeftOS K3-K6 Phase Gate ==="
+cd "$(git rev-parse --show-toplevel)"
+
+echo "=== WeftOS K3-K6 Phase Gate (developer-rehearsal; not CI) ==="
+echo ""
+echo "Production gates: scripts/build.sh gate | .github/workflows/pr-gates.yml"
 echo ""
 
 PASS=0
@@ -72,4 +99,5 @@ echo "================================"
 if [ "$FAIL" -gt 0 ]; then
     exit 1
 fi
-echo "All gates passed!"
+echo "All developer-rehearsal gates passed!"
+echo "(Still run scripts/build.sh gate before commit/merge.)"
