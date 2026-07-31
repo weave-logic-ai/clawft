@@ -297,6 +297,7 @@ impl AuthService {
         }
 
         let encrypted = self.xor_encrypt(value);
+        let cred_type_for_chain = credential_type.to_string();
         self.credentials.insert(
             name.to_string(),
             StoredCredential {
@@ -315,7 +316,7 @@ impl AuthService {
                 crate::chain::EVENT_KIND_AUTH_CREDENTIAL_REGISTER,
                 Some(serde_json::json!({
                     "credential_name": name,
-                    "credential_type": cred_type_str,
+                    "credential_type": cred_type_for_chain,
                 })),
             );
         }

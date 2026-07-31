@@ -1486,24 +1486,22 @@ pub struct VectorConfig {
 
     /// Logarithmic quantization settings (KG-011).
     ///
-    /// Requires `ruvector-core` with PR #352 merged.
+    /// Runtime lives in `clawft-kernel::vector_quantization` (**in-tree**;
+    /// no longer blocked on RuVector#352).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_quantized: Option<LogQuantizedStubConfig>,
 
-    /// Unified SIMD distance kernel settings (KG-012).
+    /// Unified distance kernel settings (KG-012).
     ///
-    /// Requires `ruvector-core` with PR #352 merged.
+    /// Runtime lives in `clawft-kernel::vector_quantization` (**in-tree**).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simd_distance: Option<SimdDistanceStubConfig>,
 }
 
-/// Serializable stub for LogQuantized configuration (KG-011).
+/// Serializable config for LogQuantized (KG-011).
 ///
-/// Full implementation lives in `clawft-kernel::vector_quantization`.
-/// This type mirrors the essential fields for config-file deserialization
-/// in `clawft-types` (which cannot depend on `clawft-kernel`).
-///
-/// Requires `ruvector-core` with PR #352 merged.
+/// Full implementation lives in `clawft-kernel::vector_quantization`
+/// (WeftOS first-party; vendor-independent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogQuantizedStubConfig {
     /// Whether logarithmic quantization is enabled.
@@ -1527,18 +1525,17 @@ impl Default for LogQuantizedStubConfig {
     }
 }
 
-/// Serializable stub for SIMD distance configuration (KG-012).
+/// Serializable config for unified distance (KG-012).
 ///
-/// Full implementation lives in `clawft-kernel::vector_quantization`.
-///
-/// Requires `ruvector-core` with PR #352 merged.
+/// Full implementation lives in `clawft-kernel::vector_quantization`
+/// (WeftOS first-party; vendor-independent).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SimdDistanceStubConfig {
-    /// Whether the unified SIMD distance kernel is enabled.
+    /// Whether the unified distance kernel is enabled.
     #[serde(default)]
     pub enabled: bool,
     /// Whether to pad vectors to power-of-two length for alignment.
-    /// See shaal's v4 caveat about memory overhead.
+    /// May increase memory for odd dimensions — enable only when useful.
     #[serde(default)]
     pub pad_to_power_of_two: bool,
 }

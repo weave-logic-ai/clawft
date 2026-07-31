@@ -226,15 +226,21 @@ pub use embedding::{
 // skill-list rerank after a non-empty primary. The rerank *trait* is
 // always available (`rerank`); the sona-backed adapter is feature-gated
 // (`hybrid-rerank` → `sona_rerank`) so default builds never pull
-// `ruvector-sona`. v3 (`MicroLoraRouter`) remains deferred until
-// ruvllm-wasm lifts its 11-pattern HNSW cap (see hybrid.rs TODO).
+// `ruvector-sona`.
+//
+// v3 (`MicroLoraRouter`) is **in-tree and vendor-free** (WEFT-45/338):
+// unlimited hashed patterns + rank-r residual; no ruvllm-wasm 11-cap.
 pub mod hybrid;
+pub mod micro_lora;
 pub mod rerank;
 
 #[cfg(feature = "hybrid-rerank")]
 pub mod sona_rerank;
 
 pub use hybrid::HybridRouter;
+pub use micro_lora::{
+    DEFAULT_RANK, FEATURE_DIM, MicroLoraPattern, MicroLoraRouter, feature_bag,
+};
 pub use rerank::{
     IdentityReranker, RerankCandidate, SharedReranker, SkillReranker, apply_rerank, rank_priors,
 };

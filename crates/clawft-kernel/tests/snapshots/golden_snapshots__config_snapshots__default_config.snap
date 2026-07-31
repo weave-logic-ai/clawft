@@ -4,6 +4,9 @@ assertion_line: 214
 expression: json
 ---
 {
+  "agent_routing": {
+    "routes": []
+  },
   "agents": {
     "binding_thread_mode": "deny",
     "cost_budget": {
@@ -278,6 +281,7 @@ expression: json
       "cors_proxy": null,
       "extra_headers": null
     },
+    "provider_fallback_order": [],
     "vllm": {
       "api_base": null,
       "api_key": "",
@@ -387,6 +391,10 @@ expression: json
       "enabled": false,
       "max_pending": 10,
       "threshold": 3
+    },
+    "promotion": {
+      "enabled": true,
+      "threshold": 10
     }
   },
   "tools": {
@@ -428,6 +436,11 @@ expression: json
       "stt_provider": "",
       "tts_provider": ""
     },
+    "confirmation": {
+      "anti_replay_nonce": true,
+      "timeout_seconds": 10,
+      "transcription_echo": true
+    },
     "consumer": {
       "chat_target_agent": "concierge-bot",
       "command_prefix": "weft ",
@@ -447,6 +460,12 @@ expression: json
     "enabled": false,
     "mode": "xai_s2s",
     "personalities": {},
+    "rate_limit": {
+      "commands_per_minute": 10,
+      "fail_threshold": 3,
+      "post_fail_cooldown_seconds": 30,
+      "wake_activations_per_minute": 5
+    },
     "stt": {
       "enabled": true,
       "language": "",
@@ -461,6 +480,14 @@ expression: json
       "voice": ""
     },
     "vad": {
+      "adaptive": {
+        "enabled": true,
+        "learning_rate": 0.3499999940395355,
+        "max_ms": 3000,
+        "min_ms": 500,
+        "pause_margin_ms": 250,
+        "window_size": 8
+      },
       "min_speech_ms": 250,
       "silence_timeout_ms": 1500,
       "threshold": 0.5

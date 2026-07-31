@@ -50,11 +50,9 @@ use async_trait::async_trait;
 use super::rerank::{SharedReranker, SkillReranker, apply_rerank};
 use super::{ContextDecision, ContextRequest, ContextRouter};
 
-// TODO(agent-core-v1 phase E3+): wire MicroLoraRouter (v3) once
-// ruvllm-wasm lifts the 11-pattern HNSW cap
-// (docs/research/rvf-context-router.md:118-128). The 35+-skill clawft
-// catalog overruns ruvllm-wasm v2.0.1's documented per-index ceiling,
-// which is why v3 is held until upstream lands a larger cap.
+// v3 MicroLoraRouter is implemented in `micro_lora.rs` (vendor-free,
+// unlimited patterns). Compose it as HybridRouter primary when desired:
+//   HybridRouter::new(Arc::new(MicroLoraRouter::with_seed_skills(...)), fallback)
 
 /// Chains two [`ContextRouter`]s with an optional skill-list rerank.
 ///

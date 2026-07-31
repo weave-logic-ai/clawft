@@ -107,15 +107,13 @@ pub struct RoutingConfig {
     ///   turn via the crate-local `Embedder` trait (production:
     ///   `ApiEmbedder` against an OpenAI-compat `/embeddings`;
     ///   fallback: `HashEmbedder` SHA-256 floor).
-    /// - `"hybrid"` — v2.5 `HybridRouter` (Phase E3, plumbing only):
-    ///   chains v2 `EmbeddingRouter` (primary) with v1
-    ///   `LlmClassifierRouter` (fallback). The primary's decision is
-    ///   returned unless it is structurally empty, in which case the
-    ///   fallback runs. The sona-backed rerank step that v2.5
-    ///   ultimately gets is deferred until ruv-ecosystem stability
-    ///   clears; v3 (`MicroLoraRouter`) is deferred until ruvllm-wasm
-    ///   lifts its 11-pattern HNSW cap
-    ///   (`docs/research/rvf-context-router.md:118-128`).
+    /// - `"hybrid"` — v2.5 `HybridRouter` (Phase E3): chains a primary
+    ///   (often v2 `EmbeddingRouter` or v3 `MicroLoraRouter`) with a
+    ///   fallback (often v1 `LlmClassifierRouter`). Empty primary →
+    ///   fallback. Optional sona skill rerank when `hybrid-rerank` is on.
+    /// - `"micro-lora"` — v3 `MicroLoraRouter` (WEFT-45/338): **in-tree**,
+    ///   unlimited hashed patterns + rank-r complexity residual. Does
+    ///   **not** use ruvllm-wasm (avoids the historical 11-pattern cap).
     ///
     /// [`NullRouter`]: ../../clawft_core/agent/context_router/struct.NullRouter.html
     /// [`LlmClassifierRouter`]: ../../clawft_core/agent/context_router/llm_classifier/struct.LlmClassifierRouter.html
