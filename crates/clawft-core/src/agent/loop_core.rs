@@ -832,6 +832,15 @@ impl<P: Platform> AgentLoop<P> {
         self
     }
 
+    /// Shared handle to the conversation sink (WEFT-399).
+    ///
+    /// Browser WASM uses this for `get_history` / hydration inspection
+    /// without re-opening the sessions directory. Clone is cheap
+    /// (`Arc`).
+    pub fn conversation_sink(&self) -> Arc<dyn ConversationSink> {
+        Arc::clone(&self.sink)
+    }
+
     /// Attach a daemon-supplied agent id (agent-core-v1 Phase D2).
     ///
     /// When set, every [`EffectGate::check`] call inside the tool

@@ -33,8 +33,10 @@ browser = [
     "clawft-tools/browser",
     "clawft-platform/browser",
 ]
-# WEFT-13 / WEFT-14 / WEFT-392: persist BrowserFileSystem + BrowserEnvironment
-# via Origin Private File System (falls back to memory if OPFS unavailable).
+# WEFT-13 / WEFT-14 / WEFT-392 / WEFT-399: persist BrowserFileSystem,
+# BrowserEnvironment, conversation JSONL, config snapshot, and per-group
+# CLAWFT.md via Origin Private File System (falls back to memory if OPFS
+# unavailable).
 browser-opfs = [
     "browser",
     "clawft-platform/browser-opfs",

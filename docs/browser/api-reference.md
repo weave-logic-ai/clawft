@@ -1,7 +1,8 @@
 # Browser API Reference
 
 clawft-wasm exports wasm-bindgen functions for browser use (`init`,
-`send_message`, `set_env`, `get_env`, plus tool introspection helpers).
+`send_message`, `set_env`, `get_env`, history/group helpers, plus tool
+introspection).
 
 To run the same surface **off the main thread**, use the Web Worker harness
 and `ClawftWorkerClient` (`crates/clawft-wasm/www/`) — see
@@ -13,16 +14,20 @@ these entry points via `postMessage` (`init`, `send`, `stream`, `set_env`, …).
 The expected call order is:
 
 ```
-init(config_json, env_json?) --> set_env(key, value) --> send_message(text)
-                                 (optional, repeatable)   (repeatable)
+load_persisted_config()? --> init(config_json, env_json?)
+  --> set_env(key, value) --> send_message(text) / send_message_to(text, group)
+  --> get_history(group?) / get_group_clawft_md(group?)
 ```
 
-1. **`init()`** must be called once before any other function.
-2. **`set_env()`** can be called zero or more times to inject environment
+1. **`load_persisted_config()`** (optional, pre-init) restores the last
+   config snapshot from OPFS after a reload (WEFT-399 / P6.4).
+2. **`init()`** must be called once before agent APIs. With
+   `browser-opfs` it also writes `config_json` to OPFS.
+3. **`set_env()`** can be called zero or more times to inject environment
    variables into the live `BrowserEnvironment` after initialization
    (WEFT-391). Optionally pre-seed via `init`'s second argument.
-3. **`send_message()`** can be called any number of times to send messages
-   through the pipeline.
+4. **`send_message()`** / **`send_message_to()`** send messages through
+   the pipeline; turns append to session JSONL (durable under OPFS).
 
 ---
 

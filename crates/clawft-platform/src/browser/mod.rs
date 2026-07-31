@@ -14,6 +14,7 @@
 
 pub mod env;
 pub mod fs;
+pub mod history_layout;
 pub mod http;
 
 pub use env::{
@@ -21,6 +22,10 @@ pub use env::{
 };
 pub use fs::{
     BrowserFileSystem, BrowserFsBackend, BROWSER_HOME_DIR, BROWSER_WORKSPACE_DIR,
+};
+pub use history_layout::{
+    config_persist_path, conv_id_for_group, group_clawft_md_path, group_dir, resolve_group_id,
+    sessions_dir, validate_group_id, BROWSER_CHANNEL, DEFAULT_GROUP_ID, GROUP_CLAWFT_MD,
 };
 pub use http::BrowserHttpClient;
 

@@ -135,16 +135,22 @@ pub fn capabilities() -> String {
 /// running clawft in a web browser via the BrowserPlatform.
 #[cfg(feature = "browser")]
 mod browser_entry {
+    use std::path::PathBuf;
     use std::sync::{Arc, OnceLock};
 
+    use clawft_core::agent::local_file_sink::LocalFileSink;
     use clawft_core::agent::loop_core::AgentLoop;
     use clawft_core::bootstrap::AppContext;
     use clawft_core::tools::registry::ToolRegistry;
     use clawft_llm::browser_transport::BrowserLlmClient;
     use clawft_llm::config::LlmProviderConfig;
-    use clawft_platform::browser::BrowserEnvironment;
+    use clawft_platform::browser::{
+        config_persist_path, conv_id_for_group, group_clawft_md_path, resolve_group_id,
+        sessions_dir, BrowserEnvironment, DEFAULT_GROUP_ID,
+    };
     use clawft_platform::env::Environment;
-    use clawft_platform::BrowserPlatform;
+    use clawft_platform::fs::FileSystem;
+    use clawft_platform::{BrowserPlatform, Platform};
     use clawft_types::config::Config;
     use clawft_types::event::InboundMessage;
     use wasm_bindgen::prelude::*;
@@ -158,6 +164,9 @@ mod browser_entry {
     /// registry. `send_message` builds an [`InboundMessage`] and
     /// dispatches it through [`AgentLoop::handle_turn`], identical in
     /// shape to the native daemon's `agent.chat` path.
+    ///
+    /// Conversation history is durable via [`LocalFileSink`] on the
+    /// platform filesystem (OPFS when `browser-opfs`) — WEFT-399.
     struct BrowserRuntime {
         agent: Arc<AgentLoop<BrowserPlatform>>,
         /// Snapshot of the tool registry kept alive for introspection
@@ -168,6 +177,12 @@ mod browser_entry {
         /// (WEFT-391). `set_env` mutates through this `Arc` so tools
         /// and config loaders see updates after init.
         env: Arc<BrowserEnvironment>,
+        /// Shared platform (FS + env) for history / config / CLAWFT.md
+        /// OPFS helpers outside the agent loop (WEFT-399).
+        platform: Arc<BrowserPlatform>,
+        /// Sessions directory for the typed [`LocalFileSink`] helpers
+        /// (list / delete / load) — same dir `into_agent_loop` used.
+        sessions_dir: PathBuf,
     }
 
     // SAFETY: wasm32-unknown-unknown is single-threaded; nothing here
@@ -401,14 +416,33 @@ mod browser_entry {
         // consumes the AppContext so JS callers can introspect tool
         // schemas via `tool_schema(slug)`.
         let tools = ctx.tools_arc();
+        // WEFT-399: capture sessions dir before consume so history APIs
+        // can open a typed LocalFileSink against the same JSONL files
+        // the agent sink writes.
+        let sessions_dir = ctx.sessions().sessions_dir().clone();
 
         let agent = Arc::new(ctx.into_agent_loop());
+
+        // WEFT-399 / P6.4: persist the raw config JSON so reload can
+        // restore UI settings. Same origin-scoped secrecy trade-off as
+        // WEFT-14 env persistence (may include provider API keys).
+        if let Err(e) = platform
+            .fs()
+            .write_string(&config_persist_path(), config_json)
+            .await
+        {
+            web_sys::console::warn_1(
+                &format!("[clawft] WEFT-399: config snapshot write failed: {e}").into(),
+            );
+        }
 
         RUNTIME
             .set(BrowserRuntime {
                 agent,
                 tools,
                 env,
+                platform,
+                sessions_dir,
             })
             .map_err(|_| JsValue::from_str("already initialized"))?;
 
@@ -427,16 +461,31 @@ mod browser_entry {
     /// outbound text. Conversation history, session state, the
     /// 6-stage pipeline, the conversation sink, and tool execution
     /// all run on the wired [`AgentLoop<BrowserPlatform>`].
+    ///
+    /// Turns are appended to the OPFS-backed session JSONL (when
+    /// `browser-opfs`) so history survives reload (WEFT-399).
     #[wasm_bindgen]
     pub async fn send_message(text: &str) -> Result<String, JsValue> {
+        send_message_to(text, DEFAULT_GROUP_ID).await
+    }
+
+    /// Like [`send_message`], but routes the turn to a named group
+    /// (`chat_id` = `group_id`, session key `web:{group_id}`).
+    ///
+    /// Per-group history and optional `CLAWFT.md` live under the
+    /// CLAUDE.md-per-group OPFS layout (WEFT-399).
+    #[wasm_bindgen]
+    pub async fn send_message_to(text: &str, group_id: &str) -> Result<String, JsValue> {
         let rt = RUNTIME
             .get()
             .ok_or_else(|| JsValue::from_str("not initialized — call init() first"))?;
 
+        let group = resolve_group_id(Some(group_id)).map_err(|e| JsValue::from_str(&e))?;
+
         let msg = InboundMessage {
             channel: "web".into(),
             sender_id: "browser-user".into(),
-            chat_id: "browser".into(),
+            chat_id: group,
             content: text.to_string(),
             timestamp: chrono::Utc::now(),
             media: vec![],
@@ -455,6 +504,131 @@ mod browser_entry {
             .map_err(|e| JsValue::from_str(&format!("agent error: {e}")))?;
 
         Ok(outbound.content)
+    }
+
+    // -------------------------------------------------------------------
+    // Conversation history + group identity (WEFT-399)
+    // -------------------------------------------------------------------
+
+    fn history_sink(rt: &BrowserRuntime) -> LocalFileSink<BrowserPlatform> {
+        LocalFileSink::with_dir(Arc::clone(&rt.platform), rt.sessions_dir.clone())
+    }
+
+    /// Load conversation history for a group as a JSON array of turns.
+    ///
+    /// Each element: `{ "role", "content", "ts_ms", "tool_calls"?,
+    /// "tool_call_id"? }`. Empty array when the group has no turns or
+    /// the runtime is not initialized. `group_id` may be omitted /
+    /// empty to use the default group (`browser`).
+    #[wasm_bindgen]
+    pub async fn get_history(group_id: Option<String>) -> Result<String, JsValue> {
+        let rt = RUNTIME
+            .get()
+            .ok_or_else(|| JsValue::from_str("not initialized — call init() first"))?;
+        let group = resolve_group_id(group_id.as_deref()).map_err(|e| JsValue::from_str(&e))?;
+        let conv = conv_id_for_group(&group);
+        let turns = rt
+            .agent
+            .conversation_sink()
+            .history(&conv, 0)
+            .await;
+        let payload: Vec<serde_json::Value> = turns
+            .into_iter()
+            .map(|t| {
+                let mut v = serde_json::json!({
+                    "role": t.role,
+                    "content": t.content,
+                    "ts_ms": t.ts_ms,
+                });
+                if let Some(obj) = v.as_object_mut() {
+                    if let Some(tc) = t.tool_calls {
+                        obj.insert("tool_calls".into(), serde_json::Value::Array(tc));
+                    }
+                    if let Some(id) = t.tool_call_id {
+                        obj.insert("tool_call_id".into(), serde_json::Value::String(id));
+                    }
+                }
+                v
+            })
+            .collect();
+        Ok(serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into()))
+    }
+
+    /// Delete the durable history file for a group (idempotent).
+    #[wasm_bindgen]
+    pub async fn clear_history(group_id: Option<String>) -> Result<(), JsValue> {
+        let rt = RUNTIME
+            .get()
+            .ok_or_else(|| JsValue::from_str("not initialized — call init() first"))?;
+        let group = resolve_group_id(group_id.as_deref()).map_err(|e| JsValue::from_str(&e))?;
+        let conv = conv_id_for_group(&group);
+        history_sink(rt)
+            .delete(&conv)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("clear_history: {e}")))
+    }
+
+    /// Read the group's `CLAWFT.md` (CLAUDE.md-per-group identity).
+    ///
+    /// Returns an empty string when the file is missing.
+    #[wasm_bindgen]
+    pub async fn get_group_clawft_md(group_id: Option<String>) -> Result<String, JsValue> {
+        let rt = RUNTIME
+            .get()
+            .ok_or_else(|| JsValue::from_str("not initialized — call init() first"))?;
+        let group = resolve_group_id(group_id.as_deref()).map_err(|e| JsValue::from_str(&e))?;
+        let path = group_clawft_md_path(&group);
+        if !rt.platform.fs().exists(&path).await {
+            return Ok(String::new());
+        }
+        rt.platform
+            .fs()
+            .read_to_string(&path)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("get_group_clawft_md: {e}")))
+    }
+
+    /// Write the group's `CLAWFT.md` (CLAUDE.md-per-group identity).
+    #[wasm_bindgen]
+    pub async fn set_group_clawft_md(
+        group_id: Option<String>,
+        content: &str,
+    ) -> Result<(), JsValue> {
+        let rt = RUNTIME
+            .get()
+            .ok_or_else(|| JsValue::from_str("not initialized — call init() first"))?;
+        let group = resolve_group_id(group_id.as_deref()).map_err(|e| JsValue::from_str(&e))?;
+        let path = group_clawft_md_path(&group);
+        rt.platform
+            .fs()
+            .write_string(&path, content)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("set_group_clawft_md: {e}")))
+    }
+
+    /// Load the config JSON snapshot written by the last successful
+    /// [`init`] (P6.4 / WEFT-399).
+    ///
+    /// Works without a live runtime — opens the platform FS directly
+    /// so a UI can restore settings before calling `init` again.
+    /// Returns an empty string when no snapshot exists; otherwise the
+    /// raw config JSON (same shape passed to `init`).
+    #[wasm_bindgen]
+    pub async fn load_persisted_config() -> Result<String, JsValue> {
+        let fs = clawft_platform::browser::BrowserFileSystem::open().await;
+        let path = config_persist_path();
+        if !fs.exists(&path).await {
+            return Ok(String::new());
+        }
+        fs.read_to_string(&path)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("load_persisted_config: {e}")))
+    }
+
+    /// Absolute virtual sessions directory path (debug / tests).
+    #[wasm_bindgen]
+    pub fn history_sessions_dir() -> String {
+        sessions_dir().display().to_string()
     }
 
     /// Stream a single-turn chat completion through the pipeline

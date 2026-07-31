@@ -614,8 +614,9 @@ cmd_test_browser() {
     if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
     timer_start
     # Default suite is browser (entry-point contracts). Pass FEATURES=browser-opfs
-    # to also exercise OPFS FS (WEFT-13 / browser_opfs.rs) and env
-    # (WEFT-14 / browser_env_persist.rs) persistence.
+    # to also exercise OPFS FS (WEFT-13 / browser_opfs.rs), env
+    # (WEFT-14 / browser_env_persist.rs), and conversation history
+    # (WEFT-399 / browser_history_persist.rs) persistence.
     local feat="browser"
     if [ -n "$FEATURES" ]; then
         feat="browser,$FEATURES"
@@ -628,6 +629,7 @@ cmd_test_browser() {
         if echo "$feat" | grep -q 'browser-opfs'; then
             printf "  ${YELLOW}DRY${NC}   … --test browser_opfs\n"
             printf "  ${YELLOW}DRY${NC}   … --test browser_env_persist\n"
+            printf "  ${YELLOW}DRY${NC}   … --test browser_history_persist\n"
         fi
         timer_end
         return 0
@@ -646,6 +648,13 @@ cmd_test_browser() {
             wasm-pack test --headless --chrome crates/clawft-wasm \
                 --no-default-features --features "$feat" \
                 --test browser_env_persist 2>&1
+            rc=$?
+        fi
+        if [ "$rc" -eq 0 ]; then
+            info "Running WEFT-399 OPFS conversation history + config suite"
+            wasm-pack test --headless --chrome crates/clawft-wasm \
+                --no-default-features --features "$feat" \
+                --test browser_history_persist 2>&1
             rc=$?
         fi
     fi

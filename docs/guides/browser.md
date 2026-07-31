@@ -144,6 +144,9 @@ persist workspace files and env vars across reloads when built with the
 |-------|---------|---------------------|
 | `BrowserFileSystem` | Session `HashMap` | Origin Private File System (OPFS); virtual home `/clawft` |
 | `BrowserEnvironment` | Session `HashMap` | OPFS snapshot at `/clawft/.clawft/env.json` |
+| Conversation history (WEFT-399) | Session-only (same FS) | Session JSONL under `/clawft/.clawft/workspace/sessions/` |
+| Config snapshot (P6.4) | Session-only | `/clawft/.clawft/config.json` |
+| Per-group identity | Session-only | `/clawft/workspace/groups/{id}/CLAWFT.md` |
 
 Both constructors fall back to memory if OPFS is missing (non-secure
 context, no `navigator.storage.getDirectory()`).
@@ -155,7 +158,12 @@ cargo build -p clawft-wasm --target wasm32-unknown-unknown \
 
 FEATURES=browser-opfs scripts/build.sh test-browser
 # → browser_pipeline + browser_opfs (FS) + browser_env_persist (env)
+#   + browser_history_persist (WEFT-399 history / CLAWFT.md / config)
 ```
+
+Conversation history layout and JS APIs (`get_history`,
+`send_message_to`, `get_group_clawft_md`, `load_persisted_config`):
+[`docs/browser/opfs-history.md`](../browser/opfs-history.md).
 
 `Platform::env()` stays a **sync** accessor (same as native). Async work
 is on `BrowserEnvironment::open` / `open_with_seed` / `flush` and

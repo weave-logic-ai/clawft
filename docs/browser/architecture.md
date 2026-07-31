@@ -13,7 +13,7 @@ how it differs from the native platform.
 | Process spawning | `std::process::Command` | Not available |
 | Async runtime | `tokio` (multi-threaded) | `wasm-bindgen-futures` (single-threaded) |
 | Networking | Direct TCP/TLS | CORS-constrained fetch |
-| Persistence | Disk files | OPFS when `browser-opfs` enabled (FS + env); else session-only memory |
+| Persistence | Disk files | OPFS when `browser-opfs` enabled (FS + env + session JSONL + config + per-group CLAWFT.md); else session-only memory |
 | Binary format | Native ELF/Mach-O/PE | `.wasm` loaded by browser |
 | Entry point | `fn main()` in `clawft-cli` | `init()` / `send_message()` via wasm-bindgen |
 | Size | ~20 MB (release, stripped) | < 300 KB target (wasm-opt) |
@@ -134,15 +134,18 @@ Feature: "browser"
           |     +-- BrowserEnvironment (in-memory default)
           +-- Platform trait: async_trait(?Send)
 
-Feature: "browser-opfs" (optional sub-feature of browser; WEFT-13 / WEFT-14 / WEFT-392)
+Feature: "browser-opfs" (optional sub-feature of browser; WEFT-13 / WEFT-14 / WEFT-392 / WEFT-399)
     |
     +-- clawft-platform/browser-opfs
     |     +-- BrowserFileSystem::open() → OPFS via navigator.storage.getDirectory()
     |     +-- BrowserEnvironment::open() → same OPFS, snapshot at /clawft/.clawft/env.json
+    |     +-- history_layout paths (sessions, groups/CLAWFT.md, config.json)
     |     +-- Runtime fallback to in-memory if OPFS API missing / non-secure context
     |     +-- Virtual home: /clawft  (workspace: /clawft/workspace, config: /clawft/.clawft/…)
     +-- clawft-tools/browser-opfs  (propagates platform feature)
-    +-- clawft-wasm/browser-opfs   (init() uses env open_with_seed + with_env_arc_open)
+    +-- clawft-wasm/browser-opfs   (init() uses env open_with_seed + with_env_arc_open;
+    |                               LocalFileSink history + config snapshot on init)
+    +-- See docs/browser/opfs-history.md for CLAUDE.md-per-group layout
 
 ### web-sys OPFS requirements (WEFT-13 / WEFT-392)
 
