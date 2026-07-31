@@ -2,12 +2,24 @@
 set -euo pipefail
 
 # Sprint 09 WeftOS Gaps -- Gate Script
-# Validates all Sprint 09 exit criteria before merge.
+#
+# Status: developer-rehearsal only (WEFT-463). Not invoked from CI.
+# Production phase gate: scripts/build.sh gate
+#
+# Validates historical Sprint 09 exit criteria for local rehearsal.
+# Planning paths under .planning/sparc/weftos/0.1/ and
+# .planning/development_notes/weftos/phase-K{0,3,6}/ were confirmed present
+# after the planning reorg (not moved under phase4/).
+#
+# The former ">=1200 kernel tests pass" cargo-output floor was removed: it was
+# a stale under-floor (suite is far above 1200), used non-portable grep -P,
+# and duplicated scripts/build.sh test. Use that for full suite health.
+#
 # Run from the repository root: scripts/09-gate.sh
 
 cd "$(git rev-parse --show-toplevel)"
 
-echo "=== 09 WeftOS Gaps Sprint Gate ==="
+echo "=== 09 WeftOS Gaps Sprint Gate (developer-rehearsal only) ==="
 echo ""
 
 PASS=0
@@ -25,30 +37,44 @@ run_gate() {
     fi
 }
 
+# Count #[test] / #[tokio::test] in a file or under a directory (portable).
+count_tests() {
+    local target="$1"
+    if [ -d "$target" ]; then
+        grep -rE '#\[test\]|#\[tokio::test\]' "$target" --include='*.rs' 2>/dev/null | wc -l | tr -d ' '
+    elif [ -f "$target" ]; then
+        grep -cE '#\[test\]|#\[tokio::test\]' "$target" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
 # ---------------------------------------------------------------------------
 echo "--- 09a: Test Coverage ---"
 # ---------------------------------------------------------------------------
 
 run_gate "boot.rs has 5+ tests" \
-    "test \$(grep -cE '#\[test\]|#\[tokio::test\]' crates/clawft-kernel/src/boot.rs) -ge 5"
+    "test \$(count_tests crates/clawft-kernel/src/boot.rs) -ge 5"
 
 run_gate "agent_loop.rs has 10+ tests" \
-    "test \$(grep -c -E '#\[test\]|#\[tokio::test\]' crates/clawft-kernel/src/agent_loop.rs) -ge 10"
+    "test \$(count_tests crates/clawft-kernel/src/agent_loop.rs) -ge 10"
 
 run_gate "a2a.rs has 1+ tests" \
-    "test \$(grep -c '#\[test\]' crates/clawft-kernel/src/a2a.rs) -ge 1"
+    "test \$(count_tests crates/clawft-kernel/src/a2a.rs) -ge 1"
 
 run_gate "governance.rs has 15+ tests" \
-    "test \$(grep -c '#\[test\]' crates/clawft-kernel/src/governance.rs) -ge 15"
+    "test \$(count_tests crates/clawft-kernel/src/governance.rs) -ge 15"
 
 run_gate "chain.rs has 15+ tests" \
-    "test \$(grep -c '#\[test\]' crates/clawft-kernel/src/chain.rs) -ge 15"
+    "test \$(count_tests crates/clawft-kernel/src/chain.rs) -ge 15"
 
-run_gate "wasm_runner.rs has 20+ tests" \
-    "test \$(grep -c '#\[test\]' crates/clawft-kernel/src/wasm_runner.rs) -ge 20"
+# wasm_runner was split from wasm_runner.rs into crates/.../wasm_runner/
+run_gate "wasm_runner module has 20+ tests" \
+    "test -f crates/clawft-kernel/src/wasm_runner/mod.rs && \
+     test \$(count_tests crates/clawft-kernel/src/wasm_runner) -ge 20"
 
 run_gate "supervisor.rs has 10+ tests" \
-    "test \$(grep -c '#\[test\]' crates/clawft-kernel/src/supervisor.rs) -ge 10"
+    "test \$(count_tests crates/clawft-kernel/src/supervisor.rs) -ge 10"
 
 run_gate "Feature composition tests pass" \
     "cargo test -p clawft-kernel --features 'native,exochain,cluster,mesh,ecc' --test feature_composition"
@@ -98,9 +124,7 @@ run_gate "All features (no wasm-sandbox) compile" \
 run_gate "All features (incl wasm-sandbox) compile" \
     "cargo check -p clawft-kernel --features 'native,exochain,cluster,mesh,ecc,os-patterns,wasm-sandbox'"
 
-run_gate "1200+ kernel tests pass" \
-    "test \$(cargo test -p clawft-kernel --features 'native,exochain,cluster,mesh,ecc,os-patterns' 2>&1 \
-        | grep 'test result' | head -1 | grep -oP '[0-9]+ passed' | grep -oP '[0-9]+') -ge 1200"
+# Full suite: use scripts/build.sh test (or gate). No cargo test-count floor here.
 
 run_gate "Kernel guide documentation exists" \
     "test -f docs/src/content/docs/weftos/kernel-guide.mdx"
