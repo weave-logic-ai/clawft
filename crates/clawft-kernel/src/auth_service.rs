@@ -297,7 +297,6 @@ impl AuthService {
         }
 
         let encrypted = self.xor_encrypt(value);
-        let cred_type_str = credential_type.to_string();
         self.credentials.insert(
             name.to_string(),
             StoredCredential {
