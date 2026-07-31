@@ -264,6 +264,9 @@ The release pipeline as it stands today, by stage:
   upgrade landed; document closes 10 Dependabot alerts. No follow-up
   beyond keeping wasmtime current. Action: add a quarterly
   "dependency sweep" cadence or rely on Dependabot to keep us honest.
+  **CLOSED (WEFT-473):** quarterly dependency-sweep cadence + major-bump
+  staging process documented in `docs/deployment/release.md`
+  (“Quarterly dependency sweep”).
 - **No SBOM / cargo-audit gate in CI** — security review side-channel,
   but missing from this workstream's pipeline. cargo-dist supports
   CycloneDX SBOM generation (not currently enabled in

@@ -568,6 +568,118 @@ scripts/build.sh gate                # full 12-check gate including audit
 `scripts/build.sh audit` is also useful before bumping a dependency: run
 it, change the dep, run it again, and diff.
 
+## Quarterly dependency sweep (WEFT-473)
+
+Dependabot and the `cargo audit` / `npm-audit` CI gates catch **known
+advisories** as they land. They do **not** force major-version hygiene:
+the post-wasmtime-v33 period showed that multi-version jumps (e.g.
+wasmtime 29 → 33, later 33 → 45 under WEFT-551) pile up until a
+security cluster forces a reactive bump. A **quarterly dependency
+sweep** closes that gap on a calendar cadence.
+
+### Cadence
+
+| Item | Value |
+|------|--------|
+| **Frequency** | Once per calendar quarter (Jan / Apr / Jul / Oct) |
+| **Owner** | Release / security rotation (ws14-deployment + security labels) |
+| **Tracker** | Open a Plane work item each quarter: `ws14: quarterly dep sweep YYYY-QN` with labels `ws14-deployment,security,tooling` |
+| **Outcome** | Sweep report under `docs/plans/` (or a comment on the Plane item) listing bumps shipped, deferred majors with review dates, and residual ignore-list debt |
+| **Out-of-band trigger** | CRITICAL/HIGH advisory with no ignore mitigation; MSRV bump; new production path that re-opens a deferred risk (e.g. WASI preopens — see WEFT-681) |
+
+Do **not** wait for the quarter if a gate is red or a dated risk-acceptance
+review date (see Security audits table) has passed.
+
+### Scope (what to sweep)
+
+1. **Rust workspace (`Cargo.lock`)**
+   - Unfiltered: `cargo audit` (no ignores) and record new IDs.
+   - Gated: `scripts/build.sh audit` (must stay green or justify ignore).
+   - Stale majors: `cargo outdated -R` (or equivalent) for direct deps;
+     prioritize runtime/security-critical crates first (wasmtime,
+     rustls / webpki / quinn, tokio, reqwest, serde).
+2. **npm trees** (when present)
+   - `scripts/build.sh npm-audit` — fail on critical/high; review
+     moderates against `docs/security/npm-audit-residual.md`.
+   - Direct pins in `clawft-ui/`, root, `docs/src/`, `gui/`.
+3. **Toolchain / tooling pins**
+   - `rust-toolchain.toml` MSRV vs crate MSRVs (wasmtime 46+ needs
+     rustc 1.94; today we pin 1.93 → 45.0.3 ceiling).
+   - `cargo-dist-version` in root `Cargo.toml` and the generated
+     `.github/workflows/release.yml` (regenerate when bumping).
+4. **Ignore-list hygiene**
+   - Confirm every entry in `CARGO_AUDIT_IGNORES` (`scripts/build.sh`)
+     and the matching `--ignore` flags in
+     `.github/workflows/pr-gates.yml` still have a live Plane followup
+     and a review date. Drop IDs whose fixes already shipped.
+   - Never let CI and local gate drift (WEFT-681 secondary finding).
+
+### Quarterly checklist
+
+Copy into the Plane item description each run:
+
+- [ ] `cargo audit` cold run (no ignores); attach summary of new RUSTSECs
+- [ ] `scripts/build.sh audit` green under current ignore-list
+- [ ] `scripts/build.sh npm-audit` green (critical/high)
+- [ ] Review residual npm moderates (`docs/security/npm-audit-residual.md`)
+- [ ] Inventory major-version lag for: wasmtime / wasmtime-wasi, rustls
+      stack, tokio, reqwest, serde, cargo-dist
+- [ ] For each deferred major: confirm or set a **review date** + Plane WEFT-N
+- [ ] Sync ignore-lists if any IDs added/removed this quarter
+- [ ] Ship contained patch/minor bumps in one PR (or a small PR stack)
+- [ ] File or claim staging work items for any **major** bumps (next section)
+- [ ] Write sweep outcome (report or Plane close comment) with commit SHAs
+
+### Staging major-version bumps
+
+Major bumps (especially wasmtime, rustls ecosystem, async runtime) are
+**not** landed on the quarterly sweep PR itself. Stage them:
+
+1. **File a dedicated Plane item** (cycle = current ship gate, usually
+   `0.8.x`) with labels `security,tooling` plus the owning workstream
+   (`ws02-kernel` for wasmtime sandbox, `ws14-deployment` for release
+   tooling, etc.). Link the quarterly sweep item as parent/related.
+2. **Spike on a branch** named `deps/<crate>-vN` (example:
+   `wave0c/weft-551-wasmtime-bump`):
+   - Bump the workspace pin in root `Cargo.toml` (and any crate-local
+     pins).
+   - Fix compile breaks; note API migrations in the result doc (see
+     `docs/plans/wave-0c-WEFT-551-result.md` as the template).
+   - Keep feature flags and MSRV constraints explicit in the PR body.
+3. **Verify before merge**
+   ```bash
+   scripts/build.sh check
+   scripts/build.sh test          # or targeted crate tests for the surface
+   scripts/build.sh audit         # expect cleared IDs; drop ignores same PR
+   scripts/build.sh clippy        # when the surface is large
+   # sandbox / WASI path when wasmtime moves:
+   cargo test -p clawft-kernel --features wasm-sandbox --lib wasm_runner
+   cargo check -p clawft-wasm --features wasm-plugins
+   ```
+4. **Tighten the gate in the same PR** that lands the fix: remove
+   RUSTSEC IDs from **both** ignore-lists so CI cannot silently re-accept
+   the old cluster.
+5. **Document residual risk** if the highest fixed line still needs a
+   further bump (e.g. MSRV ceiling): dated acceptance, review date,
+   revisit triggers — pattern from WEFT-681 / release.md Security audits.
+6. **Do not batch unrelated majors** in one PR. One runtime or one
+   crypto stack per staging ticket keeps bisect and review sane.
+
+### Relationship to continuous automation
+
+| Mechanism | Role | Not responsible for |
+|-----------|------|---------------------|
+| Dependabot / advisory alerts | Continuous notice of known CVEs | Coordinated multi-crate majors |
+| `scripts/build.sh audit` + CI `cargo-audit` | Block new unignored RUSTSECs | Proactive major hygiene |
+| `scripts/build.sh npm-audit` | Block npm critical/high | Ruflo-pin moderates (accepted residual) |
+| **Quarterly dep sweep (this section)** | Calendar-driven lag review + staging tickets | Emergency patch response (do that immediately) |
+
+Historical context: sprint-16 wasmtime **v33** closed 10 Dependabot
+alerts reactively (`.planning/development_notes/sprint-16/wasmtime-upgrade.md`).
+WEFT-551 later cleared the remaining 33.x advisory cluster by staging
+to **45.0.3**. This cadence exists so the next jump is planned, not
+forced by a red gate.
+
 ## Troubleshooting a Failed Release
 
 **`Publish Crates` failed.** Most common causes: a crate has

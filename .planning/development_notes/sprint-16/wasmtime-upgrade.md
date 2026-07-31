@@ -81,3 +81,10 @@ and wasm-encoder packages that had known CVEs fixed in later releases.
 - `cargo check -p clawft-wasm --features wasm-plugins` passes
 - `scripts/build.sh test` passes (1 pre-existing failure in
   `version_output` unrelated to this change)
+
+## Follow-up (WEFT-473)
+
+Quarterly dependency-sweep cadence (so major bumps are not only reactive
+Dependabot events) is defined in `docs/deployment/release.md` under
+**Quarterly dependency sweep**. Subsequent wasmtime work: WEFT-551
+(33 → 45.0.3 advisory clear).
