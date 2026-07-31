@@ -103,101 +103,106 @@ pub enum PipelineRunStatus {
 }
 
 // ── Handlers ───────────────────────────────────────────────────
+//
+// WEFT-305: Prefer live `ApiState.routing_history` (WEFT-40 in-process
+// ring) over hardcoded fixtures. Token counts are not yet recorded on
+// `RoutingDecisionEntry` (D5/D6 token meter still open) — `token_usage`
+// therefore returns request counts with zero tokens rather than fake
+// 245k-style totals. Upgrade path: record prompt/completion tokens on
+// the ring (or a dedicated metrics store) when the agent loop emits
+// usage, then map them here.
 
-async fn token_usage(State(_state): State<ApiState>) -> Json<TokenUsageSummary> {
-    // Mock data; will be wired to actual metrics collector later.
-    let by_provider = vec![
-        TokenUsage {
-            provider: "anthropic".into(),
-            model: "claude-sonnet-4".into(),
-            input_tokens: 245_000,
-            output_tokens: 82_000,
-            total_tokens: 327_000,
-            request_count: 142,
-        },
-        TokenUsage {
-            provider: "anthropic".into(),
-            model: "claude-haiku-3.5".into(),
-            input_tokens: 89_000,
-            output_tokens: 31_000,
-            total_tokens: 120_000,
-            request_count: 318,
-        },
-    ];
+async fn token_usage(State(state): State<ApiState>) -> Json<TokenUsageSummary> {
+    use std::collections::HashMap;
 
-    let by_session = vec![
-        SessionTokenUsage {
-            session_key: "sess-abc-123".into(),
-            input_tokens: 180_000,
-            output_tokens: 65_000,
-            request_count: 95,
-        },
-        SessionTokenUsage {
-            session_key: "sess-def-456".into(),
-            input_tokens: 98_000,
-            output_tokens: 32_000,
-            request_count: 210,
-        },
-        SessionTokenUsage {
-            session_key: "sess-ghi-789".into(),
-            input_tokens: 56_000,
-            output_tokens: 16_000,
-            request_count: 155,
-        },
-    ];
+    let entries = state.routing_history.recent(state.routing_history.capacity());
 
-    let total_input = by_provider.iter().map(|p| p.input_tokens).sum();
-    let total_output = by_provider.iter().map(|p| p.output_tokens).sum();
+    // Aggregate request counts by (provider, model). Tokens stay 0 until
+    // a real usage recorder lands (D5/D6).
+    let mut by_key: HashMap<(String, String), TokenUsage> = HashMap::new();
+    let mut by_session_map: HashMap<String, SessionTokenUsage> = HashMap::new();
+
+    for e in entries.iter() {
+        let key = (e.provider.clone(), e.model.clone());
+        let slot = by_key.entry(key).or_insert_with(|| TokenUsage {
+            provider: e.provider.clone(),
+            model: e.model.clone(),
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            request_count: 0,
+        });
+        slot.request_count = slot.request_count.saturating_add(1);
+
+        // principal ≈ sender_id (D6 attribution surface when present).
+        let session_key = e
+            .principal
+            .clone()
+            .unwrap_or_else(|| "anonymous".into());
+        let sess = by_session_map
+            .entry(session_key.clone())
+            .or_insert_with(|| SessionTokenUsage {
+                session_key,
+                input_tokens: 0,
+                output_tokens: 0,
+                request_count: 0,
+            });
+        sess.request_count = sess.request_count.saturating_add(1);
+    }
+
+    let by_provider: Vec<TokenUsage> = by_key.into_values().collect();
+    let by_session: Vec<SessionTokenUsage> = by_session_map.into_values().collect();
     let total_requests = by_provider.iter().map(|p| p.request_count).sum();
 
     Json(TokenUsageSummary {
-        total_input,
-        total_output,
+        total_input: 0,
+        total_output: 0,
         total_requests,
         by_provider,
         by_session,
     })
 }
 
-async fn cost_breakdown(State(_state): State<ApiState>) -> Json<CostBreakdown> {
-    let by_provider = vec![
-        ProviderCost {
-            provider: "anthropic".into(),
-            model: "claude-sonnet-4".into(),
-            input_cost_usd: 0.735,
-            output_cost_usd: 1.230,
-            total_cost_usd: 1.965,
-        },
-        ProviderCost {
-            provider: "anthropic".into(),
-            model: "claude-haiku-3.5".into(),
-            input_cost_usd: 0.022,
-            output_cost_usd: 0.031,
-            total_cost_usd: 0.053,
-        },
-    ];
+async fn cost_breakdown(State(state): State<ApiState>) -> Json<CostBreakdown> {
+    use std::collections::HashMap;
 
-    let by_tier = vec![
-        TierCost {
-            tier: 1,
-            label: "Agent Booster (WASM)".into(),
-            request_count: 1240,
+    let entries = state.routing_history.recent(state.routing_history.capacity());
+
+    let mut by_key: HashMap<(String, String), ProviderCost> = HashMap::new();
+    let mut by_tier_map: HashMap<String, TierCost> = HashMap::new();
+
+    for e in &entries {
+        let cost = e.cost_estimate_usd.unwrap_or(0.0);
+        let key = (e.provider.clone(), e.model.clone());
+        let slot = by_key.entry(key).or_insert_with(|| ProviderCost {
+            provider: e.provider.clone(),
+            model: e.model.clone(),
+            input_cost_usd: 0.0,
+            output_cost_usd: 0.0,
             total_cost_usd: 0.0,
-        },
-        TierCost {
-            tier: 2,
-            label: "Haiku".into(),
-            request_count: 318,
-            total_cost_usd: 0.053,
-        },
-        TierCost {
-            tier: 3,
-            label: "Sonnet/Opus".into(),
-            request_count: 142,
-            total_cost_usd: 1.965,
-        },
-    ];
+        });
+        // Routing history stores a single cost estimate (not split by
+        // input/output). Attribute the whole amount to total; leave the
+        // input/output split at 0 until a usage meter records both.
+        slot.total_cost_usd += cost;
 
+        let tier_label = e.tier.clone().unwrap_or_else(|| "(none)".into());
+        let tier_num = tier_label_to_number(&tier_label);
+        let tier_slot = by_tier_map
+            .entry(tier_label.clone())
+            .or_insert_with(|| TierCost {
+                tier: tier_num,
+                label: tier_label,
+                request_count: 0,
+                total_cost_usd: 0.0,
+            });
+        tier_slot.request_count = tier_slot.request_count.saturating_add(1);
+        tier_slot.total_cost_usd += cost;
+    }
+
+    let by_provider: Vec<ProviderCost> = by_key.into_values().collect();
+    let mut by_tier: Vec<TierCost> = by_tier_map.into_values().collect();
+    by_tier.sort_by_key(|t| t.tier);
     let total_cost_usd = by_provider.iter().map(|p| p.total_cost_usd).sum();
 
     Json(CostBreakdown {
@@ -207,55 +212,53 @@ async fn cost_breakdown(State(_state): State<ApiState>) -> Json<CostBreakdown> {
     })
 }
 
-async fn pipeline_runs(State(_state): State<ApiState>) -> Json<Vec<PipelineRun>> {
-    let runs = vec![
-        PipelineRun {
-            id: "run-001".into(),
-            session_key: "sess-abc-123".into(),
-            model: "claude-sonnet-4".into(),
-            complexity: 0.72,
-            latency_ms: 3200,
+async fn pipeline_runs(State(state): State<ApiState>) -> Json<Vec<PipelineRun>> {
+    // Map routing decisions → pipeline run rows. Latency and complexity
+    // are not yet on `RoutingDecisionEntry` (D5) — report 0 rather than
+    // inventing values. Status is Success; fallback/escalation is still
+    // visible via `/admin/routing/decisions`.
+    let entries = state.routing_history.recent(200);
+    let runs: Vec<PipelineRun> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(i, e)| PipelineRun {
+            id: format!("route-{}", entries_id_suffix(&e.ts, i)),
+            session_key: e.principal.unwrap_or_else(|| "anonymous".into()),
+            model: e.model,
+            // D5: per-session latency/complexity not on RoutingDecisionEntry yet.
+            complexity: 0.0,
+            latency_ms: 0,
             status: PipelineRunStatus::Success,
-            timestamp: "2026-02-24T10:30:00Z".into(),
-        },
-        PipelineRun {
-            id: "run-002".into(),
-            session_key: "sess-def-456".into(),
-            model: "claude-haiku-3.5".into(),
-            complexity: 0.18,
-            latency_ms: 480,
-            status: PipelineRunStatus::Success,
-            timestamp: "2026-02-24T10:31:00Z".into(),
-        },
-        PipelineRun {
-            id: "run-003".into(),
-            session_key: "sess-abc-123".into(),
-            model: "agent-booster".into(),
-            complexity: 0.05,
-            latency_ms: 2,
-            status: PipelineRunStatus::Success,
-            timestamp: "2026-02-24T10:31:30Z".into(),
-        },
-        PipelineRun {
-            id: "run-004".into(),
-            session_key: "sess-ghi-789".into(),
-            model: "claude-sonnet-4".into(),
-            complexity: 0.88,
-            latency_ms: 5000,
-            status: PipelineRunStatus::Error,
-            timestamp: "2026-02-24T10:32:00Z".into(),
-        },
-        PipelineRun {
-            id: "run-005".into(),
-            session_key: "sess-def-456".into(),
-            model: "claude-haiku-3.5".into(),
-            complexity: 0.22,
-            latency_ms: 620,
-            status: PipelineRunStatus::Success,
-            timestamp: "2026-02-24T10:33:00Z".into(),
-        },
-    ];
+            timestamp: e.ts,
+        })
+        .collect();
     Json(runs)
+}
+
+/// Stable-ish id fragment from timestamp + index (no extra deps).
+fn entries_id_suffix(ts: &str, idx: usize) -> String {
+    // Prefer compact alphanumeric; fall back to index alone.
+    let compact: String = ts
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(16)
+        .collect();
+    if compact.is_empty() {
+        format!("{idx}")
+    } else {
+        format!("{compact}-{idx}")
+    }
+}
+
+/// Best-effort map of tier name → numeric tier for the UI.
+fn tier_label_to_number(label: &str) -> u32 {
+    match label.to_ascii_lowercase().as_str() {
+        "booster" | "agent-booster" | "agent_booster" | "1" => 1,
+        "haiku" | "fast" | "2" => 2,
+        "sonnet" | "opus" | "standard" | "3" => 3,
+        "(none)" | "" => 0,
+        _ => 0,
+    }
 }
 
 // ── WEFT-40: routing decision history ─────────────────────────────────

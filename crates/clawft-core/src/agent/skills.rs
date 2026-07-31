@@ -21,7 +21,7 @@
 //! `~/.clawft/workspace/skills/` then `~/.nanobot/workspace/skills/`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::runtime::RwLock;
@@ -435,6 +435,222 @@ impl<P: Platform> SkillsLoader<P> {
     pub fn skills_dir(&self) -> &PathBuf {
         &self.skills_dir
     }
+
+    /// Install a skill by copying a local skill directory into [`skills_dir`].
+    ///
+    /// The source must be a directory containing `skill.json` or `SKILL.md`.
+    /// The destination skill name is the source directory's base name (unless
+    /// `name_override` is provided). Path separators / `..` are rejected.
+    ///
+    /// Uses native filesystem copy (recursive) so the skill is immediately
+    /// discoverable by [`list_skills`] / [`load_skill`]. Does **not** call
+    /// ClawHub — that is a higher-layer concern (see SkillBridge).
+    ///
+    /// # Errors
+    ///
+    /// - Source missing / not a directory / missing manifest
+    /// - Invalid skill name
+    /// - Destination already exists
+    /// - I/O failures while copying
+    pub async fn install_from_path(
+        &self,
+        source: &Path,
+        name_override: Option<&str>,
+    ) -> Result<String> {
+        if !source.exists() {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!("skill install: source path does not exist: {}", source.display()),
+            });
+        }
+        if !source.is_dir() {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill install: source is not a directory: {}",
+                    source.display()
+                ),
+            });
+        }
+
+        let has_json = source.join("skill.json").is_file();
+        let has_md = source.join("SKILL.md").is_file();
+        if !has_json && !has_md {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill install: {} has neither skill.json nor SKILL.md",
+                    source.display()
+                ),
+            });
+        }
+
+        let name = match name_override {
+            Some(n) => n.to_string(),
+            None => source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| ClawftError::PluginLoadFailed {
+                    plugin: format!(
+                        "skill install: cannot determine skill name from {}",
+                        source.display()
+                    ),
+                })?
+                .to_string(),
+        };
+
+        validate_skill_name(&name)?;
+
+        let dest = self.skills_dir.join(&name);
+        if dest.exists() {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill install: '{name}' already exists at {}. Uninstall it first.",
+                    dest.display()
+                ),
+            });
+        }
+
+        // Ensure primary skills root exists, then recursive copy.
+        std::fs::create_dir_all(&self.skills_dir).map_err(|e| ClawftError::PluginLoadFailed {
+            plugin: format!(
+                "skill install: create skills dir {}: {e}",
+                self.skills_dir.display()
+            ),
+        })?;
+
+        copy_dir_recursive(source, &dest).map_err(|e| ClawftError::PluginLoadFailed {
+            plugin: format!("skill install '{name}': {e}"),
+        })?;
+
+        // Drop any stale cache entry (should not exist for a new install).
+        {
+            let mut cache = self.skills.write().await;
+            cache.remove(&name);
+        }
+
+        debug!(
+            skill = %name,
+            dest = %dest.display(),
+            "installed skill from local path"
+        );
+        Ok(name)
+    }
+
+    /// Uninstall a skill by name from the primary [`skills_dir`].
+    ///
+    /// Removes the skill directory and drops the in-memory cache entry.
+    /// Skills that only exist in extra dirs (read-only overlays) are not
+    /// removed — returns an error pointing at the primary dir.
+    ///
+    /// # Errors
+    ///
+    /// - Invalid skill name
+    /// - Skill not present under primary skills_dir
+    /// - I/O failure while removing
+    pub async fn uninstall(&self, name: &str) -> Result<()> {
+        validate_skill_name(name)?;
+
+        let dest = self.skills_dir.join(name);
+        if !dest.exists() {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill uninstall: '{name}' not found under {}",
+                    self.skills_dir.display()
+                ),
+            });
+        }
+        if !dest.is_dir() {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill uninstall: expected a directory at {}",
+                    dest.display()
+                ),
+            });
+        }
+
+        std::fs::remove_dir_all(&dest).map_err(|e| ClawftError::PluginLoadFailed {
+            plugin: format!("skill uninstall '{name}': {e}"),
+        })?;
+
+        {
+            let mut cache = self.skills.write().await;
+            cache.remove(name);
+        }
+
+        debug!(skill = %name, "uninstalled skill");
+        Ok(())
+    }
+
+    /// Write a single-file `SKILL.md` package into the primary skills dir.
+    ///
+    /// Used by ClawHub install when the registry returns raw skill content
+    /// rather than a directory tree. `name` becomes the directory name.
+    pub async fn install_skill_md_bytes(&self, name: &str, content: &[u8]) -> Result<()> {
+        validate_skill_name(name)?;
+
+        let dest = self.skills_dir.join(name);
+        if dest.exists() {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill install: '{name}' already exists at {}. Uninstall it first.",
+                    dest.display()
+                ),
+            });
+        }
+
+        std::fs::create_dir_all(&dest).map_err(|e| ClawftError::PluginLoadFailed {
+            plugin: format!("skill install '{name}': create dir: {e}"),
+        })?;
+        std::fs::write(dest.join("SKILL.md"), content).map_err(|e| {
+            ClawftError::PluginLoadFailed {
+                plugin: format!("skill install '{name}': write SKILL.md: {e}"),
+            }
+        })?;
+
+        {
+            let mut cache = self.skills.write().await;
+            cache.remove(name);
+        }
+
+        debug!(skill = %name, "installed skill from SKILL.md bytes");
+        Ok(())
+    }
+}
+
+/// Reject empty names, path separators, and `..` traversal.
+fn validate_skill_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+    {
+        return Err(ClawftError::PluginLoadFailed {
+            plugin: format!("skill: invalid skill name {name:?}"),
+        });
+    }
+    Ok(())
+}
+
+/// Recursively copy `src` directory into `dst` (which must not exist).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::result::Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("file type: {e}"))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&from, &to)
+                .map_err(|e| format!("copy {} → {}: {e}", from.display(), to.display()))?;
+        }
+        // Skip symlinks for safety.
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -738,6 +954,67 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn install_from_path_and_uninstall_round_trip() {
+        // WEFT-301: local filesystem install/uninstall without ClawHub.
+        let skills_root = temp_dir("install_rt_root");
+        let source_root = temp_dir("install_rt_src");
+        create_skill(&source_root, "hello", "Hello skill", Some("do hello")).await;
+
+        let loader = test_loader(&skills_root);
+        let name = loader
+            .install_from_path(&source_root.join("hello"), None)
+            .await
+            .expect("install");
+        assert_eq!(name, "hello");
+
+        let names = loader.list_skills().await.unwrap();
+        assert!(names.iter().any(|n| n == "hello"), "{names:?}");
+
+        let skill = loader.load_skill("hello").await.unwrap();
+        assert_eq!(skill.description, "Hello skill");
+
+        loader.uninstall("hello").await.expect("uninstall");
+        let names_after = loader.list_skills().await.unwrap();
+        assert!(!names_after.iter().any(|n| n == "hello"), "{names_after:?}");
+        assert!(loader.get_skill("hello").await.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&skills_root).await;
+        let _ = tokio::fs::remove_dir_all(&source_root).await;
+    }
+
+    #[tokio::test]
+    async fn install_from_path_rejects_missing_manifest() {
+        let skills_root = temp_dir("install_bad_root");
+        let source = temp_dir("install_bad_src").join("empty_skill");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+
+        let loader = test_loader(&skills_root);
+        let err = loader
+            .install_from_path(&source, None)
+            .await
+            .expect_err("must reject empty dir");
+        assert!(
+            err.to_string().contains("neither skill.json nor SKILL.md"),
+            "{err}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&skills_root).await;
+        let _ = tokio::fs::remove_dir_all(source.parent().unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn uninstall_unknown_skill_errors() {
+        let skills_root = temp_dir("uninstall_missing");
+        let loader = test_loader(&skills_root);
+        let err = loader
+            .uninstall("nope")
+            .await
+            .expect_err("must error for missing skill");
+        assert!(err.to_string().contains("not found"), "{err}");
+        let _ = tokio::fs::remove_dir_all(&skills_root).await;
     }
 
     #[tokio::test]

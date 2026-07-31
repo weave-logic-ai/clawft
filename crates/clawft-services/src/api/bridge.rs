@@ -278,33 +278,91 @@ impl<P: Platform + 'static> SkillAccess for SkillBridge<P> {
         })
     }
 
-    /// Install a skill from the ClawHub registry.
+    /// Install a skill by local path or ClawHub slug (WEFT-301).
     ///
-    /// WEFT-168: ClawHub registry is not yet available in 0.7.x, so
-    /// this method returns an explicit NotImplemented error with a
-    /// docs reference instead of silently accepting the request. The
-    /// previous TODO marker was a footgun: callers (e.g. the
-    /// dashboard) would get `not implemented` with no actionable
-    /// guidance. See `docs/handoff.md` for the deferred-work tracking
-    /// list and the WEFT items that will land it.
-    fn install_skill(&self, _id: &str) -> Result<(), String> {
-        Err("skill install is not implemented in 0.7.x — ClawHub skill \
-             registry is deferred (see docs/handoff.md)"
-            .into())
+    /// Resolution order:
+    /// 1. If `id` is an existing filesystem path to a skill directory
+    ///    (`skill.json` or `SKILL.md`), copy it into the loader's
+    ///    primary skills dir via [`SkillsLoader::install_from_path`].
+    /// 2. Otherwise treat `id` as a ClawHub registry slug / id and
+    ///    download via [`ClawHubClient::download`], writing the package
+    ///    with [`SkillsLoader::install_skill_md_bytes`].
+    ///
+    /// Errors surface the unknown-path / network failure reason so the
+    /// dashboard Install button can show actionable text.
+    fn install_skill(&self, id: &str) -> Result<(), String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("skill install: empty skill id".into());
+        }
+
+        let path = std::path::Path::new(id);
+        // Path-like inputs (absolute, relative with separators, or
+        // explicit `./` / `../`) install from disk only — never fall
+        // through to ClawHub with a filesystem path as a "slug".
+        let looks_like_path = path.is_absolute()
+            || id.contains('/')
+            || id.contains('\\')
+            || id.starts_with('.')
+            || path.exists();
+
+        if looks_like_path {
+            if !path.exists() {
+                return Err(format!(
+                    "skill install: local path does not exist: {id}"
+                ));
+            }
+            let loader = self.loader.clone();
+            return tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    loader
+                        .install_from_path(path, None)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+            });
+        }
+
+        // Bare slug → ClawHub registry download + local install.
+        let loader = self.loader.clone();
+        let slug = id.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                use crate::clawhub::{ClawHubClient, ClawHubConfig};
+
+                let config = ClawHubConfig::from_env();
+                let client = ClawHubClient::new(config);
+                let content = client.download(&slug).await.map_err(|e| {
+                    format!(
+                        "skill install: ClawHub download failed for slug '{slug}': {e}. \
+                         For a local skill, pass a filesystem path to a directory \
+                         containing skill.json or SKILL.md. \
+                         Set CLAWHUB_API_URL / CLAWHUB_API_TOKEN if using a registry."
+                    )
+                })?;
+                loader
+                    .install_skill_md_bytes(&slug, &content)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        })
     }
 
-    /// Uninstall a skill by name.
-    ///
-    /// WEFT-168: same deferral rationale as `install_skill`. The
-    /// underlying `SkillsLoader` does not yet expose an uninstall
-    /// API, and a filesystem-level delete would bypass the loader's
-    /// in-memory cache. Returns NotImplemented with a docs reference.
-    fn uninstall_skill(&self, _name: &str) -> Result<(), String> {
-        Err(
-            "skill uninstall is not implemented in 0.7.x — ClawHub skill \
-             registry is deferred (see docs/handoff.md)"
-                .into(),
-        )
+    /// Uninstall a skill by name from the loader's primary skills dir
+    /// and drop the in-memory cache entry (WEFT-301).
+    fn uninstall_skill(&self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("skill uninstall: empty skill name".into());
+        }
+        let loader = self.loader.clone();
+        let name = name.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                loader.uninstall(&name).await.map_err(|e| e.to_string())
+            })
+        })
     }
 }
 
@@ -527,6 +585,34 @@ impl ConfigBridge {
 impl ConfigAccess for ConfigBridge {
     fn get_config(&self) -> serde_json::Value {
         // Build a simplified config view matching the UI's ConfigData type.
+        // WEFT-304: include `delegation.rules` so /api/delegation/rules can
+        // read live config instead of mock fixtures. Shape is a superset of
+        // `clawft_types::delegation::DelegationRule` (pattern + target) plus
+        // optional UI fields (name/priority/enabled).
+        let delegation_rules: Vec<serde_json::Value> = self
+            .config
+            .delegation
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let target = match r.target {
+                    clawft_types::delegation::DelegationTarget::Local => "local",
+                    clawft_types::delegation::DelegationTarget::Claude => "claude",
+                    clawft_types::delegation::DelegationTarget::Auto => "auto",
+                    _ => "auto",
+                };
+                serde_json::json!({
+                    "name": format!("rule-{}", i + 1),
+                    "pattern": r.pattern,
+                    "target": target,
+                    "complexity_threshold": 1.0,
+                    "enabled": true,
+                    "priority": (i as u32) + 1,
+                })
+            })
+            .collect();
+
         serde_json::json!({
             "agents": {
                 "defaults": {
@@ -565,6 +651,11 @@ impl ConfigAccess for ConfigBridge {
             "gateway": {
                 "api_port": self.config.gateway.api_port,
                 "api_enabled": self.config.gateway.api_enabled,
+            },
+            "delegation": {
+                "claude_enabled": self.config.delegation.claude_enabled,
+                "claude_model": self.config.delegation.claude_model,
+                "rules": delegation_rules,
             },
         })
     }
@@ -1010,43 +1101,112 @@ mod bridge_weft_168_tests {
         std::env::temp_dir().join(format!("clawft_bridge_{prefix}_{pid}_{id}"))
     }
 
-    /// WEFT-168: skill install is deferred (ClawHub registry not yet
-    /// available). The bridge must surface that with an explicit
-    /// NotImplemented message including a docs reference, not the
-    /// previous opaque "not implemented" string.
+    /// WEFT-301: local-path install via SkillBridge → SkillsLoader.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn skill_bridge_install_returns_explicit_not_implemented() {
-        let dir = temp_dir("skill_install");
+    async fn skill_bridge_install_from_local_path_round_trip() {
+        let skills_dir = temp_dir("skill_install_dest");
+        let source_root = temp_dir("skill_install_src");
+        let skill_src = source_root.join("demo");
+        tokio::fs::create_dir_all(&skill_src).await.unwrap();
+        tokio::fs::write(
+            skill_src.join("skill.json"),
+            r#"{"name":"demo","description":"Demo skill","variables":[]}"#,
+        )
+        .await
+        .unwrap();
+
+        let platform = Arc::new(NativePlatform::new());
+        let loader = Arc::new(SkillsLoader::with_dir(skills_dir.clone(), platform));
+        let bridge = SkillBridge::new(loader.clone());
+
+        bridge
+            .install_skill(skill_src.to_str().expect("utf8 path"))
+            .expect("install from path");
+
+        let listed = bridge.list_skills();
+        assert!(
+            listed.iter().any(|s| s.name == "demo"),
+            "installed skill missing from list: {listed:?}"
+        );
+
+        bridge.uninstall_skill("demo").expect("uninstall");
+        let after = bridge.list_skills();
+        assert!(
+            !after.iter().any(|s| s.name == "demo"),
+            "skill still listed after uninstall: {after:?}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&skills_dir).await;
+        let _ = tokio::fs::remove_dir_all(&source_root).await;
+    }
+
+    /// WEFT-301: missing local path surfaces a useful error (not opaque).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skill_bridge_install_missing_path_errors_clearly() {
+        let dir = temp_dir("skill_install_missing");
         let platform = Arc::new(NativePlatform::new());
         let loader = Arc::new(SkillsLoader::with_dir(dir.clone(), platform));
         let bridge = SkillBridge::new(loader);
 
-        let result = bridge.install_skill("any-skill-id");
-
-        let err = result.expect_err("skill install must return Err");
+        let missing = dir.join("no-such-skill-dir");
+        let err = bridge
+            .install_skill(missing.to_str().expect("utf8"))
+            .expect_err("must fail for missing path");
         assert!(
-            err.contains("not implemented") && err.contains("docs/handoff.md"),
-            "install_skill error must mention NotImplemented + docs link, got: {err}"
+            err.contains("does not exist"),
+            "install_skill error must mention missing path, got: {err}"
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
-    /// WEFT-168: skill uninstall is also deferred. Same contract as
-    /// install: explicit NotImplemented + docs reference.
+    /// WEFT-301: bare unknown slug attempts ClawHub and reports network/slug failure.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn skill_bridge_uninstall_returns_explicit_not_implemented() {
-        let dir = temp_dir("skill_uninstall");
+    async fn skill_bridge_install_unknown_slug_errors_with_clawhub_hint() {
+        let dir = temp_dir("skill_install_slug");
         let platform = Arc::new(NativePlatform::new());
         let loader = Arc::new(SkillsLoader::with_dir(dir.clone(), platform));
         let bridge = SkillBridge::new(loader);
 
-        let result = bridge.uninstall_skill("any-skill");
+        // Force an unreachable registry so the test is hermetic.
+        // SAFETY: test-only env mutation; single-threaded section via
+        // this multi_thread test's exclusive CLAWHUB_API_URL key value.
+        unsafe {
+            std::env::set_var(
+                "CLAWHUB_API_URL",
+                "http://127.0.0.1:1/api/v1", // port 1 = connection refused
+            );
+        }
 
-        let err = result.expect_err("skill uninstall must return Err");
+        let err = bridge
+            .install_skill("some-unknown-slug-weft301")
+            .expect_err("must fail for unreachable ClawHub");
         assert!(
-            err.contains("not implemented") && err.contains("docs/handoff.md"),
-            "uninstall_skill error must mention NotImplemented + docs link, got: {err}"
+            err.contains("ClawHub") && (err.contains("slug") || err.contains("download")),
+            "install_skill error must mention ClawHub failure, got: {err}"
+        );
+
+        unsafe {
+            std::env::remove_var("CLAWHUB_API_URL");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-301: uninstall of missing skill returns a clear not-found error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skill_bridge_uninstall_missing_errors() {
+        let dir = temp_dir("skill_uninstall_missing");
+        let platform = Arc::new(NativePlatform::new());
+        let loader = Arc::new(SkillsLoader::with_dir(dir.clone(), platform));
+        let bridge = SkillBridge::new(loader);
+
+        let err = bridge
+            .uninstall_skill("any-skill")
+            .expect_err("must fail for missing skill");
+        assert!(
+            err.contains("not found"),
+            "uninstall_skill error must mention not found, got: {err}"
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
