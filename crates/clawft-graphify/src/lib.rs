@@ -73,6 +73,13 @@ pub use model::{
     KnowledgeGraph, SuggestedQuestion, SurprisingConnection,
 };
 pub use relationship::{Confidence, RelationType, Relationship};
+// WEFT-378: vault domain hyperedges + SUGGEST → ratify → CRDT pipeline.
+pub use vault::{
+    ApplyStats, CrdtDelta, CrdtEntry, CrdtError, CrdtHyperedgeStore, HyperedgeKind,
+    HyperedgeProposal, HyperedgeSuggestConfig, MergeStats as CrdtMergeStats, ProposalLifecycle,
+    RatifyView, VAULT_DOMAIN, VaultHyperedgePipeline, suggest_hyperedges, suggest_ratify_apply,
+    vault_entity_id,
+};
 
 // ---------------------------------------------------------------------------
 // GraphifyError
