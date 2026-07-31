@@ -92,25 +92,25 @@ The daemon constructs a `GovernanceGate` at L1192 with:
 
 ## Missing Gates (Gaps Identified)
 
-### GAP-1: `config_service.rs::delete_typed` (MEDIUM severity)
+### GAP-1: `config_service.rs::delete_typed` (MEDIUM severity) — **CLOSED (WEFT-547 / 2026-07-31)**
 
-**File:** `crates/clawft-kernel/src/config_service.rs` L380
-**Issue:** The `delete_typed` method removes typed configuration entries without any governance check. The sibling method `delete` (L259) has a governance gate, but `delete_typed` does not.
-**Risk:** A caller could bypass governance by using `delete_typed` instead of `delete`.
-**Recommendation:** Add a `GateBackend::check` call matching the pattern in `delete`.
+**File:** `crates/clawft-kernel/src/config_service.rs`  
+**Issue (historical):** The `delete_typed` method removed typed configuration entries without any governance check while sibling `delete` was gated.  
+**Resolution:** `delete_typed` now calls `GateBackend::check("config-service", "config.delete_typed", …)` before mutation and returns `KernelError::GovernanceDenied` on deny. Medium gap count → 0.
 
-### GAP-2: Sandbox `check_command` lacks GovernanceGate integration (LOW severity)
+### GAP-2: Sandbox `check_command` lacks GovernanceGate integration (LOW severity) — **DEFERRED**
 
-**File:** `crates/clawft-core/src/agent/sandbox.rs` L124
+**File:** `crates/clawft-core/src/agent/sandbox.rs`  
 **Issue:** The sandbox uses `SandboxPolicy` for enforcement and emits `chain_event!` markers, but does not consult a `GovernanceGate` or `GovernanceEngine`. This is architecturally intentional (sandbox = enforcement, governance = policy), but means governance policies cannot dynamically override sandbox decisions.
 **Risk:** Low. The sandbox is a strict enforcement layer. GovernanceGate integration would add defense-in-depth but is not a gap in the current architecture.
-**Recommendation:** Consider adding optional `GovernanceGate` consultation for `check_command` as a defense-in-depth measure.
+**Deferral:** Optional defense-in-depth; not required for medium-tier certification.
 
-### GAP-3: `cron.rs::remove_job` lacks governance (LOW severity)
+### GAP-3: `cron.rs::remove_job` lacks governance (LOW severity) — **DEFERRED**
 
-**File:** `crates/clawft-kernel/src/cron.rs` L177
+**File:** `crates/clawft-kernel/src/cron.rs`  
 **Issue:** `add_job` is gated but `remove_job` is not. Removing a governance-mandated cron job (e.g., audit rotation) could weaken the security posture.
-**Recommendation:** Add governance gate to `remove_job` mirroring `add_job`.
+**Mitigation present:** `EVENT_KIND_CRON_REMOVE` chain audit on remove.  
+**Deferral:** Governance parity with `add_job` deferred to 0.9.x polish (low severity).
 
 ---
 
@@ -128,14 +128,14 @@ The daemon constructs a `GovernanceGate` at L1192 with:
 
 | Metric | Count |
 |--------|-------|
-| Total governance check call sites (production code) | 19 |
+| Total governance check call sites (production code) | 19+ (`delete_typed` included) |
 | Files with governance gates | 12 |
 | High-priority items covered | 14/14 (100%) |
-| Gaps identified | 3 (1 medium, 2 low) |
+| Open gaps | 2 low (GAP-2, GAP-3 deferred); **0 medium** |
 | EffectVector dimensions actively used | 3 of 5 (risk, security, privacy) |
 | Gate patterns | 2 (GateBackend trait, GovernanceEngine) |
 | Feature flag | `exochain` (compile-time opt-in) |
 
-**Certification Status: PASS**
+**Certification Status: PASS** (reconfirmed WEFT-547 / 2026-07-31)
 
-All 14 high-priority governance gates are present, correctly positioned before mutations, and return errors on denial. The 3 identified gaps are low-to-medium severity and do not affect the core security posture.
+All 14 high-priority governance gates are present, correctly positioned before mutations, and return errors on denial. The sole medium gap (GAP-1 `delete_typed`) is closed. Remaining items are explicit low-severity deferrals.

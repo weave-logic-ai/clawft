@@ -1,0 +1,25 @@
+[package]
+name = "exo-dag"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "K6 substrate DAG: in-memory DagStore + MMR + Sparse Merkle Tree (ADR-043 / WEFT-619). No postgres."
+keywords = ["dag", "mmr", "smt", "exochain", "k6"]
+categories = ["data-structures", "cryptography"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+exo-core = { version = "0.6.20", path = "../exo-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

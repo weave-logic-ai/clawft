@@ -26,6 +26,11 @@ members = [
     "crates/clawft-rpc",
     "crates/clawft-weave",
     "crates/exo-resource-tree",
+    # WEFT-619 / ADR-043: K6 substrate primitives (BLAKE3+HLC) + in-memory
+    # DagStore/MMR/SMT (no postgres). In-tree stubs of the exo-core/exo-dag
+    # contract — not third-party vendored source.
+    "crates/exo-core",
+    "crates/exo-dag",
     "crates/weftos",
     "crates/clawft-graphify",
     "crates/clawft-lsp-extract",
@@ -354,6 +359,8 @@ clawft-graphify = { version = "0.6.20", path = "crates/clawft-graphify", default
 clawft-security = { version = "0.6.20", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.20", path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { version = "0.6.20", path = "crates/exo-resource-tree" }
+exo-core = { version = "0.6.20", path = "crates/exo-core" }
+exo-dag = { version = "0.6.20", path = "crates/exo-dag" }
 weftos = { version = "0.6.20", path = "crates/weftos", default-features = false }
 clawft-substrate = { version = "0.6.20", path = "crates/clawft-substrate" }
 # ADR-056 / WEFT-718: BVH broad-phase (kernel SpatialBackend behind `ecc`).

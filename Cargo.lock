@@ -1517,6 +1517,7 @@ dependencies = [
  "clawft-rpc",
  "clawft-substrate",
  "clawft-surface",
+ "clawft-types",
  "console_error_panic_hook",
  "ed25519-dalek",
  "eframe",
@@ -1537,6 +1538,7 @@ dependencies = [
  "poll-promise",
  "rand 0.8.7",
  "rodio",
+ "serde",
  "serde_json",
  "tokio",
  "toml 0.8.23",
@@ -3514,6 +3516,27 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "exo-core"
+version = "0.6.20"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "exo-dag"
+version = "0.6.20"
+dependencies = [
+ "exo-core",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

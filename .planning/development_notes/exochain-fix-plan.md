@@ -60,53 +60,58 @@
 ### Agent 5: CAUSAL GRAPH + ARTIFACTS (Medium)
 **Files**: `causal.rs`, `artifact_store.rs`
 **Gaps**: 6
-- [ ] `causal.rs:add_node` → chain: `causal.node.add`
-- [ ] `causal.rs:remove_node` → chain: `causal.node.remove`
-- [ ] `causal.rs:link` → chain: `causal.edge.add`
-- [ ] `causal.rs:unlink` → chain: `causal.edge.remove`
-- [ ] `causal.rs:clear` → chain: `causal.clear` + governance gate
-- [ ] `artifact_store.rs:store` → chain: `artifact.store`
-- [ ] `artifact_store.rs:remove` → chain: `artifact.remove`
+**Status (WEFT-547 / 2026-07-31): CLOSED — all instrumented**
+- [x] `causal.rs:add_node` → chain: `causal.node.add`
+- [x] `causal.rs:remove_node` → chain: `causal.node.remove`
+- [x] `causal.rs:link` → chain: `causal.edge.add`
+- [x] `causal.rs:unlink` → chain: `causal.edge.remove`
+- [x] `causal.rs:clear` → chain: `causal.clear` + governance gate
+- [x] `artifact_store.rs:store` → chain: `artifact.store`
+- [x] `artifact_store.rs:remove` → chain: `artifact.remove`
 
 ### Agent 6: CONTAINERS + PROCESSES + WASM (Medium/High)
-**Files**: `container.rs`, `process.rs`, `wasm_runner/runner.rs`
-**Gaps**: 8
-- [ ] `container.rs:start_container` → chain: `container.start`
-- [ ] `container.rs:stop_container` → chain: `container.stop`
-- [ ] `container.rs:configure` → chain: `container.configure`
-- [ ] `process.rs:insert` → chain: `process.register`
-- [ ] `process.rs:remove` → chain: `process.deregister`
-- [ ] `process.rs:update_state` → chain: `process.state`
-- [ ] `wasm_runner/runner.rs:execute` → chain: `wasm.execute` + governance gate
-- [ ] `agency.rs:add_child/remove_child` → chain: `agent.hierarchy`
+**Files**: `container.rs`, `process.rs`, `wasm_runner/runner.rs`, `wasm_runner/tools_fs.rs`
+**Gaps**: 8 (+ wasm fs mutations from medium cert item 32)
+**Status (WEFT-547 / 2026-07-31): CLOSED — all instrumented**
+- [x] `container.rs:start_container` → chain: `container.start`
+- [x] `container.rs:stop_container` → chain: `container.stop`
+- [x] `container.rs:configure` → chain: `container.configure`
+- [x] `process.rs:insert` → chain: `process.register`
+- [x] `process.rs:remove` → chain: `process.deregister`
+- [x] `process.rs:update_state` → chain: `process.state`
+- [x] `wasm_runner/runner.rs:execute` → chain: `wasm.execute` + governance gate
+- [x] `agency.rs:add_child/remove_child` → chain: `agent.hierarchy`
+- [x] `wasm_runner/tools_fs.rs` mutating tools → `wasm.fs.{write,create_dir,remove,copy,move}`
 
 ### Agent 7: MESH + PERSISTENCE (Medium)
 **Files**: `mesh.rs`, `mesh_service.rs`, `mesh_artifact.rs`, `mesh_ipc.rs`, `persistence.rs`, `reconciler.rs`
 **Gaps**: 8
-- [ ] `mesh.rs:*` → chain: `mesh.peer.*`
-- [ ] `mesh_service.rs:register` → chain: `mesh.service.register`
-- [ ] `mesh_service.rs:deregister` → chain: `mesh.service.deregister`
-- [ ] `mesh_artifact.rs:store` → chain: `mesh.artifact.store`
-- [ ] `mesh_artifact.rs:fetch` → chain: `mesh.artifact.fetch`
-- [ ] `mesh_ipc.rs:send` → chain: `mesh.ipc.send`
-- [ ] `persistence.rs:save` → chain: `kernel.save`
-- [ ] `persistence.rs:load` → chain: `kernel.load`
-- [ ] `reconciler.rs:reconcile` → chain: `reconciler.action`
+**Status (WEFT-547 / 2026-07-31): CLOSED — all instrumented**
+- [x] `mesh.rs:*` → chain: `mesh.peer.*`
+- [x] `mesh_service.rs:register` → chain: `mesh.service.register`
+- [x] `mesh_service.rs:deregister` → chain: `mesh.service.deregister`
+- [x] `mesh_artifact.rs:store` → chain: `mesh.artifact.store`
+- [x] `mesh_artifact.rs:fetch` → chain: `mesh.artifact.fetch`
+- [x] `mesh_ipc.rs:send` → chain: `mesh.ipc.send`
+- [x] `persistence.rs:save` → chain: `kernel.save`
+- [x] `persistence.rs:load` → chain: `kernel.load`
+- [x] `reconciler.rs:reconcile` → chain: `reconciler.action`
 
 ### Agent 8: CORE + GRAPHIFY + WEAVE (Medium)
 **Files**: `agent/sandbox.rs`, `session.rs`, `workspace/mod.rs`, `tools/registry.rs`, `graphify/build.rs`, `graphify/ingest.rs`, `graphify/pipeline.rs`, `graphify/hooks.rs`, `init_cmd.rs`
 **Gaps**: 10
-- [ ] `sandbox.rs:execute` → chain: `sandbox.execute` + governance gate
-- [ ] `session.rs:create` → chain: `session.create`
-- [ ] `session.rs:destroy` → chain: `session.destroy`
-- [ ] `workspace/mod.rs:create` → chain: `workspace.create`
-- [ ] `workspace/config.rs:update` → chain: `workspace.config`
-- [ ] `tools/registry.rs:register` → chain: `tool.register`
-- [ ] `graphify/build.rs:build_graph` → chain: `graphify.build`
-- [ ] `graphify/ingest.rs:ingest` → chain: `graphify.ingest`
-- [ ] `graphify/pipeline.rs:run` → chain: `graphify.pipeline`
-- [ ] `graphify/hooks.rs:register` → chain: `graphify.hook`
-- [ ] `init_cmd.rs:init` → chain: `project.init`
+**Status (WEFT-547 / 2026-07-31): CLOSED — all instrumented (chain_event! / tracing)**
+- [x] `sandbox.rs:execute` → chain: `sandbox.execute` + governance gate
+- [x] `session.rs:create` → chain: `session.create`
+- [x] `session.rs:destroy` → chain: `session.destroy`
+- [x] `workspace/mod.rs:create` → chain: `workspace.create`
+- [x] `workspace/config.rs:update` → chain: `workspace.config`
+- [x] `tools/registry.rs:register` → chain: `tool.register`
+- [x] `graphify/build.rs:build_graph` → chain: `graphify.build`
+- [x] `graphify/ingest.rs:ingest` → chain: `graphify.ingest`
+- [x] `graphify/pipeline.rs:run` → chain: `graphify.pipeline`
+- [x] `graphify/hooks.rs:register` → chain: `graphify.hook`
+- [x] `init_cmd.rs:init` → chain: `project.init`
 
 ---
 

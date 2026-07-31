@@ -45,3 +45,17 @@ The K6 migration is the hard dependency for hash unification. It will replace th
 - Both `blake3` and `sha3` (SHAKE-256 via rvf-crypto) remain workspace dependencies until K6 completes
 - The migration path is explicitly documented in planning artifacts, reducing the risk of it being forgotten or deprioritized
 - The coexistence period is bounded: K6 is a defined milestone, not an indefinite deferral
+
+## Implementation status (WEFT-619 / 2026-07-31)
+
+In-tree K6 substrate stubs land as workspace crates (not third-party vendored
+source — FSL/license clearance for external exo-* remains a separate check):
+
+| Crate | Contract |
+|-------|----------|
+| `crates/exo-core` | `Blake3Hash`, domain-separated `blake3_hash*`, `Hlc` / `HybridLogicalClock`, `EventId` |
+| `crates/exo-dag` | In-memory `DagStore` (append-only, multi-parent), `MerkleMountainRange`, `SparseMerkleTree`, `load_checkpoint` — **no postgres** |
+
+`ChainManager` remains SHAKE-256 until the coordinated K6 cutover re-hashes the
+chain. The stubs map the SPARC / ADR-043 API surface so ResourceTree and mesh
+sync can depend on them incrementally.
