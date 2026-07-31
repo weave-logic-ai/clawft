@@ -205,9 +205,17 @@ comment — do not silently stall.
    compaction trait emerges).
 
 **Acceptance**:
-- [ ] Deterministic dual-store replay: identical trees/branches/diffs
-- [ ] Volume branch-diff returns exactly the leaves that differ in region
-- [ ] OQ2/OQ3 outcomes written into plan or phase close comment
+- [x] Deterministic dual-store replay: identical trees/branches/diffs
+      (`BvhStore` dual-store test in `crates/clawft-bvh/src/store.rs`)
+- [x] Volume branch-diff returns exactly the leaves that differ in region
+      (`branch_diff_volume_exactness`)
+- [x] OQ2/OQ3 outcomes written into plan or phase close comment
+      (see `.planning/bvh-spatial-index/PLAN.md` OQ2/OQ3 Resolved)
+
+**Implementation (WEFT-719)**: `clawft-bvh` modules `store`, `branch`,
+`determinism`, `chain` — COW `derive_branch`, `seal_phase` sort key
+`(priority_tier, exochain_seq)`, `branch_diff(a,b,region)`. Kernel
+`SpatialBackend` adapter remains Phase C/E.
 
 **Refs**: ADR-056 §5, §7; PLAN.md Phase D
 

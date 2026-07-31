@@ -1,39 +1,38 @@
 //! `clawft-bvh` — BVH broad-phase spatial index (ADR-056).
 //!
-//! Standalone, no `clawft-kernel` dependency. Phase A ships:
-//! - AABB / Vec3 / Ray primitives
-//! - Leaf + LeafId + IdentityKind
-//! - Top-down median-split BVH with point/AABB/sphere queries
-//! - Tagged-union narrow-phase registry (stub interpreters)
+//! ## Phases
 //!
-//! Phase B (WEFT-717): canonical tags live in
-//! [`weftos_leaf_types::spatial`] and are re-exported here as
-//! [`SpatialLeafTag`] and [`tags`].
+//! - **A**: AABB / Vec3 / Ray, Leaf, median-split tree, point/AABB/sphere/ray
+//! - **D (WEFT-719)**: multi-branch [`BvhStore`], determinism-phase seal,
+//!   COW [`BvhStore::derive_branch`], volume [`BvhStore::branch_diff`]
 //!
-//! Chain binding, COW branches, and `SpatialBackend` live in later phases
-//! (kernel adapters).
+//! Chain dual-sign + kernel `SpatialBackend` adapters land in Phase C (kernel);
+//! this crate exposes [`ChainSink`] so they plug in without pulling `tokio`.
+//!
+//! Splat integration will register `splat.*` leaf tags via `weftos-leaf-types`
+//! once Phase B lands.
 
 #![warn(missing_docs)]
 
 mod aabb;
+mod branch;
+mod chain;
+mod determinism;
 mod leaf;
 mod query;
 mod registry;
+mod store;
 mod tree;
 
 pub use aabb::{Aabb, Ray, Vec3};
-pub use leaf::{IdentityKind, Leaf, LeafId};
+pub use branch::{DiffEntry, DiffPresence};
+pub use chain::{ChainEvent, ChainEventKind, ChainSink, NullChainSink, RecordingChainSink};
+pub use determinism::{PendingInsert, PendingMutation, PendingRemove, sort_pending};
+pub use leaf::{BranchId, BranchMeta, IdentityKind, Leaf, LeafId};
 pub use query::{RayHit, query_aabb, query_point, query_ray, query_sphere};
 pub use registry::{NarrowPhaseFn, SpatialRegistry};
+pub use store::{BvhError, BvhResult, BvhStore, BvhStoreConfig};
 pub use tree::BvhTree;
-
-/// Canonical spatial tag registry (`weftos-leaf-types`, ADR-056 Phase B).
-pub use weftos_leaf_types::spatial::{
-    SpatialLeafTag, UnknownSpatialTag, primitives as spatial_primitives, tag_consts as tags_consts,
-};
-
-/// `u32` tag constants (same discriminants as [`SpatialLeafTag`]).
-pub use leaf::tags;
 
 /// Crate version string for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

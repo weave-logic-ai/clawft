@@ -4,8 +4,28 @@ use crate::aabb::Aabb;
 use serde::{Deserialize, Serialize};
 
 /// Stable leaf handle after insertion into a tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LeafId(pub u64);
+
+/// Stable COW branch handle (ADR-056 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BranchId(pub u64);
+
+/// Metadata attached when deriving a child branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchMeta {
+    /// Human-readable label (debug / CLI).
+    pub label: String,
+}
+
+impl BranchMeta {
+    /// Construct with a label.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+        }
+    }
+}
 
 /// Object leaves keep stable IDs across branches; event leaves are one-shot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,7 +37,7 @@ pub enum IdentityKind {
 }
 
 /// BVH leaf: broad-phase AABB + registry tag + opaque payload bytes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Leaf {
     /// Broad-phase bound.
     pub bound: Aabb,

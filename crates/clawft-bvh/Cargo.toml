@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "BVH broad-phase spatial index (ADR-056 Phase A). No kernel/chain deps — pure geometry + registry."
+description = "BVH broad-phase spatial index (ADR-056). Phase A geometry + Phase D COW/determinism store; no kernel deps."
 
 [dependencies]
 serde = { workspace = true }

@@ -73,6 +73,31 @@ impl BvhTree {
             .map(|(_, l)| l)
     }
 
+    /// Replace contents with an explicit leaf set (deterministic rebuild).
+    ///
+    /// Used by COW phase seal so branches materialize the same tree for the
+    /// same `(LeafId, Leaf)` set regardless of insertion order.
+    pub fn load_leaves(&mut self, leaves: impl IntoIterator<Item = (LeafId, Leaf)>) {
+        self.leaves.clear();
+        self.nodes.clear();
+        self.root = None;
+        let mut max_id = 0_u64;
+        for (id, leaf) in leaves {
+            max_id = max_id.max(id.0);
+            self.leaves.push((id, leaf));
+        }
+        self.leaves.sort_by_key(|(id, _)| id.0);
+        self.next_id = max_id.saturating_add(1);
+        self.rebuild();
+    }
+
+    /// Snapshot sealed leaves in deterministic `LeafId` order.
+    pub fn snapshot_leaves(&self) -> Vec<(LeafId, Leaf)> {
+        let mut out = self.leaves.clone();
+        out.sort_by_key(|(id, _)| id.0);
+        out
+    }
+
     /// Root bound if any.
     pub fn root_bound(&self) -> Option<Aabb> {
         self.root.map(|i| match &self.nodes[i] {

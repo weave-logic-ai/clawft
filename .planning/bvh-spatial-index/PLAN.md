@@ -251,14 +251,25 @@ Defaults: `enabled = false` (opt-in), `max_leaves = 1_000_000`,
   recursion (a leaf's narrow-phase calling into another spatial
   structure). We should encode this as a `#[forbid(...)]` or a
   registry-time check. **Resolve in Phase A.**
-- **OQ2 — supersession schedule for high-churn leaves**: how does
-  the BVH cooperate with ExoChain supersession rules when sensor-
-  net workloads churn N leaves/sec? **Resolve in Phase D**, once
-  branch retention is exercised against synthetic load.
-- **OQ3 — branch retention vs. RVF compaction**: the concept paper
-  §12.1 Q4 leans on RVF compaction; our chain layer does not yet
-  expose a compaction hook. **Spike during Phase D**, file a
-  follow-up ADR if a compaction trait emerges.
+- **OQ2 — supersession schedule for high-churn leaves** (**Resolved
+  in Phase D / WEFT-719**): high-churn **Event** leaves are superseded
+  by explicit `queue_remove` of the prior `LeafId` (or by last-write-
+  wins on the same id if callers re-queue replace as remove+insert
+  with monotonic `exochain_seq`) within a determinism phase. Batching
+  via `BvhStoreConfig::phase_commit_threshold` absorbs sensor-rate
+  spikes; the store does **not** invent an automatic GC of sealed
+  leaves. Cross-branch GC waits on branch-retention (`KeepLast(N)` in
+  `SpatialConfig`, Phase C/E) pruning unreferenced tips. When ExoChain
+  gains a first-class supersession API, wire it at the kernel
+  `ChainSink` adapter — not inside `clawft-bvh`.
+- **OQ3 — branch retention vs. RVF compaction** (**Spiked in Phase D /
+  WEFT-719; no ADR**): in-memory COW already shares sealed maps via
+  `Arc` until a child seal diverges (`Arc::make_mut`). The chain layer
+  still has no compaction hook. Spike outcome: **do not** introduce a
+  `BranchCompactor` trait in this crate yet; optional follow-up only
+  when RVF exposes segment rewrite. Then: rewrite a branch's sealed
+  map to a fresh base segment and re-parent children. No ADR filed —
+  no trait emerged from the spike.
 - **OQ4 — multi-tenant membership filters**: ADR-056 §1 names
   membership filters as a v1 capability, but the trait surface
   in §8 doesn't include them. **Resolve before Phase E** — add a
