@@ -364,8 +364,10 @@ cargo build --release --features "native,exochain,cluster,mesh,ecc"
 # Everything
 cargo build --release --features "native,exochain,cluster,mesh,ecc,wasm-sandbox,containers"
 
-# Browser target
-cargo build --release --target wasm32-unknown-unknown -p clawft-wasm
+# Browser / WASI WASM — always use the unified script (handles
+# --no-default-features --features browser, release-wasm profile, wasm-bindgen)
+scripts/build.sh browser   # wasm32-unknown-unknown (browser tab)
+scripts/build.sh wasi      # wasm32-wasip2 (edge / wasmtime hosts)
 ```
 
 ## Testing
@@ -468,6 +470,50 @@ scripts/build.sh test            # Run tests
 scripts/build.sh gate            # Full phase gate (11 checks)
 scripts/build.sh all             # Everything (native + wasi + browser + ui)
 ```
+
+### Browser Build
+
+**W-BROWSER** runs the agent stack in a browser tab: compile to
+`wasm32-unknown-unknown`, browser HTTP/LLM transport, the `www/` test harness,
+and the agent pipeline wired in-tab (wasm-bindgen `init` / `send_message`).
+This is distinct from the **WASI** path (`wasm32-wasip2` for wasmtime/edge).
+
+```sh
+# Prerequisites (once)
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli   # optional but needed for JS glue / serve
+
+# Browser WASM (release-wasm + --no-default-features --features browser)
+scripts/build.sh browser
+
+# Serve the browser test harness (default port 8080)
+scripts/build.sh serve
+
+# Headless Chrome regression suite (wasm-pack + chromedriver)
+scripts/build.sh test-browser
+
+# WASI WASM for edge / server hosts (not the browser)
+scripts/build.sh wasi
+```
+
+`scripts/build.sh browser` builds `clawft-wasm` and, when `wasm-bindgen` is
+installed, writes JS glue to `crates/clawft-wasm/www/pkg/`. Prefer this over
+raw `cargo build --target wasm32-unknown-unknown` so feature flags and the
+bindgen step stay correct.
+
+Full guides under **[docs/browser/](docs/browser/)**:
+
+| Doc | Topic |
+|-----|--------|
+| [quickstart.md](docs/browser/quickstart.md) | Minimal HTML + WASM load |
+| [building.md](docs/browser/building.md) | Toolchain, flags, outputs |
+| [architecture.md](docs/browser/architecture.md) | Hybrid in-tab agent model |
+| [deployment.md](docs/browser/deployment.md) | Shipping the browser bundle |
+| [api-reference.md](docs/browser/api-reference.md) | wasm-bindgen surface |
+
+Also see [ADR-083](docs/adr/adr-083-browser-wasm-support.md) (browser WASM) and
+[ADR-044](docs/adr/adr-044-wasm-wasip1-target.md) (WASI target). For the React
+dashboard browser-only mode (`?mode=wasm`), see [clawft-ui/README.md](clawft-ui/README.md).
 
 ## Contributing
 

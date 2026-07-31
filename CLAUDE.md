@@ -89,9 +89,14 @@ scripts/build.sh check
 # Lint (clippy, warnings as errors)
 scripts/build.sh clippy
 
-# Build WASM targets
-scripts/build.sh wasi
-scripts/build.sh browser
+# Build WASM targets (prefer these over raw cargo)
+scripts/build.sh wasi       # wasm32-wasip2 (edge / wasmtime hosts)
+scripts/build.sh browser    # wasm32-unknown-unknown + --features browser
+
+# Browser extras
+scripts/build.sh serve          # Serve www/ test harness (default :8080)
+scripts/build.sh test-browser   # Headless Chrome suite (wasm-pack + chromedriver)
+scripts/build.sh browser --features browser-opfs  # extra features on top of browser
 
 # Build everything (native + wasi + browser + ui)
 scripts/build.sh all
@@ -110,6 +115,22 @@ scripts/build.sh --help
 - ALWAYS run `scripts/build.sh check` (or `gate`) before committing
 - If a new feature needs build flags not in the script, ADD them to `scripts/build.sh`
 - Agents MUST use `scripts/build.sh`, not raw cargo, except for critical debugging
+
+### Browser / WASM (W-BROWSER)
+
+**W-BROWSER** scope (landed): compile + browser transport + www harness +
+agent pipeline wired in-tab. Entry is wasm-bindgen (`init` / `send_message`),
+not `fn main()`. Docs: [`docs/browser/`](docs/browser/).
+
+- **Browser**: `scripts/build.sh browser` → `clawft-wasm` for
+  `wasm32-unknown-unknown` with `--no-default-features --features browser`
+  (and `release-wasm` profile + wasm-bindgen into `crates/clawft-wasm/www/pkg/`).
+  Do **not** invent raw cargo browser flags; the script owns them.
+- **WASI** (separate path): `scripts/build.sh wasi` → `wasm32-wasip2` for
+  wasmtime / edge hosts — not the browser tab story.
+- **Mutex**: `native` ⊻ `browser` — never enable both on the same compile unit.
+  See ADR-083. For ad-hoc checks only:
+  `cargo check --target wasm32-unknown-unknown -p clawft-wasm --no-default-features --features browser`.
 
 ## Security Rules
 
