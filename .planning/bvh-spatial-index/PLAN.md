@@ -271,11 +271,11 @@ Defaults: `enabled = false` (opt-in), `max_leaves = 1_000_000`,
 
 Per `.claude/CLAUDE.md` "Plane is the authoritative work tracker."
 
-On Phase A start:
-1. Create one Plane work item per phase (A–E) in cycle `0.8.x`.
-2. Link each to ADR-056 and to this PLAN.md.
-3. Acceptance criteria copied verbatim from the relevant phase
-   above.
+**Decomposition complete (WEFT-592, 2026-07-31):** see
+[`docs/plans/weft-592-bvh-phase-decomposition.md`](../../docs/plans/weft-592-bvh-phase-decomposition.md).
+Children: **WEFT-716** (A), **WEFT-717** (B), **WEFT-718** (C),
+**WEFT-719** (D), **WEFT-720** (E). Phase A is partial in-tree; A ticket
+finishes remaining broad-phase gaps.
 
 On phase merge:
 - Transition the phase's work item to **Done** with the merge SHA.
