@@ -35,6 +35,175 @@ pub(crate) fn session_file_path(sessions_dir: &Path, key: &str) -> PathBuf {
     sessions_dir.join(format!("{encoded}.jsonl"))
 }
 
+/// Legacy on-disk basename for a session key (pre-percent-encoding).
+///
+/// Older builds replaced only `:` with `_` (e.g. `telegram:123` →
+/// `telegram_123.jsonl`). Used by migration and [`gc_migrated_session_files`].
+pub(crate) fn legacy_underscore_session_filename(key: &str) -> String {
+    format!("{}.jsonl", key.replace(':', "_"))
+}
+
+/// Report from a session GC pass that removes orphaned legacy underscore-
+/// encoded session files after a successful migrate to percent-encoded names.
+///
+/// See [`gc_migrated_session_files`] and `weft sessions gc` (WEFT-87).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionGcReport {
+    /// Legacy basenames removed (or that *would* be removed when `dry_run`).
+    pub removed: Vec<String>,
+    /// Legacy basenames skipped because content did not match the migrated copy.
+    pub skipped_mismatch: Vec<String>,
+    /// When true, no files were deleted — `removed` lists candidates only.
+    pub dry_run: bool,
+}
+
+impl SessionGcReport {
+    /// Number of legacy files removed (or that would be removed in dry-run).
+    pub fn count(&self) -> usize {
+        self.removed.len()
+    }
+}
+
+/// Remove legacy underscore-encoded session files that already have a verified
+/// percent-encoded twin (WEFT-87).
+///
+/// Scans `sessions_dir` for `.jsonl` files whose percent-decoded stem is a
+/// session key containing `:`. For each such key, if
+/// `{key with :→_}.jsonl` also exists and its bytes match the percent-encoded
+/// file, the legacy file is deleted (or reported when `dry_run` is true).
+///
+/// Orphaned legacy-only files (never loaded/migrated) are left alone so we
+/// never discard the only copy. Content mismatches are skipped with a warn.
+///
+/// # Errors
+///
+/// Returns [`ClawftError::Io`] if listing the directory or reading/removing a
+/// file fails fatally. Individual remove failures are logged and do not abort
+/// the pass when other candidates remain.
+pub async fn gc_migrated_session_files<P: Platform>(
+    platform: &P,
+    sessions_dir: &Path,
+    dry_run: bool,
+) -> clawft_types::Result<SessionGcReport> {
+    let entries = platform
+        .fs()
+        .list_dir(sessions_dir)
+        .await
+        .map_err(ClawftError::Io)?;
+
+    let mut report = SessionGcReport {
+        dry_run,
+        ..Default::default()
+    };
+
+    for entry in entries {
+        let Some(name) = entry.file_name() else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+
+        // Only consider percent-encoded (new-format) files: decode stem → key.
+        let key = match percent_decode_str(stem).decode_utf8() {
+            Ok(decoded) => decoded.into_owned(),
+            Err(e) => {
+                warn!(filename = %name, error = %e, "gc: skipping undecodable session filename");
+                continue;
+            }
+        };
+
+        // Legacy encoding only rewrote `:`; keys without colons share no
+        // distinct legacy twin under that scheme.
+        if !key.contains(':') {
+            continue;
+        }
+
+        let new_path = session_file_path(sessions_dir, &key);
+        // Require the entry we listed to be the canonical new path (guards
+        // against treating a raw underscore file as "new" when decode is a no-op).
+        if entry != new_path {
+            continue;
+        }
+
+        let old_name = legacy_underscore_session_filename(&key);
+        let old_path = sessions_dir.join(&old_name);
+        if old_path == new_path {
+            continue;
+        }
+        if !platform.fs().exists(&old_path).await {
+            continue;
+        }
+
+        let new_content = match platform.fs().read_to_string(&new_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    path = %new_path.display(),
+                    error = %e,
+                    "gc: failed to read migrated session file; skipping twin"
+                );
+                continue;
+            }
+        };
+        let old_content = match platform.fs().read_to_string(&old_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    path = %old_path.display(),
+                    error = %e,
+                    "gc: failed to read legacy session file; skipping"
+                );
+                continue;
+            }
+        };
+
+        if new_content != old_content {
+            warn!(
+                key = %key,
+                old = %old_path.display(),
+                new = %new_path.display(),
+                "gc: legacy and migrated session content differ; leaving legacy file"
+            );
+            report.skipped_mismatch.push(old_name);
+            continue;
+        }
+
+        if dry_run {
+            debug!(
+                key = %key,
+                old = %old_name,
+                "gc dry-run: would remove legacy underscore session file"
+            );
+            report.removed.push(old_name);
+            continue;
+        }
+
+        match platform.fs().remove_file(&old_path).await {
+            Ok(()) => {
+                debug!(
+                    key = %key,
+                    old = %old_name,
+                    "gc: removed legacy underscore session file"
+                );
+                report.removed.push(old_name);
+            }
+            Err(e) => {
+                warn!(
+                    path = %old_path.display(),
+                    error = %e,
+                    "gc: failed to remove legacy session file"
+                );
+            }
+        }
+    }
+
+    report.removed.sort();
+    report.skipped_mismatch.sort();
+    Ok(report)
+}
+
 /// Resolve the sessions directory the same way [`SessionManager::new`] does:
 ///
 /// 1. `~/.clawft/workspace/sessions/` if it exists,
@@ -296,14 +465,16 @@ impl<P: Platform> SessionManager<P> {
     ///
     /// Includes a migration path: if the percent-encoded file does not exist
     /// but the old underscore-encoded file does, the content is copied to the
-    /// new filename (the old file is preserved for safety).
+    /// new filename. After a successful write, the legacy file is removed
+    /// (WEFT-87 self-cleanup). Bulk cleanup of already-migrated orphans is
+    /// available via [`Self::gc_migrated`] / [`gc_migrated_session_files`].
     pub async fn load_session(&self, key: &str) -> clawft_types::Result<Session> {
         crate::security::validate_session_id(key)?;
         let path = self.session_path(key);
 
         // Migration: try old-format filename if new-format doesn't exist
         if !self.platform.fs().exists(&path).await {
-            let old_filename = format!("{}.jsonl", key.replace(':', "_"));
+            let old_filename = legacy_underscore_session_filename(key);
             let old_path = self.sessions_dir.join(&old_filename);
             if self.platform.fs().exists(&old_path).await {
                 warn!(
@@ -312,15 +483,60 @@ impl<P: Platform> SessionManager<P> {
                     new = %path.display(),
                     "migrating session file from old encoding format"
                 );
-                // Read from old, write to new, keep old for safety
+                // Read from old, write to new, then remove old once verified.
                 let content = self.platform.fs().read_to_string(&old_path).await?;
                 self.platform.fs().write_string(&path, &content).await?;
+                // Self-cleanup (WEFT-87): drop legacy twin only after the
+                // percent-encoded copy is intact.
+                match self.platform.fs().read_to_string(&path).await {
+                    Ok(written) if written == content => {
+                        if let Err(e) = self.platform.fs().remove_file(&old_path).await {
+                            warn!(
+                                key = key,
+                                old = %old_path.display(),
+                                error = %e,
+                                "migrated session but failed to remove legacy underscore file"
+                            );
+                        } else {
+                            debug!(
+                                key = key,
+                                old = %old_filename,
+                                "removed legacy underscore session file after migration"
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        warn!(
+                            key = key,
+                            old = %old_path.display(),
+                            new = %path.display(),
+                            "migrated session content mismatch; leaving legacy file"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            key = key,
+                            new = %path.display(),
+                            error = %e,
+                            "could not verify migrated session; leaving legacy file"
+                        );
+                    }
+                }
             }
         }
 
         let content = self.platform.fs().read_to_string(&path).await?;
 
         session_from_jsonl(key, &content, &path)
+    }
+
+    /// Garbage-collect legacy underscore-encoded session files that already
+    /// have a verified percent-encoded twin (WEFT-87).
+    ///
+    /// When `dry_run` is true, reports candidates without deleting. See
+    /// [`gc_migrated_session_files`].
+    pub async fn gc_migrated(&self, dry_run: bool) -> clawft_types::Result<SessionGcReport> {
+        gc_migrated_session_files(self.platform.as_ref(), &self.sessions_dir, dry_run).await
     }
 
     /// Save a session to its JSONL file on disk.
@@ -925,8 +1141,108 @@ mod tests {
         platform.fs.write_string(&old_path, &content).await.unwrap();
 
         // load_session should find the old file and migrate it.
-        let loaded = mgr.load_session("telegram:user_123").await.unwrap();
-        assert_eq!(loaded.key, "telegram:user_123");
+        let key = "telegram:user_123";
+        let loaded = mgr.load_session(key).await.unwrap();
+        assert_eq!(loaded.key, key);
+
+        // WEFT-87: legacy underscore file removed after successful migrate.
+        // New path percent-encodes `_` as `%5F` as well as `:` as `%3A`.
+        let new_path = session_file_path(
+            Path::new("/mock-home/.clawft/workspace/sessions"),
+            key,
+        );
+        assert!(
+            platform.fs.exists(&new_path).await,
+            "percent-encoded migrated file must exist at {}",
+            new_path.display()
+        );
+        assert!(
+            !platform.fs.exists(&old_path).await,
+            "legacy underscore file must be removed after verified migration"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_migrated_removes_legacy_when_twin_matches() {
+        let platform = make_platform();
+        let mgr = make_manager(platform.clone());
+
+        let content = "{\"_type\":\"metadata\",\"created_at\":\"2025-01-01T00:00:00Z\",\"updated_at\":\"2025-01-01T00:00:00Z\",\"metadata\":{},\"last_consolidated\":0}\n";
+        let new_path =
+            PathBuf::from("/mock-home/.clawft/workspace/sessions/telegram%3A12345.jsonl");
+        let old_path = PathBuf::from("/mock-home/.clawft/workspace/sessions/telegram_12345.jsonl");
+        platform.fs.write_string(&new_path, content).await.unwrap();
+        platform.fs.write_string(&old_path, content).await.unwrap();
+
+        // Dry-run first: reports without deleting.
+        let dry = mgr.gc_migrated(true).await.unwrap();
+        assert!(dry.dry_run);
+        assert_eq!(dry.removed, vec!["telegram_12345.jsonl".to_string()]);
+        assert!(platform.fs.exists(&old_path).await);
+
+        // Real GC: removes legacy twin.
+        let report = mgr.gc_migrated(false).await.unwrap();
+        assert!(!report.dry_run);
+        assert_eq!(report.count(), 1);
+        assert_eq!(report.removed, vec!["telegram_12345.jsonl".to_string()]);
+        assert!(platform.fs.exists(&new_path).await);
+        assert!(!platform.fs.exists(&old_path).await);
+    }
+
+    #[tokio::test]
+    async fn gc_migrated_skips_content_mismatch() {
+        let platform = make_platform();
+        let mgr = make_manager(platform.clone());
+
+        let new_path = PathBuf::from("/mock-home/.clawft/workspace/sessions/slack%3A9.jsonl");
+        let old_path = PathBuf::from("/mock-home/.clawft/workspace/sessions/slack_9.jsonl");
+        platform
+            .fs
+            .write_string(&new_path, "new-content\n")
+            .await
+            .unwrap();
+        platform
+            .fs
+            .write_string(&old_path, "old-content\n")
+            .await
+            .unwrap();
+
+        let report = mgr.gc_migrated(false).await.unwrap();
+        assert!(report.removed.is_empty());
+        assert_eq!(report.skipped_mismatch, vec!["slack_9.jsonl".to_string()]);
+        assert!(platform.fs.exists(&old_path).await);
+        assert!(platform.fs.exists(&new_path).await);
+    }
+
+    #[tokio::test]
+    async fn gc_migrated_leaves_orphan_legacy_only() {
+        let platform = make_platform();
+        let mgr = make_manager(platform.clone());
+
+        // Legacy-only: never migrated — must not delete the only copy.
+        let old_path =
+            PathBuf::from("/mock-home/.clawft/workspace/sessions/discord_channel.jsonl");
+        platform
+            .fs
+            .write_string(&old_path, "legacy-only\n")
+            .await
+            .unwrap();
+
+        let report = mgr.gc_migrated(false).await.unwrap();
+        assert!(report.removed.is_empty());
+        assert!(platform.fs.exists(&old_path).await);
+    }
+
+    #[tokio::test]
+    async fn legacy_underscore_filename_helper() {
+        assert_eq!(
+            legacy_underscore_session_filename("telegram:user_123"),
+            "telegram_user_123.jsonl"
+        );
+        assert_eq!(
+            legacy_underscore_session_filename("slack:channel:thread"),
+            "slack_channel_thread.jsonl"
+        );
     }
 
     #[tokio::test]

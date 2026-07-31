@@ -389,6 +389,29 @@ fn sessions_help_output() {
         stdout.contains("sessions") || stdout.contains("Sessions") || stdout.contains("session"),
         "sessions help should mention 'sessions', got: {stdout}"
     );
+    assert!(
+        stdout.contains("gc") || stdout.contains("Gc"),
+        "sessions help should list gc subcommand, got: {stdout}"
+    );
+}
+
+#[test]
+fn sessions_gc_dry_run_succeeds() {
+    let output = weft_bin()
+        .args(["sessions", "gc", "--dry-run"])
+        .output()
+        .expect("failed to run weft");
+
+    assert!(
+        output.status.success(),
+        "weft sessions gc --dry-run should exit 0, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Session GC") || stdout.contains("dry-run") || stdout.contains("nothing"),
+        "sessions gc dry-run should report status, got: {stdout}"
+    );
 }
 
 #[test]

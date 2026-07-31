@@ -1,8 +1,9 @@
 //! `weft sessions` -- manage conversation sessions.
 //!
-//! Provides subcommands for listing, inspecting, and deleting sessions.
-//! Sessions are JSONL files stored under `~/.clawft/workspace/sessions/`
-//! (or `~/.nanobot/workspace/sessions/` as fallback).
+//! Provides subcommands for listing, inspecting, deleting, and garbage-
+//! collecting sessions. Sessions are JSONL files stored under
+//! `~/.clawft/workspace/sessions/` (or `~/.nanobot/workspace/sessions/` as
+//! fallback).
 //!
 //! # Examples
 //!
@@ -10,6 +11,8 @@
 //! weft sessions list
 //! weft sessions inspect telegram:12345
 //! weft sessions delete telegram:12345
+//! weft sessions gc
+//! weft sessions gc --dry-run
 //! ```
 
 use std::sync::Arc;
@@ -17,6 +20,7 @@ use std::sync::Arc;
 use comfy_table::{Table, presets::UTF8_FULL};
 
 use clawft_core::agent::local_file_sink::LocalFileSink;
+use clawft_core::session::gc_migrated_session_files;
 use clawft_platform::NativePlatform;
 use clawft_types::config::Config;
 
@@ -30,6 +34,8 @@ pub enum SessionsAction {
     Inspect { session_id: String },
     /// Delete a specific session by key.
     Delete { session_id: String },
+    /// Garbage-collect legacy underscore-encoded files after migration.
+    Gc { dry_run: bool },
 }
 
 /// Format a `chrono::DateTime<Utc>` as a human-readable string.
@@ -160,6 +166,59 @@ pub async fn sessions_delete(session_id: String, _config: &Config) -> anyhow::Re
     Ok(())
 }
 
+/// Garbage-collect legacy underscore-encoded session files after migration
+/// to percent-encoded names (WEFT-87).
+///
+/// Only removes a legacy file when a matching percent-encoded twin exists
+/// and the contents are identical. When `dry_run` is true, prints what would
+/// be removed without deleting anything.
+pub async fn sessions_gc(dry_run: bool, _config: &Config) -> anyhow::Result<()> {
+    let platform = Arc::new(NativePlatform::new());
+    let sink = LocalFileSink::new(platform.clone()).await?;
+
+    let report = gc_migrated_session_files(platform.as_ref(), sink.sessions_dir(), dry_run)
+        .await
+        .map_err(|e| anyhow::anyhow!("session gc failed: {e}"))?;
+
+    let mode = if dry_run { "dry-run" } else { "removed" };
+    if report.removed.is_empty() && report.skipped_mismatch.is_empty() {
+        println!("Session GC ({mode}): nothing to clean.");
+        println!("  Dir: {}", sink.sessions_dir().display());
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "Session GC (dry-run): would remove {} legacy file(s)",
+            report.count()
+        );
+        for name in &report.removed {
+            println!("  would remove: {name}");
+        }
+    } else {
+        println!(
+            "Session GC: removed {} legacy file(s)",
+            report.count()
+        );
+        for name in &report.removed {
+            println!("  removed: {name}");
+        }
+    }
+
+    if !report.skipped_mismatch.is_empty() {
+        println!(
+            "  skipped (content mismatch): {}",
+            report.skipped_mismatch.len()
+        );
+        for name in &report.skipped_mismatch {
+            println!("    {name}");
+        }
+    }
+
+    println!("  Dir: {}", sink.sessions_dir().display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +254,15 @@ mod tests {
                 assert_eq!(session_id, "slack:456");
             }
             _ => panic!("expected Delete variant"),
+        }
+    }
+
+    #[test]
+    fn action_gc_variant() {
+        let action = SessionsAction::Gc { dry_run: true };
+        match action {
+            SessionsAction::Gc { dry_run } => assert!(dry_run),
+            _ => panic!("expected Gc variant"),
         }
     }
 
