@@ -117,6 +117,14 @@ the key fields are:
 - **`apiKey`**: Your provider API key. In production, inject this at
   runtime rather than hardcoding it in source.
 
+### Deeper references
+
+| Doc | Contents |
+|-----|----------|
+| [cors-provider-setup.md](./cors-provider-setup.md) | Per-provider CORS recipes (OpenRouter, OpenAI, Anthropic, Groq, DeepSeek, Gemini, xAI), proxy URL rewrite rules, security checklist |
+| [config-schema.md](./config-schema.md) | Full annotated browser-mode `config.json` schema (every root key, provider fields, dashboard quirks) |
+| [deployment.md](./deployment.md) | Static hosting headers + sample CORS Worker |
+
 ## Using the test harness
 
 The built-in test harness at `www/index.html` provides a chat UI with:
