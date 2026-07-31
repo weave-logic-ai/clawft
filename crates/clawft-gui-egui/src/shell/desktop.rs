@@ -11,13 +11,11 @@ use crate::surface_host;
 use clawft_app::registry::AppRegistry;
 use clawft_surface::SurfaceTree;
 
-/// Admin app manifest, loaded inline so the reference panel always
-/// boots with at least one app installed even on a fresh workspace.
-/// Path-resolved at compile time via `include_str!`.
-const WEFTOS_ADMIN_MANIFEST: &str = include_str!("../../../clawft-app/fixtures/weftos-admin.toml");
-
-/// Admin desktop surface description (ADR-016 §10). Loaded inline for
-/// the same reason as the manifest above.
+/// Admin desktop surface description (ADR-016 §10). Loaded inline so
+/// the Apps panel always has a surface to compose for the OOB admin
+/// app. Manifest seeding itself goes through
+/// [`clawft_app::install::oob::ensure_weftos_admin`] (WEFT-440) — not
+/// an ad-hoc parse + install in this Default impl.
 const WEFTOS_ADMIN_DESKTOP_SURFACE: &str =
     include_str!("../../../clawft-surface/fixtures/weftos-admin-desktop.toml");
 
@@ -64,9 +62,9 @@ pub struct Desktop {
     pub section: PanelSection,
     pub boot_started: web_time::Instant,
 
-    /// App registry — seeded with WeftOS Admin at startup (M1.5
-    /// reference app). Future apps register themselves via
-    /// `registry::install`.
+    /// App registry — OOB-seeded with WeftOS Admin at startup via
+    /// [`clawft_app::install::oob::ensure_weftos_admin`] (WEFT-440).
+    /// Future apps register through the same install pipeline.
     pub app_registry: AppRegistry,
     /// Id of the app currently shown in the Apps panel (e.g.
     /// `app://weftos.admin`). `None` means nothing selected yet.
@@ -181,39 +179,34 @@ impl Desktop {
     }
 }
 
-impl Default for Desktop {
-    fn default() -> Self {
-        // Session-local registry path: persists to XDG-standard
-        // location on native, but we never block startup on save
-        // success. On wasm `default_path()` returns an err because
-        // HOME is unset — we fall back to an in-memory-only path
-        // under `/tmp/weftos` (the save error is ignored below).
-        let registry_path = AppRegistry::default_path()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/weftos/apps.json"));
-        let mut app_registry = AppRegistry::new(registry_path);
+impl Desktop {
+    /// Boot a desktop with an explicit registry path.
+    ///
+    /// Loads the registry (missing file = empty), then OOB-seeds
+    /// WeftOS Admin through [`clawft_app::install::oob::ensure_weftos_admin`]
+    /// so the Apps tab always has content. Used by [`Default`] and by
+    /// tests that need an isolated registry (WEFT-440).
+    pub fn with_registry_path(registry_path: impl Into<std::path::PathBuf>) -> Self {
+        let mut app_registry = AppRegistry::new(registry_path.into());
         // Best-effort load: missing file is not an error.
         let _ = app_registry.load();
 
         let mut app_surfaces = std::collections::BTreeMap::new();
         let mut selected_app = None;
 
-        // Ensure the WeftOS Admin reference app is installed so the
-        // Apps tab has content on first boot. Parse errors here are
-        // programmer errors in the bundled fixture, not user input —
-        // log and skip rather than panic so the desktop still comes up.
-        match clawft_app::manifest::AppManifest::from_toml_str(WEFTOS_ADMIN_MANIFEST) {
-            Ok(manifest) => {
-                let id = manifest.id.clone();
-                if app_registry.get(&id).is_none() {
-                    // `install` persists to disk; if that fails (wasm,
-                    // read-only fs, …) we still keep the in-memory
-                    // entry so the Apps panel has something to show.
-                    if let Err(e) = app_registry.install(manifest.clone()) {
-                        log::warn!(
-                            "couldn't persist WeftOS Admin to registry: {e} (continuing in-memory)"
-                        );
-                    }
+        // WEFT-440: seed WeftOS Admin through the install pipeline
+        // (OOB stamp, no wall-clock / web-time). Persist failure is
+        // soft — `EnsureOutcome.persisted == false` still leaves the
+        // in-memory row so the Apps tab has content on wasm / RO fs.
+        match clawft_app::install::oob::ensure_weftos_admin(&mut app_registry) {
+            Ok(outcome) => {
+                if !outcome.persisted {
+                    log::warn!(
+                        "WeftOS Admin registered in-memory only (registry save failed); \
+                         Apps tab still has content"
+                    );
                 }
+                let id = outcome.app_id;
                 selected_app = Some(id.clone());
                 match clawft_surface::parse::parse_surface_toml(WEFTOS_ADMIN_DESKTOP_SURFACE) {
                     Ok(tree) => {
@@ -225,7 +218,10 @@ impl Default for Desktop {
                 }
             }
             Err(e) => {
-                log::warn!("failed to parse WeftOS Admin manifest: {e}");
+                // Programmer error in the bundled fixture, or a hard
+                // validation failure — log and continue so desktop still
+                // boots without Apps content.
+                log::warn!("WeftOS Admin OOB install failed: {e}");
             }
         }
 
@@ -288,6 +284,19 @@ impl Default for Desktop {
             files_state: crate::apps::files::FilesState::default(),
             scheduler: crate::apps::scheduler::SchedulerState::default(),
         }
+    }
+}
+
+impl Default for Desktop {
+    fn default() -> Self {
+        // Session-local registry path: persists to XDG-standard
+        // location on native, but we never block startup on save
+        // success. On wasm `default_path()` returns an err because
+        // HOME is unset — we fall back to an in-memory-only path
+        // under `/tmp/weftos`.
+        let registry_path = AppRegistry::default_path()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/weftos/apps.json"));
+        Self::with_registry_path(registry_path)
     }
 }
 
@@ -723,5 +732,61 @@ pub(crate) fn render_selected_app(
             params: d.params,
             reply: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clawft_app::{OOB_INSTALLED_AT, oob};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// WEFT-440: Desktop boot seeds WeftOS Admin through the install
+    /// pipeline (OOB stamp), not an ad-hoc fixture install that hit
+    /// wall-clock / web-time. Uses an isolated registry path so a
+    /// pre-existing `~/.weftos/apps.json` cannot shadow the OOB seed.
+    #[test]
+    fn boot_seeds_weftos_admin_via_oob_pipeline() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("weft-440-desktop-{nanos}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("apps.json");
+        // Ensure a clean slate even if a previous run left the file.
+        let _ = std::fs::remove_file(&path);
+
+        let desk = Desktop::with_registry_path(&path);
+
+        let admin = desk
+            .app_registry
+            .get(oob::WEFTOS_ADMIN_ID)
+            .expect("OOB admin must be in registry after boot");
+        assert_eq!(admin.manifest.id, oob::WEFTOS_ADMIN_ID);
+        assert_eq!(
+            admin.installed_at, OOB_INSTALLED_AT,
+            "boot seed must use OOB stamp, not wall-clock"
+        );
+        assert!(admin.enabled);
+        assert_eq!(desk.selected_app.as_deref(), Some(oob::WEFTOS_ADMIN_ID));
+        assert!(
+            desk.app_surfaces.contains_key(oob::WEFTOS_ADMIN_ID),
+            "admin desktop surface must be cached for Apps tab"
+        );
+
+        // Second boot against the same path is idempotent (AlreadyInstalled).
+        let desk2 = Desktop::with_registry_path(&path);
+        assert_eq!(desk2.app_registry.list().len(), 1);
+        assert_eq!(
+            desk2
+                .app_registry
+                .get(oob::WEFTOS_ADMIN_ID)
+                .unwrap()
+                .installed_at,
+            OOB_INSTALLED_AT
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

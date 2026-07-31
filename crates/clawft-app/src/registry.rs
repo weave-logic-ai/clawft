@@ -20,14 +20,27 @@ use std::{
 use serde::{Deserialize, Serialize};
 // `std::time` panics under wasm32-unknown-unknown; `web-time` is a
 // drop-in that uses std on native and `performance.now()` in the
-// browser.
+// browser. Used for *user* installs and lifecycle tombstones only —
+// OOB seeding goes through `install::ensure_*_at` with a fixed stamp
+// (WEFT-440) and never calls this path.
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::lifecycle::{
-    LifecycleTeardownTombstone, TeardownTombstoneBus, TeardownReason,
+    LifecycleTeardownTombstone, TeardownReason, TeardownTombstoneBus,
 };
 use crate::manifest::AppManifest;
 use crate::validation::{ValidationError, validate};
+
+/// Unix epoch seconds via `web-time` (wasm-safe).
+///
+/// Public within the crate so the install pipeline can stamp user
+/// installs without re-importing `web-time` at every call site.
+pub(crate) fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// A row in the local app registry.
 ///
@@ -217,18 +230,32 @@ impl AppRegistry {
 
     /// Install a manifest. Validates structurally (ADR-015 rules
     /// 1–9); rejects duplicates by `id`. Saves on success.
+    ///
+    /// Stamps `installed_at` with the wall clock. For OOB / first-boot
+    /// seeding prefer [`crate::install::ensure_manifest_at`] with
+    /// [`crate::install::OOB_INSTALLED_AT`] so the path never depends
+    /// on a live clock (WEFT-440).
     pub fn install(&mut self, manifest: AppManifest) -> Result<&InstalledApp, RegistryError> {
+        self.install_at(manifest, now_unix_secs())
+    }
+
+    /// Install a manifest with an explicit `installed_at` unix stamp.
+    ///
+    /// Validates structurally (ADR-015 rules 1–9); rejects duplicates
+    /// by `id`. Saves on success. On save failure the in-memory row
+    /// remains so callers can still present the app (wasm / RO fs).
+    pub fn install_at(
+        &mut self,
+        manifest: AppManifest,
+        installed_at: u64,
+    ) -> Result<&InstalledApp, RegistryError> {
         validate(&manifest)?;
         if self.apps.iter().any(|a| a.manifest.id == manifest.id) {
             return Err(RegistryError::AlreadyInstalled { id: manifest.id });
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         self.apps.push(InstalledApp {
             manifest,
-            installed_at: now,
+            installed_at,
             enabled: true,
         });
         self.save()?;

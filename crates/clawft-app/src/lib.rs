@@ -2,8 +2,9 @@
 //!
 //! Implements the subset of [ADR-015][adr] required for milestone M1.5:
 //! TOML manifest schema, structural validation rules 1–9, a JSON-backed
-//! [`registry::AppRegistry`], and the lifecycle types the desktop
-//! compositor will consume when launching apps.
+//! [`registry::AppRegistry`], the [`install`] pipeline (ADR-015 §Install
+//! + OOB first-boot seeding, WEFT-440), and the lifecycle types the
+//! desktop compositor will consume when launching apps.
 //!
 //! Out of scope (lands in sibling crates / later milestones):
 //!
@@ -26,12 +27,17 @@
 //! [adr]: https://github.com/weave-logic-ai/weftos/blob/development-0.7.0/.planning/symposiums/compositional-ui/adrs/adr-015-app-manifest.md
 
 pub mod adapter_catalog;
+pub mod install;
 pub mod lifecycle;
 pub mod manifest;
 pub mod registry;
 pub mod validation;
 
 pub use adapter_catalog::{AdapterCapability, AdapterCatalog, AdapterChannel};
+pub use install::{
+    EnsureKind, EnsureOutcome, InstallError, OOB_INSTALLED_AT, ensure_from_toml,
+    ensure_from_toml_at, ensure_manifest, ensure_manifest_at, install_from_toml, oob,
+};
 pub use lifecycle::{
     AppLaunchRequest, AppLaunchResult, LaunchError, LifecycleTeardownTombstone, SessionConfig,
     TeardownReason, TeardownTombstoneBus,

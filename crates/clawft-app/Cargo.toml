@@ -22,9 +22,8 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 semver = { version = "1", features = ["serde"] }
 # Drop-in SystemTime/Instant: std on native, performance.now() on wasm.
-# Without this, AppRegistry::install() panics under
-# wasm32-unknown-unknown ("time not implemented on this platform")
-# when the admin app seeds itself during desktop boot.
+# Used for user installs + lifecycle tombstone timestamps. OOB first-boot
+# seeding (WEFT-440) uses install::OOB_INSTALLED_AT and never hits this.
 web-time = "1"
 # Quarantine-path telemetry (WEFT-411): warn when apps.json is corrupt.
 tracing = { workspace = true }
