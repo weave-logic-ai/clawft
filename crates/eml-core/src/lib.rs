@@ -40,6 +40,7 @@
 //! assert!(prediction.is_finite());
 //! ```
 
+pub mod distill;
 pub mod events;
 pub mod features;
 pub mod model;
@@ -52,6 +53,11 @@ pub mod attention;
 pub mod baseline_attention;
 
 // Re-export public API
+pub use distill::{
+    distill, distill_with_report, evaluate_fidelity, DistillConfig, DistillReport, EdgeEmlError,
+    EdgeEmlRuntime, SevenNetNano, DEFAULT_DISTILL_SAMPLES, DEFAULT_DISTILL_SEED,
+    DEFAULT_EVAL_POINTS, SEVENNET_NANO_DEPTH,
+};
 pub use events::{EmlEvent, EmlEventLog};
 pub use features::FeatureVector;
 pub use model::EmlModel;

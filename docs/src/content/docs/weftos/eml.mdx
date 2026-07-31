@@ -142,19 +142,38 @@ pub trait FeatureVector {
 | `ForensicCoherenceModel` | 3 | 4 graph stats | 1 coherence | Domain-specific coherence | density * avg_confidence |
 | `QueryFusionModel` | 3 | 4 scoring dims | 1 relevance | Hybrid keyword+graph+community+type scoring | Linear weighted sum |
 
-## EML Distillation (KG-017)
+## EML Distillation / SevenNet-Nano (KG-017, WEFT-356)
 
-Model distillation compresses a trained depth-4 EML model into a depth-2 model with minimal accuracy loss. The distillation process generates synthetic training data by evaluating the teacher model across the input space, then trains the student model on those predictions. This is useful for deploying EML models on resource-constrained edge devices (T0/T1 kernel profiles) where inference latency must be minimized.
+Model distillation compresses a trained depth-4 EML model into a depth-2 **SevenNet-Nano** student with minimal accuracy loss. The offline pipeline generates synthetic inputs, queries the teacher for soft targets, then trains the student via coordinate descent. Designed for WASM / ESP32 / T0–T1 edge profiles.
+
+Inspired by SevenNet-Nano (Oh et al., arXiv:2604.10887): student learns from teacher predictions, not raw labels. Design note: [`docs/design/eml-sevennet-nano-distillation.md`](../../../../design/eml-sevennet-nano-distillation.md).
 
 ```rust
-use eml_core::distill;
+use eml_core::{distill, distill_with_report, DistillConfig, EdgeEmlRuntime, EmlModel, SevenNetNano};
 
-let teacher = EmlModel::from_json(&saved_depth4)?;
-let student = distill(&teacher, 2, 1000);  // depth-2 student, 1000 synthetic samples
-// student.predict() runs ~3x faster than teacher
+let teacher = EmlModel::from_json(&saved_depth4).expect("teacher");
+
+// Free function (depth-2 student, N synthetic samples)
+let student = distill(&teacher, 2, 1000);
+
+// Named edge student + fidelity report (recall delta / MAE vs teacher)
+let (nano, report) = SevenNetNano::from_teacher(&teacher, DistillConfig::nano());
+// report.summary() → compression, MAE, fidelity, recall_delta
+
+// Edge runtime: force Nano on device; host keeps teacher
+let rt = EdgeEmlRuntime::edge(nano);
+// or: EdgeEmlRuntime::select_with_flag(teacher, Some(nano), prefer_nano)
+let y = rt.predict_primary(&features);
 ```
 
-Typical accuracy retention: 95-98% of teacher MSE for well-conditioned models. The distilled model preserves the two-tier pattern -- it just runs the fast path even faster.
+| Surface | Role |
+|---------|------|
+| `distill(teacher, depth, n)` | Offline free function → student `EmlModel` |
+| `distill_with_report` | Same + `DistillReport` (MAE, MSE, fidelity, compression) |
+| `SevenNetNano` | Depth-2 edge package; `from_teacher` / `from_json` / freeze-after-distill |
+| `EdgeEmlRuntime` | Teacher vs Nano selection (`select` on wasm32, `select_with_flag`, `edge`) |
+
+Typical depth-4 → depth-2 param reduction: **46 → 26** (single head, ~1.8×). Fidelity is task-dependent; use `DistillReport::recall_delta` (MAE vs teacher on held-out synthetic points) when documenting edge trade-offs.
 
 ## The Two-Tier Pattern
 

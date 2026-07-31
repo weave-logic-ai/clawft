@@ -573,40 +573,14 @@ impl EmlModel {
     /// original training data. This preserves accuracy while reducing
     /// computation for constrained devices (WASM, ESP32).
     ///
+    /// Prefer [`crate::distill`] / [`crate::SevenNetNano`] when you need
+    /// fidelity metrics or the named edge runtime path (KG-017 / WEFT-356).
+    ///
     /// # Panics
     /// Panics if `target_depth >= self.depth` or `target_depth` is not
     /// in {2, 3, 4, 5}.
     pub fn distill(&self, target_depth: usize, num_samples: usize) -> EmlModel {
-        assert!(
-            target_depth < self.depth,
-            "student depth ({target_depth}) must be less than teacher depth ({})",
-            self.depth
-        );
-
-        let mut student = EmlModel::new(target_depth, self.input_count, self.head_count);
-
-        // Generate synthetic inputs in [0, 1] and get teacher predictions.
-        // Use a simple LCG for reproducibility without needing `rand`.
-        let mut rng_state: u64 = 0xCAFE_BABE_1234_5678;
-        let lcg_next = |state: &mut u64| -> f64 {
-            *state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            // Map to [0, 1]
-            (*state >> 33) as f64 / (1u64 << 31) as f64
-        };
-
-        for _ in 0..num_samples.max(50) {
-            let inputs: Vec<f64> = (0..self.input_count)
-                .map(|_| lcg_next(&mut rng_state))
-                .collect();
-            let teacher_out = self.predict(&inputs);
-            let targets: Vec<Option<f64>> = teacher_out.into_iter().map(Some).collect();
-            student.record(&inputs, &targets);
-        }
-
-        student.train();
-        student
+        crate::distill::distill(self, target_depth, num_samples)
     }
 
     // -------------------------------------------------------------------
