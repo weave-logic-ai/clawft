@@ -13,6 +13,8 @@
 //! to prevent directory traversal attacks.
 
 #[cfg(feature = "voice")]
+pub mod audio_codec;
+#[cfg(feature = "voice")]
 pub mod audio_synthesize;
 #[cfg(feature = "voice")]
 pub mod audio_transcribe;

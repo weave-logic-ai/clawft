@@ -34,7 +34,14 @@ canvas = []
 vector-memory = ["clawft-core/vector-memory"]
 delegate = ["clawft-services/delegate"]
 # WEFT-214 / WEFT-671: live stack (clawft-channels STT/TTS), not plugin scaffold.
-voice = ["dep:clawft-channels", "dep:reqwest", "dep:tokio", "dep:tokio-util"]
+# WEFT-233: multi-format audio decode via symphonia (WAV/MP3/OGG/WebM).
+voice = [
+    "dep:clawft-channels",
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:symphonia",
+]
 
 [dependencies]
 clawft-types = { workspace = true, default-features = false }
@@ -56,6 +63,8 @@ tokio = { workspace = true, optional = true }
 # Voice STT/TTS HTTP (substrate + OpenAI cloud fallback).
 reqwest = { workspace = true, optional = true, features = ["json", "multipart", "rustls-tls"] }
 tokio-util = { workspace = true, optional = true }
+# WEFT-233: decode MP3/OGG/WebM (+ WAV) for audio_transcribe.
+symphonia = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

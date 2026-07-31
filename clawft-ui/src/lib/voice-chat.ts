@@ -5,6 +5,13 @@
  * on the WebSocket `sessions:{key}` topic. The REST endpoint only returns
  * the user's own message as an echo; the real agent reply arrives async
  * via the broadcaster.
+ *
+ * ## Consumers (WEFT-234 — not orphaned)
+ *
+ * - `components/voice/push-to-talk.tsx` → route `routes/voice.tsx`
+ * - `components/voice/talk-overlay.tsx` → `components/layout/MainLayout.tsx`
+ *
+ * Keep this module; do not delete as dead code.
  */
 
 import { api } from "./api-client";

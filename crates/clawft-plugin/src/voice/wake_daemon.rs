@@ -17,13 +17,13 @@
 //! revisit triggers. CPU-budget auto-throttle (<2%) is deferred until a
 //! live engine + capture loop exists.
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::PluginError;
 use crate::traits::CancellationToken;
 
 use super::rate_limit::{VoiceRateDecision, VoiceRateLimiter};
-use super::wake::{WakeWordBackend, WakeWordConfig, WakeWordDetector};
+use super::wake::{WakeWordBackend, WakeWordConfig, WakeWordDetector, WakeWordEvent};
 
 /// Daemon that runs wake word detection in the background.
 ///
@@ -92,6 +92,10 @@ impl WakeDaemon {
     /// No audio capture. Real loop will feed PCM into
     /// [`WakeWordDetector::process_frame`] once an engine and cpal (or
     /// equivalent) capture path land.
+    ///
+    /// When the detector is a stub, emits [`WakeWordEvent::Error`] once at
+    /// start (WEFT-234) so the Error variant is reached on a live path and
+    /// operators see that detection is deferred — not a silent half-integration.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run(&mut self, cancel: CancellationToken) -> Result<(), PluginError> {
         info!(
@@ -102,6 +106,19 @@ impl WakeDaemon {
         self.active = true;
         self.detector.start();
 
+        if self.detector.is_stub() {
+            let err_event = WakeWordDetector::error_event_for_rustpotter_block();
+            if let WakeWordEvent::Error { ref message } = err_event {
+                warn!(
+                    event = "wake_word_error",
+                    backend = %self.detector.backend(),
+                    "wake engine unavailable: {message}"
+                );
+            }
+            // Keep the Error event available for callers/tests.
+            let _ = err_event;
+        }
+
         // Wait for cancellation.
         cancel.cancelled().await;
 
@@ -109,6 +126,15 @@ impl WakeDaemon {
         self.active = false;
         info!("wake daemon stopped");
         Ok(())
+    }
+
+    /// Last engine-unavailable error event (WEFT-234 surface for tests/CLI).
+    pub fn engine_unavailable_event(&self) -> Option<WakeWordEvent> {
+        if self.detector.is_stub() {
+            Some(WakeWordDetector::error_event_for_rustpotter_block())
+        } else {
+            None
+        }
     }
 
     /// Check if the daemon is currently active.
@@ -192,5 +218,17 @@ mod tests {
         cancel.cancel();
         let result = handle.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn wake_daemon_exposes_engine_unavailable_error_event() {
+        let daemon = WakeDaemon::new(WakeWordConfig::default()).unwrap();
+        let event = daemon.engine_unavailable_event().expect("stub => error");
+        match event {
+            WakeWordEvent::Error { message } => {
+                assert!(message.contains("WEFT-216"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

@@ -71,6 +71,20 @@ impl std::fmt::Display for WakeWordBackend {
 }
 
 /// Configuration for the wake word detector.
+///
+/// # WEFT-240 — unify with product [`clawft_types::config::WakeConfig`]
+///
+/// | Surface | Field | Semantics |
+/// |---------|-------|-----------|
+/// | Product `WakeConfig` | `sensitivity` | Higher = **more** sensitive |
+/// | This detector | `threshold` | Higher = **harder** to trigger |
+///
+/// Mapping (also on `WakeConfig::to_detector_threshold`):
+/// `threshold = (1.0 - sensitivity).clamp(0.0, 1.0)`.
+///
+/// Prefer [`WakeWordConfig::from_wake_config`] when loading product config.
+/// Serde alias `sensitivity` on `threshold` means **detector score threshold**,
+/// not product sensitivity (legacy detector JSON only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeWordConfig {
     /// Path to the wake word model file (`.rpw` for rustpotter, or
@@ -79,14 +93,18 @@ pub struct WakeWordConfig {
     /// Default path is historical (`models/voice/wake/hey-weft.rpw`).
     /// **That file is not shipped** (WEFT-216). Loading a real engine
     /// will fail closed until a model is trained and integrity-checked.
+    ///
+    /// Type is [`PathBuf`]; product [`clawft_types::config::WakeConfig`]
+    /// stores `Option<String>` — bridge via [`WakeWordConfig::from_wake_config`]
+    /// (WEFT-234).
     #[serde(default = "default_model_path")]
     pub model_path: PathBuf,
 
-    /// Detection threshold (0.0-1.0). Lower = more sensitive.
+    /// Detection score threshold (0.0–1.0). **Lower = more sensitive.**
     ///
-    /// Mapping to `WakeConfig.sensitivity` (types crate) is deferred to
-    /// WEFT-240; until then both knobs exist independently.
-    #[serde(default = "default_threshold")]
+    /// Product configs should set `WakeConfig.sensitivity` and convert with
+    /// [`WakeWordConfig::from_wake_config`] (WEFT-240).
+    #[serde(default = "default_threshold", alias = "sensitivity")]
     pub threshold: f32,
 
     /// Minimum gap between detections in frames.
@@ -127,6 +145,31 @@ impl Default for WakeWordConfig {
             sample_rate: default_sample_rate(),
             log_detections: default_true(),
         }
+    }
+}
+
+impl WakeWordConfig {
+    /// Build detector config from product [`clawft_types::config::WakeConfig`]
+    /// (WEFT-240 sensitivity↔threshold + WEFT-234 model_path bridge).
+    ///
+    /// - `threshold = wake.to_detector_threshold()` (`1.0 - sensitivity`)
+    /// - `model_path` from `wake.model_path` (`Option<String>` → `PathBuf`),
+    ///   or the historical default when unset
+    pub fn from_wake_config(wake: &clawft_types::config::WakeConfig) -> Self {
+        Self {
+            model_path: wake
+                .model_path_buf()
+                .unwrap_or_else(default_model_path),
+            threshold: wake.to_detector_threshold(),
+            min_gap_frames: default_min_gap(),
+            sample_rate: default_sample_rate(),
+            log_detections: default_true(),
+        }
+    }
+
+    /// Product sensitivity corresponding to this detector threshold.
+    pub fn to_product_sensitivity(&self) -> f32 {
+        clawft_types::config::WakeConfig::sensitivity_from_detector_threshold(self.threshold)
     }
 }
 
@@ -216,6 +259,9 @@ impl WakeWordDetector {
     /// Without the feature, returns [`PluginError::NotImplemented`] naming
     /// the missing feature. With the feature, returns the same error class
     /// with [`RUSTPOTTER_BLOCKED_REASON`].
+    ///
+    /// Callers that need a [`WakeWordEvent::Error`] for UI/daemon broadcast
+    /// should use [`WakeWordDetector::error_event_for_rustpotter_block`].
     pub fn try_with_rustpotter(_config: WakeWordConfig) -> Result<Self, PluginError> {
         #[cfg(feature = "voice-wake-rustpotter")]
         {
@@ -230,6 +276,23 @@ impl WakeWordDetector {
                  docs/plans/wave-0k-WEFT-216-result.md"
                     .into(),
             ))
+        }
+    }
+
+    /// [`WakeWordEvent::Error`] describing the rustpotter block (WEFT-234).
+    ///
+    /// Emitted by the wake daemon when a non-stub engine is requested but
+    /// unavailable, so the Error variant is reached on a live code path.
+    pub fn error_event_for_rustpotter_block() -> WakeWordEvent {
+        WakeWordEvent::Error {
+            message: RUSTPOTTER_BLOCKED_REASON.into(),
+        }
+    }
+
+    /// Build an [`WakeWordEvent::Error`] with an arbitrary message.
+    pub fn error_event(message: impl Into<String>) -> WakeWordEvent {
+        WakeWordEvent::Error {
+            message: message.into(),
         }
     }
 
@@ -481,6 +544,41 @@ mod tests {
                     "unexpected error: {msg}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn from_wake_config_maps_sensitivity_and_model_path() {
+        let product = clawft_types::config::WakeConfig {
+            enabled: true,
+            phrase: "hey weft".into(),
+            sensitivity: 0.8,
+            model_path: Some("models/custom/wake.onnx".into()),
+        };
+        let cfg = WakeWordConfig::from_wake_config(&product);
+        assert!((cfg.threshold - 0.2).abs() < f32::EPSILON);
+        assert!((cfg.to_product_sensitivity() - 0.8).abs() < f32::EPSILON);
+        assert_eq!(
+            cfg.model_path,
+            PathBuf::from("models/custom/wake.onnx")
+        );
+    }
+
+    #[test]
+    fn from_wake_config_default_model_when_unset() {
+        let product = clawft_types::config::WakeConfig::default();
+        let cfg = WakeWordConfig::from_wake_config(&product);
+        assert_eq!(cfg.model_path, default_model_path());
+        assert!((cfg.threshold - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn error_event_for_rustpotter_block_is_error_variant() {
+        match WakeWordDetector::error_event_for_rustpotter_block() {
+            WakeWordEvent::Error { message } => {
+                assert!(message.contains("WEFT-216"));
+            }
+            other => panic!("expected Error, got {other:?}"),
         }
     }
 

@@ -777,12 +777,158 @@ pub fn openai_api_key() -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
+/// Env-driven cloud fallback config (WEFT-239).
+///
+/// - `WEFT_VOICE_CLOUD_FALLBACK=1|true|yes` → enabled
+/// - `WEFT_VOICE_STT_PROVIDER` / `WEFT_VOICE_TTS_PROVIDER` → provider strings
+///
+/// When env is unset, providers default empty (router returns `None` unless
+/// `enabled` and defaults apply). Unknown strings error at resolve time.
+pub fn cloud_fallback_config_from_env() -> clawft_types::config::CloudFallbackConfig {
+    let enabled = env::var("WEFT_VOICE_CLOUD_FALLBACK")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    clawft_types::config::CloudFallbackConfig {
+        enabled,
+        stt_provider: env::var("WEFT_VOICE_STT_PROVIDER").unwrap_or_default(),
+        tts_provider: env::var("WEFT_VOICE_TTS_PROVIDER").unwrap_or_default(),
+    }
+}
+
+/// Construct a cloud STT service from a resolved provider kind (WEFT-239).
+///
+/// Returns `Ok(None)` when no API key is available for the selected provider.
+/// Returns `Err` for providers that have no live constructor in this crate
+/// (should not happen for currently known kinds).
+pub fn cloud_stt_for_provider(
+    kind: clawft_types::config::CloudSttProviderKind,
+    api_key: Option<String>,
+) -> Result<Option<(Arc<dyn SttService>, &'static str)>, String> {
+    use clawft_types::config::CloudSttProviderKind;
+    match kind {
+        CloudSttProviderKind::OpenAiWhisper => {
+            let Some(key) = api_key.filter(|k| !k.is_empty()) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                Arc::new(CloudWhisperStt::new(key)),
+                CloudSttProviderKind::OpenAiWhisper.display_name(),
+            )))
+        }
+        // Exhaustive for #[non_exhaustive] future-proofing via wildcard:
+        #[allow(unreachable_patterns)]
+        other => Err(format!(
+            "no live STT constructor for cloud provider {:?}",
+            other.as_str()
+        )),
+    }
+}
+
+/// Construct a cloud TTS service from a resolved provider kind (WEFT-239).
+///
+/// ElevenLabs is recognized by the config router but not yet implemented on
+/// the live tools path — returns a clear error so startup fails loudly rather
+/// than silently ignoring the selection.
+pub fn cloud_tts_for_provider(
+    kind: clawft_types::config::CloudTtsProviderKind,
+    api_key: Option<String>,
+) -> Result<Option<(Arc<dyn TtsService>, &'static str)>, String> {
+    use clawft_types::config::CloudTtsProviderKind;
+    match kind {
+        CloudTtsProviderKind::OpenAi => {
+            let Some(key) = api_key.filter(|k| !k.is_empty()) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                Arc::new(CloudOpenAiTts::new(key)),
+                CloudTtsProviderKind::OpenAi.display_name(),
+            )))
+        }
+        CloudTtsProviderKind::ElevenLabs => Err(
+            "cloud TTS provider \"elevenlabs\" is configured but not yet wired \
+             on the live tools path; use \"openai\" or leave tts_provider empty"
+                .into(),
+        ),
+        #[allow(unreachable_patterns)]
+        other => Err(format!(
+            "no live TTS constructor for cloud provider {:?}",
+            other.as_str()
+        )),
+    }
+}
+
+/// Attach cloud STT from a [`clawft_types::config::CloudFallbackConfig`] (WEFT-239).
+pub fn apply_cloud_stt_from_config(
+    chain: FallbackStt,
+    cfg: &clawft_types::config::CloudFallbackConfig,
+    api_key: Option<String>,
+) -> Result<FallbackStt, String> {
+    let kind = cfg
+        .resolve_stt_provider()
+        .map_err(|e| e.to_string())?;
+    let Some(kind) = kind else {
+        return Ok(chain);
+    };
+    // When provider is named in config but cloud is not enabled and key is
+    // missing, still no-op (local-only). When enabled or provider explicit
+    // with a key, attach.
+    match cloud_stt_for_provider(kind, api_key)? {
+        Some((svc, label)) => Ok(chain.with_cloud_provider(svc, label)),
+        None => Ok(chain),
+    }
+}
+
+/// Attach cloud TTS from a [`clawft_types::config::CloudFallbackConfig`] (WEFT-239).
+pub fn apply_cloud_tts_from_config(
+    chain: FallbackTts,
+    cfg: &clawft_types::config::CloudFallbackConfig,
+    api_key: Option<String>,
+) -> Result<FallbackTts, String> {
+    let kind = cfg
+        .resolve_tts_provider()
+        .map_err(|e| e.to_string())?;
+    let Some(kind) = kind else {
+        return Ok(chain);
+    };
+    match cloud_tts_for_provider(kind, api_key)? {
+        Some((svc, label)) => Ok(chain.with_cloud_provider(svc, label)),
+        None => Ok(chain),
+    }
+}
+
 /// Build the production STT chain (substrate local + optional OpenAI cloud).
+///
+/// Cloud provider is selected via [`cloud_fallback_config_from_env`] (WEFT-239)
+/// when set; otherwise any `OPENAI_API_KEY` attaches OpenAI Whisper (legacy).
 pub fn build_default_stt() -> Arc<dyn SttService> {
     let local: Arc<dyn SttService> = Arc::new(LocalSubstrateStt::new(default_stt_url()));
+    let cfg = cloud_fallback_config_from_env();
+    let key = openai_api_key();
+
+    let mut attached = false;
     let mut chain = FallbackStt::new(local);
-    if let Some(key) = openai_api_key() {
-        // Provider label is public product name only — never the API key.
+    match cfg.resolve_stt_provider() {
+        Ok(Some(kind)) => match cloud_stt_for_provider(kind, key.clone()) {
+            Ok(Some((svc, label))) => {
+                chain = chain.with_cloud_provider(svc, label);
+                attached = true;
+            }
+            Ok(None) => {
+                debug!("cloud STT provider selected but no API key; local-only");
+            }
+            Err(e) => warn!(error = %e, "cloud STT constructor failed; local-only"),
+        },
+        Ok(None) => {}
+        Err(e) => warn!(error = %e, "cloud STT config rejected; local-only"),
+    }
+
+    // Legacy: OPENAI_API_KEY without explicit cloud config still enables Whisper.
+    if !attached && let Some(key) = key {
         chain = chain.with_cloud_provider(
             Arc::new(CloudWhisperStt::new(key)),
             PROVIDER_OPENAI_WHISPER,
@@ -794,8 +940,27 @@ pub fn build_default_stt() -> Arc<dyn SttService> {
 /// Build the production TTS chain (substrate local + optional OpenAI cloud).
 pub fn build_default_tts() -> Arc<dyn TtsService> {
     let local: Arc<dyn TtsService> = Arc::new(LocalSubstrateTts::new(default_tts_url()));
+    let cfg = cloud_fallback_config_from_env();
+    let key = openai_api_key();
+
+    let mut attached = false;
     let mut chain = FallbackTts::new(local);
-    if let Some(key) = openai_api_key() {
+    match cfg.resolve_tts_provider() {
+        Ok(Some(kind)) => match cloud_tts_for_provider(kind, key.clone()) {
+            Ok(Some((svc, label))) => {
+                chain = chain.with_cloud_provider(svc, label);
+                attached = true;
+            }
+            Ok(None) => {
+                debug!("cloud TTS provider selected but no API key; local-only");
+            }
+            Err(e) => warn!(error = %e, "cloud TTS constructor failed; local-only"),
+        },
+        Ok(None) => {}
+        Err(e) => warn!(error = %e, "cloud TTS config rejected; local-only"),
+    }
+
+    if !attached && let Some(key) = key {
         chain = chain.with_cloud_provider(
             Arc::new(CloudOpenAiTts::new(key)),
             PROVIDER_OPENAI_TTS,
@@ -877,6 +1042,45 @@ mod tests {
         PcmAudio {
             samples: vec![500i16; n as usize],
             sample_rate: 16_000,
+        }
+    }
+
+    #[test]
+    fn cloud_provider_router_stt_openai_whisper() {
+        use clawft_types::config::{CloudFallbackConfig, CloudSttProviderKind};
+        let cfg = CloudFallbackConfig {
+            enabled: true,
+            stt_provider: "whisper".into(),
+            tts_provider: "openai".into(),
+        };
+        assert_eq!(
+            cfg.resolve_stt_provider().unwrap(),
+            Some(CloudSttProviderKind::OpenAiWhisper)
+        );
+        let built = cloud_stt_for_provider(
+            CloudSttProviderKind::OpenAiWhisper,
+            Some("sk-test".into()),
+        )
+        .unwrap()
+        .expect("key present");
+        assert_eq!(built.1, PROVIDER_OPENAI_WHISPER);
+        assert!(
+            cloud_stt_for_provider(CloudSttProviderKind::OpenAiWhisper, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cloud_provider_router_tts_openai_and_elevenlabs() {
+        use clawft_types::config::CloudTtsProviderKind;
+        let built = cloud_tts_for_provider(CloudTtsProviderKind::OpenAi, Some("sk-test".into()))
+            .unwrap()
+            .expect("openai");
+        assert_eq!(built.1, PROVIDER_OPENAI_TTS);
+        match cloud_tts_for_provider(CloudTtsProviderKind::ElevenLabs, Some("x".into())) {
+            Ok(_) => panic!("elevenlabs should error on live tools path"),
+            Err(err) => assert!(err.contains("elevenlabs")),
         }
     }
 

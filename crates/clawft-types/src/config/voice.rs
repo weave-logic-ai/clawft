@@ -944,6 +944,24 @@ impl Default for VadConfig {
 }
 
 /// Wake word detection configuration.
+///
+/// # WEFT-240 — sensitivity vs detector threshold
+///
+/// Product config uses **`sensitivity`** (higher = more sensitive = easier
+/// to trigger). The transitional wake detector
+/// (`WakeWordConfig.threshold` in `clawft-plugin`) uses a **score threshold**
+/// (higher = harder to trigger). Mapping:
+///
+/// ```text
+/// detector.threshold = (1.0 - sensitivity).clamp(0.0, 1.0)
+/// sensitivity        = (1.0 - detector.threshold).clamp(0.0, 1.0)
+/// ```
+///
+/// `threshold` is accepted as a **serde alias** of `sensitivity` for
+/// historical configs that already used the detector name; when present it
+/// is interpreted as **product sensitivity** (identity), not inverted, so
+/// old `sensitivity` keys keep their meaning. Prefer `sensitivity` in new
+/// product TOML/JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeConfig {
     /// Enable wake word detection.
@@ -954,11 +972,21 @@ pub struct WakeConfig {
     #[serde(default = "default_wake_phrase")]
     pub phrase: String,
 
-    /// Detection sensitivity (0.0-1.0).
-    #[serde(default = "default_wake_sensitivity")]
+    /// Detection sensitivity (0.0–1.0). Higher = more sensitive.
+    ///
+    /// Serde alias `threshold` is accepted for historical keys (same scale
+    /// as this field — **not** the detector score threshold). Use
+    /// [`WakeConfig::to_detector_threshold`] for the inverted detector knob.
+    #[serde(
+        default = "default_wake_sensitivity",
+        alias = "threshold"
+    )]
     pub sensitivity: f32,
 
-    /// Custom wake word model path.
+    /// Custom wake word model path (`String` for JSON/TOML friendliness).
+    ///
+    /// Convert with [`WakeConfig::model_path_buf`] for `PathBuf` consumers
+    /// (e.g. `WakeWordConfig.model_path`).
     #[serde(default, alias = "modelPath")]
     pub model_path: Option<String>,
 }
@@ -981,6 +1009,152 @@ impl Default for WakeConfig {
     }
 }
 
+impl WakeConfig {
+    /// Detector score threshold corresponding to this product sensitivity
+    /// (WEFT-240): `threshold = 1.0 - sensitivity`.
+    pub fn to_detector_threshold(&self) -> f32 {
+        (1.0 - self.sensitivity).clamp(0.0, 1.0)
+    }
+
+    /// Build product sensitivity from a detector score threshold.
+    pub fn sensitivity_from_detector_threshold(threshold: f32) -> f32 {
+        (1.0 - threshold).clamp(0.0, 1.0)
+    }
+
+    /// `model_path` as [`std::path::PathBuf`], if set and non-empty.
+    pub fn model_path_buf(&self) -> Option<std::path::PathBuf> {
+        self.model_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+}
+
+/// Known cloud STT providers for [`CloudFallbackConfig::stt_provider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CloudSttProviderKind {
+    /// OpenAI Whisper API (`whisper`, `openai`, `openai-whisper`, `openai_whisper`).
+    OpenAiWhisper,
+}
+
+impl CloudSttProviderKind {
+    /// Canonical config string for this provider.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiWhisper => "whisper",
+        }
+    }
+
+    /// Human-readable label for SC-3 transparency logs (no secrets).
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenAiWhisper => "OpenAI Whisper API",
+        }
+    }
+}
+
+/// Known cloud TTS providers for [`CloudFallbackConfig::tts_provider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CloudTtsProviderKind {
+    /// OpenAI TTS API (`openai`, `openai-tts`, `openai_tts`).
+    OpenAi,
+    /// ElevenLabs TTS (`elevenlabs`, `11labs`).
+    ElevenLabs,
+}
+
+impl CloudTtsProviderKind {
+    /// Canonical config string for this provider.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::ElevenLabs => "elevenlabs",
+        }
+    }
+
+    /// Human-readable label for SC-3 transparency logs (no secrets).
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI TTS API",
+            Self::ElevenLabs => "ElevenLabs API",
+        }
+    }
+}
+
+/// Error from [`CloudFallbackConfig`] provider routing (WEFT-239).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudProviderRouteError {
+    /// Which field failed (`stt_provider` or `tts_provider`).
+    pub field: &'static str,
+    /// The raw config string that was not recognized.
+    pub value: String,
+}
+
+impl std::fmt::Display for CloudProviderRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown cloud {} value {:?}; expected one of: {}",
+            self.field,
+            self.value,
+            match self.field {
+                "stt_provider" => "whisper | openai | openai-whisper",
+                "tts_provider" => "openai | openai-tts | elevenlabs",
+                _ => "see docs",
+            }
+        )
+    }
+}
+
+impl std::error::Error for CloudProviderRouteError {}
+
+/// Parse a config-string STT provider (WEFT-239).
+///
+/// Empty string returns `None` (no cloud STT selected).
+pub fn parse_cloud_stt_provider(
+    raw: &str,
+) -> Result<Option<CloudSttProviderKind>, CloudProviderRouteError> {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    match key.as_str() {
+        "whisper" | "openai" | "openai-whisper" | "openai_whisper" | "openai.whisper" => {
+            Ok(Some(CloudSttProviderKind::OpenAiWhisper))
+        }
+        _ => Err(CloudProviderRouteError {
+            field: "stt_provider",
+            value: raw.to_string(),
+        }),
+    }
+}
+
+/// Parse a config-string TTS provider (WEFT-239).
+///
+/// Empty string returns `None` (no cloud TTS selected).
+pub fn parse_cloud_tts_provider(
+    raw: &str,
+) -> Result<Option<CloudTtsProviderKind>, CloudProviderRouteError> {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    match key.as_str() {
+        "openai" | "openai-tts" | "openai_tts" | "openai.tts" => {
+            Ok(Some(CloudTtsProviderKind::OpenAi))
+        }
+        "elevenlabs" | "11labs" | "eleven_labs" | "eleven-labs" => {
+            Ok(Some(CloudTtsProviderKind::ElevenLabs))
+        }
+        _ => Err(CloudProviderRouteError {
+            field: "tts_provider",
+            value: raw.to_string(),
+        }),
+    }
+}
+
 /// Cloud STT/TTS fallback configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CloudFallbackConfig {
@@ -988,13 +1162,56 @@ pub struct CloudFallbackConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Cloud STT provider ("whisper" for OpenAI Whisper API).
+    /// Cloud STT provider string (e.g. `"whisper"` for OpenAI Whisper API).
+    ///
+    /// Resolved via [`CloudFallbackConfig::resolve_stt_provider`] (WEFT-239).
     #[serde(default, alias = "sttProvider")]
     pub stt_provider: String,
 
-    /// Cloud TTS provider ("elevenlabs" or "openai").
+    /// Cloud TTS provider string (`"openai"` or `"elevenlabs"`).
+    ///
+    /// Resolved via [`CloudFallbackConfig::resolve_tts_provider`] (WEFT-239).
     #[serde(default, alias = "ttsProvider")]
     pub tts_provider: String,
+}
+
+impl CloudFallbackConfig {
+    /// Map `stt_provider` to a concrete provider kind.
+    ///
+    /// - Empty + `enabled == false` → `Ok(None)`
+    /// - Empty + `enabled == true` → default [`CloudSttProviderKind::OpenAiWhisper`]
+    /// - Non-empty unknown → `Err` (fail at startup)
+    pub fn resolve_stt_provider(
+        &self,
+    ) -> Result<Option<CloudSttProviderKind>, CloudProviderRouteError> {
+        match parse_cloud_stt_provider(&self.stt_provider)? {
+            Some(kind) => Ok(Some(kind)),
+            None if self.enabled => Ok(Some(CloudSttProviderKind::OpenAiWhisper)),
+            None => Ok(None),
+        }
+    }
+
+    /// Map `tts_provider` to a concrete provider kind.
+    ///
+    /// - Empty + `enabled == false` → `Ok(None)`
+    /// - Empty + `enabled == true` → default [`CloudTtsProviderKind::OpenAi`]
+    /// - Non-empty unknown → `Err` (fail at startup)
+    pub fn resolve_tts_provider(
+        &self,
+    ) -> Result<Option<CloudTtsProviderKind>, CloudProviderRouteError> {
+        match parse_cloud_tts_provider(&self.tts_provider)? {
+            Some(kind) => Ok(Some(kind)),
+            None if self.enabled => Ok(Some(CloudTtsProviderKind::OpenAi)),
+            None => Ok(None),
+        }
+    }
+
+    /// Validate both provider strings. Call at config load / startup.
+    pub fn validate_providers(&self) -> Result<(), CloudProviderRouteError> {
+        self.resolve_stt_provider()?;
+        self.resolve_tts_provider()?;
+        Ok(())
+    }
 }
 
 /// Voice confirmation gate configuration (SC-6 / WEFT-225).
@@ -1427,5 +1644,117 @@ mod tests {
         let err = cfg.validate_personalities().unwrap_err();
         assert!(err.contains("bad"));
         assert!(err.contains("speed"));
+    }
+
+    // ── WEFT-239: CloudFallbackConfig provider router ─────────────────────
+
+    #[test]
+    fn cloud_stt_provider_aliases() {
+        for alias in ["whisper", "openai", "openai-whisper", "OpenAI_Whisper"] {
+            assert_eq!(
+                parse_cloud_stt_provider(alias).unwrap(),
+                Some(CloudSttProviderKind::OpenAiWhisper)
+            );
+        }
+        assert_eq!(parse_cloud_stt_provider("").unwrap(), None);
+        assert_eq!(parse_cloud_stt_provider("  ").unwrap(), None);
+        let err = parse_cloud_stt_provider("azure-speech").unwrap_err();
+        assert_eq!(err.field, "stt_provider");
+        assert!(err.to_string().contains("azure-speech"));
+    }
+
+    #[test]
+    fn cloud_tts_provider_aliases() {
+        assert_eq!(
+            parse_cloud_tts_provider("openai").unwrap(),
+            Some(CloudTtsProviderKind::OpenAi)
+        );
+        assert_eq!(
+            parse_cloud_tts_provider("openai-tts").unwrap(),
+            Some(CloudTtsProviderKind::OpenAi)
+        );
+        assert_eq!(
+            parse_cloud_tts_provider("elevenlabs").unwrap(),
+            Some(CloudTtsProviderKind::ElevenLabs)
+        );
+        assert_eq!(
+            parse_cloud_tts_provider("11labs").unwrap(),
+            Some(CloudTtsProviderKind::ElevenLabs)
+        );
+        let err = parse_cloud_tts_provider("polly").unwrap_err();
+        assert_eq!(err.field, "tts_provider");
+    }
+
+    #[test]
+    fn cloud_fallback_resolve_defaults_when_enabled() {
+        let cfg = CloudFallbackConfig {
+            enabled: true,
+            stt_provider: String::new(),
+            tts_provider: String::new(),
+        };
+        assert_eq!(
+            cfg.resolve_stt_provider().unwrap(),
+            Some(CloudSttProviderKind::OpenAiWhisper)
+        );
+        assert_eq!(
+            cfg.resolve_tts_provider().unwrap(),
+            Some(CloudTtsProviderKind::OpenAi)
+        );
+        assert!(cfg.validate_providers().is_ok());
+    }
+
+    #[test]
+    fn cloud_fallback_resolve_disabled_empty_is_none() {
+        let cfg = CloudFallbackConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.resolve_stt_provider().unwrap(), None);
+        assert_eq!(cfg.resolve_tts_provider().unwrap(), None);
+    }
+
+    #[test]
+    fn cloud_fallback_unknown_provider_errors_at_startup() {
+        let cfg = CloudFallbackConfig {
+            enabled: true,
+            stt_provider: "not-a-provider".into(),
+            tts_provider: "openai".into(),
+        };
+        assert!(cfg.validate_providers().is_err());
+    }
+
+    // ── WEFT-240: sensitivity ↔ detector threshold ────────────────────────
+
+    #[test]
+    fn wake_sensitivity_to_detector_threshold_inverts() {
+        let cfg = WakeConfig {
+            sensitivity: 0.8,
+            ..Default::default()
+        };
+        assert!((cfg.to_detector_threshold() - 0.2).abs() < f32::EPSILON);
+        assert!(
+            (WakeConfig::sensitivity_from_detector_threshold(0.2) - 0.8).abs() < f32::EPSILON
+        );
+        let mid = WakeConfig::default();
+        assert!((mid.to_detector_threshold() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn wake_config_threshold_alias_deserializes_as_sensitivity() {
+        let json = r#"{"enabled": true, "threshold": 0.7}"#;
+        let cfg: WakeConfig = serde_json::from_str(json).unwrap();
+        assert!((cfg.sensitivity - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn wake_config_model_path_buf_bridge() {
+        let empty = WakeConfig::default();
+        assert!(empty.model_path_buf().is_none());
+        let cfg = WakeConfig {
+            model_path: Some("models/voice/wake/hey-weft.rpw".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.model_path_buf().unwrap(),
+            std::path::PathBuf::from("models/voice/wake/hey-weft.rpw")
+        );
     }
 }

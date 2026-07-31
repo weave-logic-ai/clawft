@@ -254,6 +254,8 @@ ndarray = "0.16"
 rustfft = "6"
 # WAV decoding for voice-model tests/fixtures (dev-only).
 hound = "3"
+# Multi-format audio decode (WEFT-233 audio_transcribe codecs).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "ogg", "vorbis", "pcm", "mkv"] }
 # Qwen3 BPE tokenizer (ADR-059 embedder; pure-Rust fancy-regex, no oniguruma C dep)
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 # fp16 scalar (ADR-059 decoder-ONNX empty past_key_values, dtype-matched to model)

@@ -1,26 +1,41 @@
 //! audio_synthesize tool -- Generate audio files from text.
 //!
-//! Synthesizes text to speech and saves the result as a .wav audio file.
-//! Uses the TTS fallback chain when available, or returns a stub result.
-//!
-//! Gated behind the `voice` feature flag.
+//! Synthesizes text to speech via the live TTS stack (WEFT-214) and writes a
+//! real `.wav` file (WEFT-233 codec). Gated behind the `voice` feature flag.
+
+use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use clawft_core::tools::registry::{Tool, ToolError};
 use serde_json::{Value, json};
+use tracing::info;
+
+use crate::audio_codec::{self, AudioFormat};
+use crate::voice_backend::{PcmAudio, Synthesis, TtsService, build_default_tts};
 
 /// Tool for synthesizing text to an audio file.
 ///
 /// Parameters:
 /// - `text` (required): Text to synthesize.
-/// - `output_path` (required): Absolute path for the output .wav file.
+/// - `output_path` (required): Absolute path for the output `.wav` file.
 /// - `voice` (optional): Voice ID to use.
 /// - `speed` (optional): Speech rate multiplier (0.5-2.0).
-pub struct AudioSynthesizeTool;
+pub struct AudioSynthesizeTool {
+    tts: Arc<dyn TtsService>,
+}
 
 impl AudioSynthesizeTool {
+    /// Production defaults: env-based substrate TTS (+ optional cloud).
     pub fn new() -> Self {
-        Self
+        Self {
+            tts: build_default_tts(),
+        }
+    }
+
+    /// Inject TTS (unit tests and daemon wiring).
+    pub fn with_tts(tts: Arc<dyn TtsService>) -> Self {
+        Self { tts }
     }
 }
 
@@ -37,7 +52,8 @@ impl Tool for AudioSynthesizeTool {
     }
 
     fn description(&self) -> &str {
-        "Synthesize text to speech and save as an audio file (.wav)."
+        "Synthesize text to speech and save as a real .wav audio file \
+         (PCM s16le). Uses local substrate TTS with optional cloud fallback."
     }
 
     fn parameters(&self) -> Value {
@@ -75,15 +91,21 @@ impl Tool for AudioSynthesizeTool {
             .ok_or_else(|| ToolError::InvalidArgs("output_path is required".into()))?;
 
         let voice = args["voice"].as_str().unwrap_or("default");
-        let speed = args["speed"].as_f64().unwrap_or(1.0) as f32;
+        let speed = args["speed"].as_f64().unwrap_or(1.0);
 
         if text.is_empty() {
             return Err(ToolError::InvalidArgs("text must be non-empty".into()));
         }
 
-        // Validate output directory exists
-        let path = std::path::Path::new(output_path);
+        if !(0.5..=2.0).contains(&speed) {
+            return Err(ToolError::InvalidArgs(
+                "speed must be between 0.5 and 2.0".into(),
+            ));
+        }
+
+        let path = Path::new(output_path);
         if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
             return Err(ToolError::InvalidPath(format!(
@@ -92,12 +114,12 @@ impl Tool for AudioSynthesizeTool {
             )));
         }
 
-        // Validate extension
+        // Only WAV encode is implemented (max feasible write path).
         match path.extension().and_then(|e| e.to_str()) {
             Some("wav") => {}
             Some(ext) => {
                 return Err(ToolError::InvalidArgs(format!(
-                    "Only .wav output is supported, got .{ext}"
+                    "Only .wav output is supported (got .{ext}); MP3/OGG/WebM encode is not implemented"
                 )));
             }
             None => {
@@ -107,14 +129,42 @@ impl Tool for AudioSynthesizeTool {
             }
         }
 
-        // TTS fallback chain would be injected via runtime context.
-        // For now, return a stub result.
-        tracing::info!(
+        let synth: Synthesis = self
+            .tts
+            .synthesize(text, voice, speed)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("TTS failed: {e}")))?;
+
+        let pcm = PcmAudio {
+            samples: synth.samples,
+            sample_rate: synth.sample_rate,
+        };
+
+        audio_codec::write_wav_file(path, &pcm)
+            .map_err(|e| ToolError::ExecutionFailed(e))?;
+
+        // Verify the written file is a real decodable WAV.
+        let (decoded, fmt) = audio_codec::decode_file(path)
+            .map_err(|e| ToolError::ExecutionFailed(format!("WAV verify failed: {e}")))?;
+        if fmt != AudioFormat::Wav {
+            return Err(ToolError::ExecutionFailed(
+                "WAV verify produced unexpected format".into(),
+            ));
+        }
+        if decoded.samples.is_empty() {
+            return Err(ToolError::ExecutionFailed(
+                "TTS produced empty audio".into(),
+            ));
+        }
+
+        info!(
             text_len = text.len(),
             output_path = output_path,
             voice = voice,
             speed = speed,
-            "audio_synthesize tool executed (stub)"
+            duration_ms = synth.duration_ms,
+            source = %synth.source,
+            "audio_synthesize completed"
         );
 
         Ok(json!({
@@ -122,8 +172,12 @@ impl Tool for AudioSynthesizeTool {
             "output_path": output_path,
             "voice": voice,
             "speed": speed,
-            "duration_ms": 0,
-            "note": "TTS engine integration pending -- tool contract defined"
+            "duration_ms": synth.duration_ms,
+            "sample_rate": synth.sample_rate,
+            "samples": decoded.samples.len(),
+            "source": synth.source,
+            "format": "wav",
+            "mime_type": AudioFormat::Wav.mime_type(),
         }))
     }
 }
@@ -131,10 +185,31 @@ impl Tool for AudioSynthesizeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio_codec::decode_file;
+    use async_trait::async_trait;
+
+    struct MockTts;
+
+    #[async_trait]
+    impl TtsService for MockTts {
+        async fn synthesize(
+            &self,
+            _text: &str,
+            _voice: &str,
+            _speed: f64,
+        ) -> Result<Synthesis, String> {
+            Ok(Synthesis {
+                samples: (0..1600).map(|i| (i % 200) as i16).collect(),
+                sample_rate: 16_000,
+                duration_ms: 100,
+                source: "local".into(),
+            })
+        }
+    }
 
     #[test]
     fn tool_metadata() {
-        let tool = AudioSynthesizeTool::new();
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         assert_eq!(tool.name(), "audio_synthesize");
         assert!(!tool.description().is_empty());
         let params = tool.parameters();
@@ -149,40 +224,37 @@ mod tests {
 
     #[tokio::test]
     async fn execute_missing_text_errors() {
-        let tool = AudioSynthesizeTool::new();
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         let args = json!({"output_path": "/tmp/out.wav"});
-        let result = tool.execute(args).await;
-        assert!(result.is_err());
+        assert!(tool.execute(args).await.is_err());
     }
 
     #[tokio::test]
     async fn execute_missing_output_path_errors() {
-        let tool = AudioSynthesizeTool::new();
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         let args = json!({"text": "hello"});
-        let result = tool.execute(args).await;
-        assert!(result.is_err());
+        assert!(tool.execute(args).await.is_err());
     }
 
     #[tokio::test]
     async fn execute_empty_text_errors() {
-        let tool = AudioSynthesizeTool::new();
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         let args = json!({"text": "", "output_path": "/tmp/out.wav"});
-        let result = tool.execute(args).await;
-        assert!(result.is_err());
+        assert!(tool.execute(args).await.is_err());
     }
 
     #[tokio::test]
     async fn execute_wrong_extension_errors() {
-        let tool = AudioSynthesizeTool::new();
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         let args = json!({"text": "hello", "output_path": "/tmp/out.mp3"});
-        let result = tool.execute(args).await;
-        assert!(result.is_err());
+        assert!(tool.execute(args).await.is_err());
     }
 
     #[tokio::test]
-    async fn execute_valid_returns_stub() {
-        let tmp = std::env::temp_dir().join("test_synth_output.wav");
-        let tool = AudioSynthesizeTool::default();
+    async fn execute_writes_real_wav() {
+        let tmp = std::env::temp_dir().join("test_synth_output_weft233.wav");
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         let args = json!({
             "text": "Hello world",
             "output_path": tmp.to_string_lossy(),
@@ -192,16 +264,25 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["status"], "synthesized");
         assert_eq!(result["voice"], "nova");
+        assert_eq!(result["format"], "wav");
+        assert_eq!(result["source"], "local");
+        assert!(tmp.exists());
+
+        let (pcm, fmt) = decode_file(&tmp).unwrap();
+        assert_eq!(fmt, AudioFormat::Wav);
+        assert_eq!(pcm.samples.len(), 1600);
+        assert_eq!(pcm.sample_rate, 16_000);
+
+        let _ = tokio::fs::remove_file(&tmp).await;
     }
 
     #[tokio::test]
     async fn execute_nonexistent_output_dir_errors() {
-        let tool = AudioSynthesizeTool::new();
+        let tool = AudioSynthesizeTool::with_tts(Arc::new(MockTts));
         let args = json!({
             "text": "hello",
             "output_path": "/nonexistent_dir_12345/out.wav"
         });
-        let result = tool.execute(args).await;
-        assert!(result.is_err());
+        assert!(tool.execute(args).await.is_err());
     }
 }

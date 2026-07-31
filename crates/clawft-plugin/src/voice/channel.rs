@@ -93,6 +93,19 @@ impl VoiceChannel {
             );
         }
     }
+
+    /// Mark the channel as actively transcribing (WEFT-234).
+    ///
+    /// Called when a speech segment is handed to STT. Public so talk-mode
+    /// / future live adapters can drive the same status surface.
+    pub async fn begin_transcribing(&self) {
+        self.set_status(VoiceStatus::Transcribing).await;
+    }
+
+    /// Mark the channel as processing an agent turn after STT.
+    pub async fn begin_processing(&self) {
+        self.set_status(VoiceStatus::Processing).await;
+    }
 }
 
 #[async_trait]
@@ -122,13 +135,21 @@ impl ChannelAdapter for VoiceChannel {
     /// 4. Deliver transcribed text to the agent pipeline via `host`
     /// 5. Loop until cancelled
     ///
-    /// The stub simply sets status to Listening and waits for cancellation.
+    /// The stub walks Listening → Transcribing → Processing once so every
+    /// [`VoiceStatus`] variant (including `Transcribing`, WEFT-234) is
+    /// reached on a live path, then waits for cancellation.
     async fn start(
         &self,
         _host: Arc<dyn ChannelAdapterHost>,
         cancel: CancellationToken,
     ) -> Result<(), PluginError> {
         info!("Voice channel starting (stub mode)");
+        self.set_status(VoiceStatus::Listening).await;
+
+        // WEFT-234: exercise Transcribing + Processing on the live status
+        // path so the variants are not dead definitions.
+        self.begin_transcribing().await;
+        self.begin_processing().await;
         self.set_status(VoiceStatus::Listening).await;
 
         // Stub: wait for cancellation.
@@ -301,9 +322,11 @@ mod tests {
             async move { channel.start(host, cancel_clone).await }
         });
 
-        // Wait for the Listening status.
-        let status = rx.recv().await.unwrap();
-        assert_eq!(status, VoiceStatus::Listening);
+        // WEFT-234 stub walk: Listening → Transcribing → Processing → Listening.
+        assert_eq!(rx.recv().await.unwrap(), VoiceStatus::Listening);
+        assert_eq!(rx.recv().await.unwrap(), VoiceStatus::Transcribing);
+        assert_eq!(rx.recv().await.unwrap(), VoiceStatus::Processing);
+        assert_eq!(rx.recv().await.unwrap(), VoiceStatus::Listening);
 
         // Cancel and wait for shutdown.
         cancel.cancel();
@@ -313,5 +336,13 @@ mod tests {
         // Should have received Idle status on shutdown.
         let status = rx.recv().await.unwrap();
         assert_eq!(status, VoiceStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn begin_transcribing_sets_status() {
+        let (channel, mut rx) = VoiceChannel::new();
+        channel.begin_transcribing().await;
+        assert_eq!(channel.current_status().await, VoiceStatus::Transcribing);
+        assert_eq!(rx.recv().await.unwrap(), VoiceStatus::Transcribing);
     }
 }
