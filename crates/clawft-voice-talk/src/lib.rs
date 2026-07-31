@@ -32,6 +32,7 @@ mod forest;
 #[cfg(feature = "live-audio")]
 pub mod live;
 mod llm;
+mod midstream;
 mod native;
 mod render;
 mod session;
@@ -49,6 +50,12 @@ pub use clawft_channels::voice::vad::NoiseFloor;
 pub use ecc::EccConversationObserver;
 pub use forest::{KernelImpulseSink, LoopObserver, TalkForest};
 pub use llm::LocalProviderVoiceLlm;
+// WEFT-617: mid-stream gating hooks (prefix scaffold + CoherenceAlert bridge).
+// Full DTW vendor is a follow-up; see docs/research/weft-617-midstream-eval.md.
+pub use midstream::{
+    MidstreamAnalyzer, MidstreamImpulseBridge, PartialDiffVerdict, PrefixMidstreamAnalyzer,
+    StallSignal, TICK_HAYSTACK_CAP, TICK_WINDOW_CAP,
+};
 pub use native::native_components;
 pub use render::{ContradictionDetector, NeverContradicts, NodeRenderer, RenderOutcome};
 pub use session::{TalkComponents, TalkConfig, TalkSession};

@@ -1,7 +1,12 @@
 # MidStream → WeftOS Voice/ECC Integration Plan
 
-> **Status:** Analysis + plan (no code changes). Author: midstream-integration-planner (ruv hive).
-> **Date:** 2026-07-03
+> **Status:** Analysis + plan. **WEFT-617 evaluation closed 2026-07-31** (adopt
+> `temporal-compare` vendored Phase A–B; drop scheduler/strange-loop/attractor/QUIC
+> for voice; LTL reference-only). Formal spike write-up:
+> [`docs/research/weft-617-midstream-eval.md`](../../../docs/research/weft-617-midstream-eval.md).
+> Scaffold hooks: `crates/clawft-voice-talk/src/midstream.rs`.
+> **Author (plan):** midstream-integration-planner (ruv hive).
+> **Date:** 2026-07-03 · **Decision stamp:** 2026-07-31 (WEFT-617).
 > **Source reviewed:** `github.com/ruvnet/midstream` @ default branch (workspace `0.2.x`, MIT OR Apache-2.0),
 > full source clone. Cross-referenced against WeftOS `feat/hermes-loop-base`.
 > **Verdict up front:** **Selective adopt (one crate) + reference (one design). No-go on framework/wholesale adoption.**
