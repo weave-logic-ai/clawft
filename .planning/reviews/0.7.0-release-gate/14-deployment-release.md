@@ -342,12 +342,17 @@ The release pipeline as it stands today, by stage:
   are all empty stubs (`_No notes recorded yet._`). Either populate
   retroactively from CHANGELOG/handoff notes or delete the empty
   scaffolding.
-- `.planning/sparc/phase4/10-deployment-community/04-element-10-tracker.md`
+- ~~`.planning/sparc/phase4/10-deployment-community/04-element-10-tracker.md`
   has Element 10 marked **COMPLETE** as of K2-K5. The tracker references
   ClawHub features (`weft skills publish/install`, Ed25519 signing,
   vector search). These are tangentially deployment-related but mostly
   belong to the security/community workstream. Confirm whose lap they
-  sit in and de-duplicate.
+  sit in and de-duplicate.~~
+  **CLOSED by WEFT-472** (2026-07-31): ownership split recorded in
+  `docs/plans/weft-472-element10-reconciliation.md` and the Element 10
+  tracker. ClawHub / signing / skill marketplace → **ws04-plugin-skills**
+  (dashboard install bridge → **WEFT-301** / ws09); Docker/CI/release →
+  **ws14-deployment**. No new ws14 ClawHub tickets.
 - `scripts/clawft-wake.service` + `scripts/com.clawft.wake.plist` —
   see "deferred items"; likely orphaned.
 - `tools/build-kb` — outside the workspace; orphaned in the sense of

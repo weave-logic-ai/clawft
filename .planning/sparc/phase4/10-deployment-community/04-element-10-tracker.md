@@ -1,7 +1,24 @@
 # Element 10: Deployment & Community - Sprint Tracker
 **Workstream**: K (Deployment & Community)
 **Timeline**: Weeks 8-12
-**Status**: COMPLETE (K2-K5 delivered, K4 install/publish implemented)
+**Status**: COMPLETE (K2-K5 delivered, K4 install/publish implemented) — historical sprint status
+
+> **WEFT-472 (2026-07-31) ownership reconciliation**  
+> COMPLETE means the Element 10 *sprint* delivered K2–K5 as planned. It does **not**
+> mean remaining ClawHub product gaps are **ws14-deployment** work.  
+> Canonical note: [`docs/plans/weft-472-element10-reconciliation.md`](../../../../docs/plans/weft-472-element10-reconciliation.md).
+
+## Ongoing ownership (post WEFT-472)
+
+| K unit | Ongoing Plane owner | Notes |
+|--------|---------------------|-------|
+| K2 / K2-CI (Docker, VPS, PR gates, release, GHCR) | **ws14-deployment** | True release engineering |
+| K3 sandbox + K3a security plugin | **ws04-plugin-skills** (+ core sandbox) | Product security, not release eng |
+| K4 ClawHub (client, publish/install CLI, Ed25519 skill signing, community) | **ws04-plugin-skills** primary; dashboard bridge **ws09** (WEFT-301) | Not deployment |
+| K4 vector search path | **ws06-memory** (H2) + **ws04** consumer | Not deployment |
+| K5 benchmarks / release comparison scripts | **ws14-deployment** (scripts/CI); skill packs **ws04** | Split content vs harness |
+
+**Do not open new ws14 tickets for ClawHub features.** Prefer ws04 / ws09 / ws06.
 
 ## Phase Tracking
 
@@ -32,6 +49,8 @@
 - [x] CLI commands (weft security scan, weft security checks)
 
 ### K4: ClawHub Registry
+> **Owner: ws04-plugin-skills** (not ws14). Historical delivery under Element 10 is unchanged.
+
 - [x] ClawHub REST API (Contract #20) -- real HTTP client (stubs replaced)
 - [x] Vector search + keyword fallback
 - [x] Skill signing, star/comment, versioning
@@ -40,7 +59,8 @@
 - [x] ClawHubClient with real HTTP calls (search, publish, download, install)
 - [x] ClawHubError enum for graceful error handling
 - [x] Content hashing (SHA-256) and digital signature support
-- [ ] Agent auto-search (depends on C3/C4 landing)
+- [ ] Agent auto-search (depends on C3/C4 landing) — **remaining; track under ws04**, not ws14 (WEFT-472)
+- Related (not this checklist): dashboard install/uninstall → **WEFT-301** (ws09); signing trust-root docs → **WEFT-69** (Done, ws04)
 
 ### K5: Benchmarks & MVP Skills
 - [x] Benchmark comparison script (4 metrics vs OpenClaw)
@@ -97,3 +117,9 @@
 | 5 | CI/CD delays | Medium | All workflows delivered | RESOLVED |
 | 6 | Supply chain attacks | High | Signature enforcement in publish API | RESOLVED |
 | 7 | Docker image size | Low | cargo-chef multi-stage + strip | RESOLVED |
+| 8 | Ownership ambiguity (ClawHub vs deployment) | Medium | WEFT-472 ownership split; audit orphan closed | RESOLVED |
+
+## WEFT-472 reconciliation
+
+- Audit orphan (Element 10 ClawHub features “whose lap?”) → **closed by WEFT-472**.
+- Full write-up: `docs/plans/weft-472-element10-reconciliation.md`.
