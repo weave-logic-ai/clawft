@@ -1,74 +1,111 @@
 # ADR-002: cargo-dist for Release Artifact Generation
 
 **Date**: 2026-03-28
-**Status**: Accepted
-**Deciders**: Sprint 11 Symposium Track 3 (Release Engineering)
+**Status**: Accepted (amended 2026-07-31 — WEFT-471)
+**Deciders**: Sprint 11 Symposium Track 3 (Release Engineering);
+amendment: 0.8.x governance (WEFT-471)
+**Closes**: WEFT-471 (governance gap: ADR vs actual version/changelog flow)
+**Runbook**: [`docs/deployment/release.md`](../deployment/release.md)
 
 ## Context
 
-WeftOS needs cross-platform binary releases for 5+ targets (Linux x86/ARM, macOS Intel/Apple Silicon, Windows), shell/PowerShell install scripts, Homebrew formula, and GitHub Release artifacts. Hand-rolling a CI matrix for this is weeks of debugging work. The Ruff project proved that cargo-dist scales to large Rust workspaces.
+WeftOS needs cross-platform binary releases for 5+ targets (Linux x86/ARM,
+macOS Intel/Apple Silicon, Windows), shell/PowerShell install scripts,
+Homebrew formula, and GitHub Release artifacts. Hand-rolling a CI matrix
+for this is weeks of debugging work. The Ruff project proved that
+cargo-dist scales to large Rust workspaces.
+
+The original decision also named `release-plz` (version bumps / release
+PRs) and `git-cliff` (changelog from conventional commits) as complements
+to cargo-dist. Neither was wired into CI or the shipping runbook. Reality
+diverged: releases are **manual version bump + annotated tag + push**,
+with a home-rolled conventional-commit grouper for draft release notes.
+The 0.7.0 release-gate audit
+(`.planning/reviews/0.7.0-release-gate/14-deployment-release.md`) flagged
+this as deferred rows "No release-plz" and "No git-cliff" (Task #19 /
+WEFT-471).
+
+Adopting release-plz now would mean new workflow config, crates.io token
+policy, PR bot semantics across a large lockstep workspace (ADR-001), and
+operator training — out of proportion for a pure documentation gap.
+Amending this ADR is the chosen path.
 
 ## Decision
 
-Use `cargo-dist` for release artifact generation. Running `cargo dist init` generates a GitHub Actions release workflow covering all platform targets, install scripts, Homebrew formula, `cargo binstall` metadata, and SHA256 checksums. The existing hand-rolled `release.yml` workflow will be replaced.
+### Artifact generation (unchanged, shipped)
 
-Complement with `release-plz` (over release-please) for automated version bumps and release PRs, and `git-cliff` for changelog generation from conventional commits.
+Use **`cargo-dist`** for release artifact generation. Workspace metadata
+lives under `[workspace.metadata.dist]` in the root `Cargo.toml`
+(`cargo-dist-version = "0.31.0"`). Tag push runs `.github/workflows/release.yml`
+and produces platform archives, install scripts, Homebrew tap updates,
+`cargo binstall` metadata, SHA256 checksums, and sigstore attestations.
+
+Parallel non-cargo-dist legs (WASI, browser WASM, KB, crates.io, Docker,
+release gate) are documented in the runbook; they do not replace
+cargo-dist for native binary distribution.
+
+### Version bumps and release PRs — **not** release-plz (amendment)
+
+**Do not adopt `release-plz` for the current shipping path.**
+
+Canonical version flow:
+
+1. Bump the workspace lockstep version with
+   `cargo workspaces version {patch|minor|major}` (ADR-001).
+2. Curate `CHANGELOG.md` and regenerate docs MDX
+   (`scripts/build.sh releases-mdx`) in the same commit as the bump.
+3. Create an annotated SemVer tag (`vX.Y.Z`) on that commit.
+4. `git push origin vX.Y.Z` — workflows fan out from the tag.
+
+No automated release PR bot, no `release-plz.toml`, and no release-plz
+GitHub Action. Revisit only if release cadence or multi-maintainer
+coordination makes manual bumps a bottleneck (file a new WEFT / ADR
+amendment then).
+
+### Changelog generation — home-rolled path is canonical (amendment)
+
+**Canonical changelog tooling is manual Keep-a-Changelog curation of
+`CHANGELOG.md`, optionally seeded by
+`scripts/release/generate-changelog.sh`.**
+
+| Tool | Role today |
+|------|------------|
+| `CHANGELOG.md` | Source of truth for release notes and docs-site MDX |
+| `scripts/release/generate-changelog.sh` | Optional draft helper: groups conventional commits between two refs into markdown sections |
+| `scripts/build.sh releases-mdx` | Regenerates the docs-site Release Notes page from `CHANGELOG.md` |
+| `cliff.toml` | **Dormant scaffold only** — present from Sprint 11 planning; **not** invoked by CI, `scripts/build.sh`, or the release runbook |
+| `git-cliff` / `release-plz` | **Not adopted** for shipping |
+
+Operators may still install git-cliff locally and point it at `cliff.toml`
+for experiments; that path is not blessed and must not be assumed by
+automation.
 
 ## Consequences
 
 ### Positive
-- Eliminates weeks of CI matrix debugging
+- Eliminates weeks of CI matrix debugging (cargo-dist)
 - Provides install scripts, Homebrew, and binstall metadata for free
 - Well-maintained by the Axo team; used by Ruff, Zellij, and others
+- ADR and runbook now match the path operators actually run (no
+  phantom release-plz / git-cliff dependency)
 
 ### Negative
-- Adds a build-time dependency on an external tool
-- Configuration is opinionated -- custom archive formats require workarounds
-- Generated `release.yml` is easy to drift from stock (`dist generate`
-  overwrites); hand-patches (WEFT-593) require a documented re-apply path
+- Adds a build-time dependency on cargo-dist (external tool)
+- Configuration is opinionated — custom archive formats require workarounds
+- Manual version bumps and changelog curation do not scale as well as a
+  release bot; acceptable at current cadence
 
 ### Neutral
-- release-plz chosen over release-please because it is Rust-native and integrates with git-cliff and cargo publish
-- As of 2026-07-31, release-plz / git-cliff are **not** adopted; version
-  bumps + changelog remain manual (`scripts/release/generate-changelog.sh`
-  + runbook). That drift is tracked separately from the cargo-dist pin.
+- release-plz remains a reasonable *future* option (Rust-native, works
+  with lockstep workspaces) but is **explicitly out of scope** until a
+  new decision reopens it
+- `cliff.toml` may be deleted or wired up in a later change; either way
+  requires an explicit runbook update
 
-## Amendment (2026-07-31) — version pin and regenerate cadence (WEFT-462)
+## References
 
-### Pin policy
-
-- The authoritative pin is
-  `[workspace.metadata.dist].cargo-dist-version` in the root `Cargo.toml`.
-- CI installs that exact cargo-dist version; developer machines should
-  match when running `dist plan` / `dist generate`.
-- Bump to **current upstream stable** when ready — not to a speculative
-  major. As of 2026-07-31 upstream latest stable is **0.32.0**; **v1.0
-  has not shipped**. Ticket wording that assumed v1.0 is outdated.
-
-### Regenerate cadence (quarterly sweep)
-
-- **At least quarterly**, or sooner for security / Actions-related
-  cargo-dist releases, check
-  <https://github.com/axodotdev/cargo-dist/releases> and open a chore PR
-  if the pin is more than one minor behind **or** we need a verified
-  feature (SBOM, wasip2-in-matrix, etc.).
-- **Never** combine a cargo-dist bump with a product release tag cut.
-- Procedure lives in `docs/deployment/release.md` ("How to bump
-  cargo-dist") and the migration plan
-  `docs/plans/weft-462-cargo-dist.md`.
-
-### Coupling to WEFT-593
-
-`.github/workflows/release.yml` is **not** pure stock output: it carries
-a hand-patch so GHA secret-scanning cannot drop the plan job's matrix
-output (v0.6.21 binary-less release). While that patch exists:
-
-1. `allow-dirty = ["ci"]` stays set.
-2. Every `dist generate` **must** re-apply the WEFT-593 checklist (slim
-   job outputs, dedicated matrix output, refuse binary-less announce).
-3. Full bump PRs prove `dist plan` still yields the expected
-   `artifacts_matrix.include` length before merge.
-
-When upstream stock workflow is proven safe against the secret-scan
-failure mode, the hand-patch (and then `allow-dirty`) may be retired in
-the same bump PR with explicit evidence.
+- Runbook: [`docs/deployment/release.md`](../deployment/release.md)
+- Lockstep versioning: [ADR-001](adr-001-lockstep-semver.md)
+- Changelog draft helper: `scripts/release/generate-changelog.sh`
+- Plane: WEFT-471 (ws14 governance)
+- Audit source: `.planning/reviews/0.7.0-release-gate/14-deployment-release.md`

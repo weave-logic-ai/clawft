@@ -7,7 +7,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | ADR | Title | Status | Category | Source |
 |-----|-------|--------|----------|--------|
 | [ADR-001](adr-001-lockstep-semver.md) | Workspace-level lockstep semver versioning | Accepted | Release | Track 3 |
-| [ADR-002](adr-002-cargo-dist.md) | cargo-dist for release artifact generation | Accepted | Release | Track 3 |
+| [ADR-002](adr-002-cargo-dist.md) | cargo-dist for release artifact generation (manual version/changelog; no release-plz/git-cliff — WEFT-471) | Accepted | Release | Track 3 |
 | [ADR-003](adr-003-codemirror.md) | CodeMirror 6 over Monaco for code editor block | Accepted | GUI | Track 4 |
 | [ADR-004](adr-004-no-dockview.md) | No dockview -- CSS Grid + custom Lego engine | Accepted | GUI | Track 4 |
 | [ADR-005](adr-005-xterm-js.md) | xterm.js for WeftOS console | Superseded by egui shell | GUI | Track 4 |

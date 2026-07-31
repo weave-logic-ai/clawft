@@ -48,28 +48,52 @@ in the next release.
 
 ## Tag, Push, Done
 
-The shipping flow:
+The shipping flow is **manual** (version bump + changelog + tag + push).
+`cargo-dist` owns **artifact generation** after the tag lands; it does
+**not** own version bumps or changelogs. Per [ADR-002](/docs/adr/adr-002-cargo-dist.md)
+(amended WEFT-471): **`release-plz` and `git-cliff` are not adopted.**
+Do not assume a release bot or `git cliff` in CI.
 
 ```bash
 # 1. Bump the workspace version + every distributable crate that uses
 #    a literal version (cargo-workspaces version handles this in lockstep).
 cargo workspaces version patch  # or minor / major
 
-# 2. Tag the resulting commit.
+# 2. Curate CHANGELOG.md (see Pre-Tag Checklist), then commit bump + notes.
+# 3. Tag the resulting commit.
 git tag -a v0.7.0 -m "Release v0.7.0"
 
-# 3. Push the tag (this triggers all release workflows).
+# 4. Push the tag (this triggers all release workflows).
 git push origin v0.7.0
 ```
 
 That's the whole local flow. Everything downstream is automation.
 
+### Changelog tooling (canonical)
+
+| Path | Role |
+|------|------|
+| `CHANGELOG.md` | Source of truth (Keep a Changelog) |
+| `scripts/release/generate-changelog.sh [from] [to]` | Optional draft helper — groups conventional commits into markdown sections; paste/edit into `CHANGELOG.md` |
+| `scripts/build.sh releases-mdx` | Regenerates docs-site Release Notes from `CHANGELOG.md` |
+| `cliff.toml` | Dormant only — **not** part of the shipping path (ADR-002 / WEFT-471) |
+
+Example draft (does not write files):
+
+```bash
+./scripts/release/generate-changelog.sh          # last tag..HEAD
+./scripts/release/generate-changelog.sh v0.6.19  # v0.6.19..HEAD
+```
+
 ### Pre-Tag Checklist
 
 Before pushing the release tag:
 
+- [ ] (Optional) Seed notes with
+      `./scripts/release/generate-changelog.sh <prev-tag>`.
 - [ ] Move the `## [Unreleased]` block in `CHANGELOG.md` into a dated
-      `## [X.Y.Z] - YYYY-MM-DD` section.
+      `## [X.Y.Z] - YYYY-MM-DD` section (edit for accuracy; do not ship
+      raw helper output unreviewed).
 - [ ] Add the matching `[X.Y.Z]: ...compare/...` link to the footnote
       block at the bottom of `CHANGELOG.md`.
 - [ ] Update the `[Unreleased]: ...compare/X.Y.Z...HEAD` link to point

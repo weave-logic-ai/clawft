@@ -222,15 +222,16 @@ The release pipeline as it stands today, by stage:
   CI (phase-gate is `scripts/build.sh gate`). Either wire it into a
   workflow or mark "developer-rehearsal only".
 - **`scripts/clawft-wake.service` + `scripts/com.clawft.wake.plist`**
-  — ~~Probably dead (not in dist tarball).~~ **Closed WEFT-465:** live
-  sources embedded via `include_str!` into `weft voice install-service`;
-  tarball omission is intentional. See `docs/development/scripts-audit.md`.
-- **`build_vp_deck.py`, `dev_server.py`** — ~~Not part of any workflow.~~
-  **Closed WEFT-465:** `dev_server.py` is wired into `build.sh serve`;
-  `build_vp_deck.py` moved to `scripts/dev/` (one-shot QSR deck).
-- **`scripts/weave-init.sh`** — ~~May duplicate `weaver init`.~~
-  **Closed WEFT-465:** different job (Claude agents/skills install vs
-  `weaver init` workspace/identity bootstrap). Keep both.
+  — systemd + launchd unit files for the wake service. Are these
+  actually packaged into anything? They're not in `[workspace.metadata.dist]
+  include`, not in any release tarball. Probably dead.
+- **`build_vp_deck.py`, `dev_server.py`** — Python helpers in
+  `scripts/`. Not part of any workflow or build-gate. Consider moving
+  to `scripts/dev/` or similar.
+- **`scripts/weave-init.sh`** — bootstraps a project with `.weftos/`
+  layout. Compare against `weaver init` (Rust binary) — these may
+  duplicate. CHANGELOG 0.6.14: "weaver init rewritten — works in any
+  directory, generates weave.toml". The shell script may now be dead.
 - **Fumadocs site link drift** — `docs/deployment/docker.md` and
   `release.md` are not in `docs/src/content/docs/`, so they're invisible
   to the public docs site. Either move/link them in or delete; ADR-014
@@ -267,11 +268,17 @@ The release pipeline as it stands today, by stage:
   but missing from this workstream's pipeline. cargo-dist supports
   CycloneDX SBOM generation (not currently enabled in
   `[workspace.metadata.dist]`).
-- **No `release-plz`** — ADR-002 said "Complement with release-plz".
-  Not adopted. Manual version bumps + tag + push is the current flow.
-- **No `git-cliff`** — also called out by ADR-002. Not adopted.
+- **No `release-plz`** — ~~ADR-002 said "Complement with release-plz".
+  Not adopted. Manual version bumps + tag + push is the current flow.~~
+  **Closed WEFT-471** (2026-07-31): ADR-002 amended — release-plz not
+  adopted; manual `cargo workspaces version` + tag + push is canonical.
+- **No `git-cliff`** — ~~also called out by ADR-002. Not adopted.
   `scripts/release/generate-changelog.sh` is the home-rolled
-  conventional-commit grouper instead.
+  conventional-commit grouper instead.~~
+  **Closed WEFT-471** (2026-07-31): ADR-002 amended — git-cliff not
+  adopted; `CHANGELOG.md` + optional
+  `scripts/release/generate-changelog.sh` is canonical; `cliff.toml`
+  remains dormant scaffold only.
 
 ### Open questions
 
@@ -342,8 +349,7 @@ The release pipeline as it stands today, by stage:
   belong to the security/community workstream. Confirm whose lap they
   sit in and de-duplicate.
 - `scripts/clawft-wake.service` + `scripts/com.clawft.wake.plist` —
-  ~~likely orphaned~~ **Closed WEFT-465** — live; embedded in CLI (see
-  `docs/development/scripts-audit.md`).
+  see "deferred items"; likely orphaned.
 - `tools/build-kb` — outside the workspace; orphaned in the sense of
   being a build dep for two workflows but not visible from `Cargo.toml`.
 - `crates/clawft-kernel/Dockerfile.alpine` — second Dockerfile beside
@@ -405,13 +411,16 @@ risk (highest first).
     only ubuntu-latest runs `cargo test`).
 18. **[P3] Schedule cargo-dist bump** to v1+ (or current latest).
     Regenerate `release.yml`. Document in `docs/deployment/release.md`.
-19. **[P3] Adopt `release-plz` and/or `git-cliff`** per ADR-002, OR
+19. **[P3] ~~Adopt `release-plz` and/or `git-cliff` per ADR-002, OR
     explicitly amend the ADR to record that we use
-    `scripts/release/generate-changelog.sh` instead.
-20. **[P3] Move dead scripts.** ~~Audit wake units, py helpers,
-    weave-init.sh.~~ **Closed WEFT-465** — disposition in
-    `docs/development/scripts-audit.md`; only `build_vp_deck.py` moved
-    to `scripts/dev/`; wake units / `dev_server.py` / `weave-init.sh` kept.
+    `scripts/release/generate-changelog.sh` instead.~~**
+    **Closed WEFT-471** — ADR-002 amended (no release-plz/git-cliff);
+    runbook `docs/deployment/release.md` records manual flow +
+    generate-changelog helper.
+20. **[P3] Move dead scripts.** Audit `scripts/clawft-wake.service`,
+    `scripts/com.clawft.wake.plist`, `scripts/build_vp_deck.py`,
+    `scripts/dev_server.py`, `scripts/weave-init.sh`. Either wire into
+    a workflow, move to `scripts/dev/`, or delete.
 21. **[P3] Bump or delete `scripts/09-gate.sh`** test-count floor (1200
     is now low). Same for path references to `.planning/sparc/weftos/0.1/`
     (likely moved under `phase4/`).
