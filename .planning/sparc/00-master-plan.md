@@ -127,10 +127,11 @@ Browser plan code samples use `base_url` but actual struct has `api_base`. Add `
 ### A4: Feature Validation Script
 
 Use `scripts/build.sh gate` (the canonical phase-gate entrypoint).
-WEFT-409 (2026-04-30): supersedes the originally-planned standalone
-`scripts/check-features.sh`, which was never created. `build.sh gate`
-runs the 12-check suite (native + WASI + browser + clippy + bundle-
-size + audit + docs regen) and is what every phase gate should call.
+WEFT-409 (2026-04-30) / WEFT-564: supersedes the standalone
+`scripts/check-features.sh`, which was retired (now a redirect shim to
+`build.sh gate`). `build.sh gate` runs the full phase-gate suite
+(native + WASI + browser + clippy + bundle-size + audit + more) and is
+what every phase gate should call.
 
 ```bash
 scripts/build.sh gate
@@ -205,8 +206,8 @@ cargo build --target wasm32-wasip2 --profile release-wasm -p clawft-wasm
 # Gate 4: Browser WASM check (after BW1 establishes the feature)
 cargo check --target wasm32-unknown-unknown -p clawft-wasm --no-default-features --features browser
 
-# Gate 5: Feature validation (WEFT-409: scripts/build.sh gate
-# supersedes the never-created scripts/check-features.sh)
+# Gate 5: Feature validation (WEFT-409/WEFT-564: scripts/build.sh gate
+# supersedes the retired scripts/check-features.sh)
 scripts/build.sh gate
 ```
 
@@ -352,7 +353,7 @@ The plan is complete when ALL of these are true:
 - [ ] Dashboard connects to both Axum backend and WASM module
 - [ ] `weft voice talk` runs full loop: listen → transcribe → agent → speak → listen
 - [ ] All documentation written (11 browser docs, 4 UI docs, voice CLI help)
-- [ ] `scripts/build.sh gate` passes all targets (WEFT-409: supersedes the never-created `scripts/check-features.sh`)
+- [ ] `scripts/build.sh gate` passes all targets (WEFT-409/WEFT-564: supersedes the retired `scripts/check-features.sh`)
 
 ---
 

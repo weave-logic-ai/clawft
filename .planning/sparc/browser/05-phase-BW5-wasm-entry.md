@@ -578,7 +578,7 @@ twiggy top pkg/clawft_wasm_bg.wasm | head -30
 - [ ] `cargo test --workspace` -- zero regressions
 - [ ] `cargo build --release --bin weft` -- native CLI builds
 - [ ] `cargo build --target wasm32-wasip2 --profile release-wasm -p clawft-wasm` -- WASI build works
-- [ ] `scripts/check-features.sh` passes
+- [ ] `scripts/build.sh gate` passes (WEFT-409/WEFT-563: supersedes the retired `scripts/check-features.sh`)
 
 ### Test Commands
 
@@ -598,8 +598,13 @@ cargo build --release --bin weft
 # WASI regression
 cargo build --target wasm32-wasip2 --profile release-wasm -p clawft-wasm
 
-# Feature flag validation
-bash scripts/check-features.sh
+# Canonical phase gate (replaces scripts/check-features.sh — WEFT-409/WEFT-563)
+scripts/build.sh gate
+
+# Or, for a fast iteration loop, just the cargo check across targets:
+scripts/build.sh check        # native cargo check --workspace
+scripts/build.sh wasi         # wasm32-wasip2 build
+scripts/build.sh browser      # wasm32-unknown-unknown build
 ```
 
 ### Documentation Deliverables

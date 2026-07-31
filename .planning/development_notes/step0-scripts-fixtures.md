@@ -3,17 +3,18 @@
 Date: 2026-02-24
 Branch: feature/three-workstream-implementation
 
-> **Update 2026-04-30 (WEFT-409):** `scripts/check-features.sh` was
-> never landed. The canonical feature-flag validation entrypoint is
-> now `scripts/build.sh gate`, which covers the same five gates plus
-> clippy, bundle-size, audit, and docs-regen checks (12 total). The
-> intent of the original A4 task is preserved; the implementation is
+> **Update 2026-04-30 (WEFT-409) / 2026-07 (WEFT-564):**
+> `scripts/check-features.sh` was added 2026-02-25 and later **retired**.
+> The file remains only as a deprecation shim that redirects to
+> `scripts/build.sh gate` (canonical feature-flag / phase-gate entrypoint;
+> covers the original five gates plus clippy, bundle-size, audit, and more).
+> The intent of the original A4 task is preserved; the implementation is
 > consolidated into `build.sh` rather than a parallel script.
 
 ## What was created (historical / superseded)
 
-### scripts/check-features.sh (PLANNED, NEVER CREATED — see WEFT-409)
-Feature validation script that runs five compilation gates before push:
+### scripts/check-features.sh (RETIRED — see WEFT-409 / WEFT-564)
+Historical feature validation script that ran five compilation gates before push:
 
 1. **Gate 1** - Native workspace compilation (`cargo check --workspace`)
 2. **Gate 2** - Native test compilation (`cargo test --workspace --no-run`)

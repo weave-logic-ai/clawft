@@ -1641,7 +1641,9 @@ ${BOLD}Commands:${NC}
                   Residual moderates under ruflo pin: docs/security/npm-audit-residual.md
   gate            Run full phase gate (16 checks, includes cargo audit +
                   npm audit critical/high / WEFT-598 +
-                  kernel WASM no-mesh / WEFT-114 + pipeline pass / WEFT-56)
+                  kernel WASM no-mesh / WEFT-114 + pipeline pass / WEFT-56).
+                  Canonical replacement for the retired scripts/check-features.sh
+                  (WEFT-409/WEFT-564).
   pipeline-pass   Fast clawft-core pipeline regression
                   (nextest -E 'test(pipeline)'; typically <5s). Also gate #15.
   bench <crate> <name>

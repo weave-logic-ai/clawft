@@ -93,10 +93,11 @@ Across the portable crate chain (`clawft-types`, `clawft-platform`,
   `--no-default-features --features browser` (and workspace deps
   `default-features = false`) so host-only crates do not pull Tokio/TLS into
   the WASM graph.
-- **Validation**: `scripts/check-features.sh` and the phase gate’s
+- **Validation**: `scripts/build.sh gate` (canonical phase gate; WEFT-409 /
+  WEFT-564 retired the former `scripts/check-features.sh` shim) and its
   per-crate `cargo check --target wasm32-unknown-unknown … --features browser`
-  matrix (`scripts/build.sh gate`) enforce the split. Accidental
-  `default-features = true` on a portable path is a gate failure.
+  matrix enforce the split. Accidental `default-features = true` on a
+  portable path is a gate failure.
 
 Optional sub-feature (does not break the mutex):
 

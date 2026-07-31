@@ -29,7 +29,7 @@ This phase introduces `native`/`browser` feature flags to the foundation crates 
 | `crates/clawft-platform/src/config_loader.rs` | Fix `path.exists()` leak at line 38-39; use `fs.exists()` or accept boolean param | P1.4 |
 | `crates/clawft-plugin/Cargo.toml` | Make `tokio-util` optional behind `native` feature | P1.2b |
 | `.github/workflows/pr-gates.yml` | Add `wasm-browser-check` job | P1.5 |
-| ~~`scripts/check-features.sh`~~ → `scripts/build.sh gate` | Feature-flag validation script. SUPERSEDED (WEFT-409, 2026-04-30): `scripts/build.sh gate` covers the same checks (native + WASI + browser + clippy + bundle-size) and is the canonical entrypoint. The standalone script was never created. | P1.6 |
+| ~~`scripts/check-features.sh`~~ → `scripts/build.sh gate` | Feature-flag validation script. SUPERSEDED (WEFT-409, 2026-04-30 / WEFT-564): `scripts/build.sh gate` covers the same checks (native + WASI + browser + clippy + bundle-size) and is the canonical entrypoint. The standalone script was retired (thin redirect shim remains). | P1.6 |
 | `docs/architecture/adr-027-browser-wasm-support.md` | New file: ADR for browser WASM decision | P1.8 |
 | `docs/development/feature-flags.md` | New file: feature flag guide | P1.9 |
 
@@ -562,15 +562,16 @@ wasm-browser-check:
 
 ### Feature Validation: `scripts/build.sh gate` (SUPERSEDES `scripts/check-features.sh`)
 
-WEFT-409 (2026-04-30): The original plan called for a standalone
-`scripts/check-features.sh`. It was never created. The canonical
-phase-gate entrypoint is now `scripts/build.sh gate`, which runs the
-12-check suite (native + WASI + browser + clippy + bundle-size + audit
-+ docs regen check). Use it whenever this doc says "feature flag
-validation script".
+WEFT-409 (2026-04-30) / WEFT-564: The original plan shipped a standalone
+`scripts/check-features.sh` (added 2026-02-25). It has been retired —
+the file is now a deprecation shim that `exec`s `scripts/build.sh gate`.
+The canonical phase-gate entrypoint is `scripts/build.sh gate`, which
+runs the full suite (native + WASI + browser + clippy + bundle-size +
+audit + more). Use it whenever this doc says "feature flag validation
+script".
 
 ```bash
-# Canonical phase gate (replaces scripts/check-features.sh)
+# Canonical phase gate (replaces retired scripts/check-features.sh)
 scripts/build.sh gate
 
 # Or, for a fast iteration loop, just the cargo check across targets:
