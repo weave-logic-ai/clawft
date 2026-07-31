@@ -618,6 +618,20 @@ pub fn validate_log_message(sandbox: &PluginSandbox, message: &str) -> (String, 
 mod tests {
     use super::*;
 
+
+    /// Create a temp dir and return its canonical path.
+    ///
+    /// On macOS, `temp_dir()` is under `/var/folders/...` while `/var` is a
+    /// symlink to `/private/var`. Without canonicalizing, intermediate-symlink
+    /// checks in [`validate_file_access`] report `SymlinkEscape("/var")` for
+    /// otherwise valid in-sandbox paths.
+    fn canonical_temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::canonicalize(&dir).expect("canonicalize temp dir")
+    }
+
+
     /// Helper to create a sandbox with given network permissions.
     fn sandbox_with_network(network: Vec<String>) -> PluginSandbox {
         let permissions = PluginPermissions {
@@ -990,8 +1004,7 @@ mod tests {
     #[test]
     fn t14_fs_read_within_allowed_path() {
         // Create a temp directory and file
-        let dir = std::env::temp_dir().join("clawft_test_t14");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t14");
         let file = dir.join("test.txt");
         std::fs::write(&file, "content").unwrap();
 
@@ -1005,8 +1018,7 @@ mod tests {
 
     #[test]
     fn t15_fs_read_outside_allowed_path() {
-        let dir = std::env::temp_dir().join("clawft_test_t15_allowed");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t15_allowed");
 
         let sandbox = sandbox_with_fs(vec![dir.to_string_lossy().to_string()]);
         // /etc/hosts should exist on Linux but is outside sandbox
@@ -1018,8 +1030,7 @@ mod tests {
 
     #[test]
     fn t18_fs_write_within_allowed_path() {
-        let dir = std::env::temp_dir().join("clawft_test_t18");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t18");
 
         let sandbox = sandbox_with_fs(vec![dir.to_string_lossy().to_string()]);
         let file = dir.join("new_file.txt");
@@ -1031,8 +1042,7 @@ mod tests {
 
     #[test]
     fn t19_fs_write_outside_allowed_path() {
-        let dir = std::env::temp_dir().join("clawft_test_t19_allowed");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t19_allowed");
 
         let sandbox = sandbox_with_fs(vec![dir.to_string_lossy().to_string()]);
         let result = validate_file_access(&sandbox, Path::new("/etc/new_file.txt"), true);
@@ -1160,8 +1170,7 @@ mod tests {
     #[test]
     fn t16_fs_path_traversal_blocked() {
         // T16: Path traversal via ../../ is blocked by canonicalization
-        let dir = std::env::temp_dir().join("clawft_test_t16");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t16");
 
         let sandbox = sandbox_with_fs(vec![dir.to_string_lossy().to_string()]);
         // Attempt to escape via path traversal
@@ -1181,8 +1190,7 @@ mod tests {
     #[test]
     fn t17_fs_symlink_escape_blocked() {
         // T17: Symlink pointing outside sandbox is detected
-        let dir = std::env::temp_dir().join("clawft_test_t17");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t17");
 
         let link_path = dir.join("escape_link");
         // Create symlink pointing outside sandbox (to /etc/hosts)
@@ -1209,8 +1217,7 @@ mod tests {
     #[test]
     fn t20_fs_large_file_blocked() {
         // T20: File larger than 8 MB is rejected for reads
-        let dir = std::env::temp_dir().join("clawft_test_t20");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_test_t20");
         let large_file = dir.join("large.bin");
 
         // Create a file > 8 MB (we'll use a sparse approach -- write small data then
@@ -1233,8 +1240,8 @@ mod tests {
     #[test]
     fn t22_fs_symlink_write_escape_blocked() {
         // T22: Write via symlink pointing outside sandbox is blocked
-        let dir = std::env::temp_dir().join("clawft_test_t22");
-        let outside = std::env::temp_dir().join("clawft_test_t22_outside");
+        let dir = canonical_temp_dir("clawft_test_t22");
+        let outside = canonical_temp_dir("clawft_test_t22_outside");
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::create_dir_all(&outside);
 

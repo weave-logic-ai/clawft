@@ -1,4 +1,4 @@
-//! WASM entrypoint for clawft.
+//! WASM entrypoint for clawft (browser + wasip2).
 //!
 //! This crate provides a WebAssembly build of the clawft agent core.
 //! It excludes components that require native OS features:
@@ -9,20 +9,24 @@
 //!
 //! # Platform Support
 //!
-//! The WASM build targets `wasm32-wasip2` and uses WASI preview 1 for:
-//! - HTTP outbound (LLM API calls)
-//! - Filesystem (config, sessions)
-//! - Environment variables
+//! - **Browser** (`--features browser`, target `wasm32-unknown-unknown`):
+//!   wasm-bindgen exports (`init`, `send_message`, …) over `BrowserPlatform`.
+//! - **WASI** (default path, target `wasm32-wasip2`): lightweight
+//!   `init` / `process_message` / `capabilities` stubs + platform shims.
 //!
-//! # Dependencies
+//! # Host-side plugin runtime (WEFT-398)
 //!
-//! This crate is intentionally decoupled from `clawft-core` and `clawft-platform`
-//! to avoid pulling in tokio["full"] and reqwest, neither of which compiles for
-//! WASM targets. It depends only on `clawft-types`, `serde`, and `serde_json`.
+//! The native **wasmtime host** (sandbox, engine, audit, permission store)
+//! lives in the dedicated [`clawft-wasm-host`] crate. Enable
+//! `--features wasm-plugins` on *this* crate only if you need the
+//! historical `clawft_wasm::{sandbox,engine,audit,permission_store}`
+//! re-export paths; new host code should depend on `clawft-wasm-host`
+//! directly.
 //!
 //! # Size Budget
 //!
-//! Target: < 300 KB uncompressed, < 120 KB gzipped.
+//! Target: < 300 KB uncompressed, < 120 KB gzipped (browser / wasip2
+//! entry only — host crate is not part of the browser bundle).
 
 #[cfg(feature = "alloc-tracing")]
 pub mod alloc_trace;
@@ -32,35 +36,34 @@ pub mod fs;
 pub mod http;
 pub mod platform;
 
+// ---------------------------------------------------------------------------
+// WEFT-398: re-export host modules for API compatibility
+// ---------------------------------------------------------------------------
+
 /// Plugin sandbox enforcement for WASM plugins.
 ///
-/// This module is only available when the `wasm-plugins` feature is enabled.
-/// It provides [`sandbox::PluginSandbox`], validation functions for HTTP,
-/// filesystem, and environment access, plus rate limiting and size enforcement.
+/// Implementation lives in [`clawft_wasm_host::sandbox`]. Available when
+/// the `wasm-plugins` feature is enabled (native host only).
 #[cfg(feature = "wasm-plugins")]
-pub mod sandbox;
+pub use clawft_wasm_host::sandbox;
 
 /// Audit logging for WASM plugin host function calls.
 ///
-/// Every host function invocation is recorded in a per-plugin audit log.
-/// This provides a tamper-evident record of all side-effecting operations.
+/// Implementation lives in [`clawft_wasm_host::audit`].
 #[cfg(feature = "wasm-plugins")]
-pub mod audit;
+pub use clawft_wasm_host::audit;
 
 /// WASM plugin engine with fuel metering and memory limits.
 ///
-/// Provides [`engine::WasmPluginEngine`] -- the host-side runtime for loading
-/// and executing WASM plugin modules with configurable resource limits.
+/// Implementation lives in [`clawft_wasm_host::engine`].
 #[cfg(feature = "wasm-plugins")]
-pub mod engine;
+pub use clawft_wasm_host::engine;
 
 /// Permission persistence and approval for WASM plugin upgrades.
 ///
-/// Provides [`permission_store::PermissionStore`] for saving/loading approved
-/// permissions, and [`permission_store::PermissionApprover`] for requesting
-/// user consent when a plugin upgrade introduces new permissions.
+/// Implementation lives in [`clawft_wasm_host::permission_store`].
 #[cfg(feature = "wasm-plugins")]
-pub mod permission_store;
+pub use clawft_wasm_host::permission_store;
 
 pub use platform::WasmPlatform;
 

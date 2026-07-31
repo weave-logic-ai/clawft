@@ -149,7 +149,7 @@ Feature: "native" (default for clawft-cli)
 ## Crate Dependency Graph
 
 ```
-                    clawft-wasm
+                    clawft-wasm          (browser / wasip2 entry)
                    /     |     \
                   /      |      \
      clawft-core    clawft-llm   clawft-tools
@@ -161,7 +161,19 @@ Feature: "native" (default for clawft-cli)
                     +----+-----+
                          |
                   [serde, serde_json]
+
+
+   clawft-wasm-host   (WEFT-398 — native wasmtime plugin host ONLY)
+          |
+     clawft-plugin
+          |
+   [wasmtime, sandbox, engine, audit, permission_store]
 ```
+
+`clawft-wasm-host` is **not** on the browser graph. Historical
+`--features wasm-plugins` on `clawft-wasm` re-exports its modules for
+API compatibility; new host code should depend on `clawft-wasm-host`
+directly. See [`docs/browser/crate-split.md`](crate-split.md).
 
 When the `browser` feature is enabled:
 

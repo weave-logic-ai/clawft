@@ -190,13 +190,28 @@ cargo build -p weftos --features full
 
 Default features: **none** (must pass `browser` for web).
 
+Browser / wasip2 **entrypoint only** (WEFT-398). Native wasmtime host code
+lives in `clawft-wasm-host`.
+
 | Feature | Enables |
 |---------|---------|
 | `browser` | clawft-core/llm/tools/platform + wasm-bindgen glue; propagates `*/browser` |
 | `browser-opfs` | OPFS persistence for BrowserFileSystem + BrowserEnvironment (implies `browser`) |
-| `wasm-plugins` | wasmtime host + plugin deps (native-side style host, not browser glue) |
+| `wasm-plugins` | **compat re-export** of `clawft-wasm-host` modules (`sandbox`, `engine`, `audit`, `permission_store`). Prefer depending on `clawft-wasm-host` directly. |
 | `alloc-talc` / `alloc-lol` | alternate WASM allocators |
 | `alloc-tracing` | allocation tracing marker |
+
+### `clawft-wasm-host`
+
+Native **wasmtime** plugin host (sandbox, engine, audit, permission store).
+No Cargo features required — the crate is host-only and is **not** part of
+the browser `cdylib` bundle. Build/test with:
+
+```bash
+cargo test -p clawft-wasm-host
+# Historical re-export path still works:
+cargo test -p clawft-wasm --features wasm-plugins
+```
 
 ### `clawft-gui-egui`
 

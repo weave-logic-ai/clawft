@@ -116,7 +116,7 @@ pub fn confirm_shell_skill(
 
 /// Simulated approved-permissions record for lifecycle tests (in-memory).
 ///
-/// Production persistence lives in `clawft-wasm::permission_store`; we
+/// Production persistence lives in `clawft-wasm-host::permission_store`; we
 /// only model the decision surface here so tests stay in clawft-plugin.
 #[derive(Debug, Clone)]
 pub struct InMemoryApprovalStore {

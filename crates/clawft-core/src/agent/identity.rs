@@ -238,7 +238,8 @@ pub fn soul_contains_binding_thread(soul: &str) -> bool {
 /// loader so they can be exercised against in-memory fixtures.
 /// Substrate-backed and journal-aware providers (WEFT-96 / WEFT-97)
 /// plug in here without caller-site changes.
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait IdentityProvider: Send + Sync + 'static {
     /// Return the current identity. Called once per turn; impls
     /// should be cheap (cached IO).
@@ -325,7 +326,8 @@ impl<P: Platform> FileIdentityProvider<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> IdentityProvider for FileIdentityProvider<P> {
     async fn current(&self) -> Result<Identity, IdentityError> {
         let watch_mode = self.watch_mode.load(Ordering::Acquire);
@@ -409,7 +411,8 @@ impl JournalAwareIdentityProvider {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl IdentityProvider for JournalAwareIdentityProvider {
     async fn current(&self) -> Result<Identity, IdentityError> {
         let mut id = self.base.current().await?;

@@ -8,7 +8,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "WASM entrypoint for clawft"
+description = "WASM entrypoint for clawft (browser + wasip2)"
 keywords = ["wasm", "wasi", "ai", "agent", "edge"]
 categories = ["wasm"]
 
@@ -40,16 +40,11 @@ browser-opfs = [
     "clawft-platform/browser-opfs",
     "clawft-tools/browser-opfs",
 ]
-wasm-plugins = [
-    "dep:clawft-plugin",
-    "dep:url",
-    "dep:regex",
-    "dep:tracing",
-    "dep:thiserror",
-    "dep:dirs",
-    "dep:chrono",
-    "dep:wasmtime",
-]
+# WEFT-398: host-side wasmtime plugin runtime lives in `clawft-wasm-host`.
+# This feature is a thin re-export for API compatibility with historical
+# `clawft_wasm::{sandbox,engine,audit,permission_store}` paths. Prefer
+# depending on `clawft-wasm-host` directly for new host code.
+wasm-plugins = ["dep:clawft-wasm-host"]
 alloc-talc = ["dep:talc"]
 alloc-lol = ["dep:lol_alloc"]
 alloc-tracing = []
@@ -69,20 +64,10 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = ["console"] }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
-
-# Behind wasm-plugins feature
-clawft-plugin = { workspace = true, optional = true }
-url = { version = "2", optional = true }
-regex = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
-dirs = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
-# WEFT-551: keep in lockstep with workspace wasmtime pin (45+ / MSRV 1.93).
-wasmtime = { version = "45", optional = true, default-features = false, features = ["cranelift", "runtime"] }
 
-[dev-dependencies]
-wat = "1"
+# Behind wasm-plugins feature (re-export only; implementation in clawft-wasm-host)
+clawft-wasm-host = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }

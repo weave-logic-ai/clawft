@@ -1,0 +1,43 @@
+[package]
+name = "clawft-wasm-host"
+version.workspace = true
+# Publishable: native wasmtime host for loading/executing WASM plugins.
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native wasmtime host runtime for clawft WASM plugins (sandbox, engine, audit, permissions)"
+keywords = ["wasm", "wasmtime", "plugin", "sandbox", "ai"]
+categories = ["wasm", "development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+# Host library only — never a cdylib / browser target.
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Reserved for future optional host surfaces (e.g. WASI component model).
+# The crate always includes sandbox + engine + audit + permission_store.
+
+[dependencies]
+clawft-plugin = { workspace = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = "2"
+regex = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+# WEFT-551: keep in lockstep with workspace wasmtime pin (45+ / MSRV 1.93).
+# Host uses cranelift + runtime only (no browser/wasm-bindgen).
+wasmtime = { workspace = true }
+
+[dev-dependencies]
+wat = "1"

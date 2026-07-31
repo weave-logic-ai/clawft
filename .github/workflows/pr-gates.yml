@@ -230,6 +230,37 @@ jobs:
         run: cargo check --workspace
 
   # -------------------------------------------------------------------
+  # WEFT-398: native wasmtime plugin host crate (split from clawft-wasm).
+  # Host code must keep compiling/testing independently of the browser
+  # cdylib; compat re-export via clawft-wasm --features wasm-plugins.
+  # -------------------------------------------------------------------
+  wasm-host-check:
+    name: WASM host crate (clawft-wasm-host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-host-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-host-
+
+      - name: Test clawft-wasm-host
+        run: cargo test -p clawft-wasm-host
+
+      - name: Check clawft-wasm wasm-plugins re-export
+        run: cargo check -p clawft-wasm --features wasm-plugins
+
+  # -------------------------------------------------------------------
   # Kernel WASM no-mesh: clawft-kernel on wasm32-unknown-unknown with
   # every default feature OFF (including mesh). HARD GATE (WEFT-114).
   #

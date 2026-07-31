@@ -1,6 +1,6 @@
 // WIT interface definition for clawft WASM plugins.
 //
-// This defines the contract between the host (clawft-wasm) and guest (plugin)
+// This defines the contract between the host (clawft-wasm-host) and guest (plugin)
 // for the WASM component model. Plugins import host functions and export
 // their own entry points.
 //

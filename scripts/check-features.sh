@@ -45,6 +45,21 @@ else
 fi
 echo ""
 
+# Gate 3b: WEFT-398 — native wasmtime plugin host crate
+echo "--- Gate 3b: clawft-wasm-host (WEFT-398) ---"
+if cargo test -p clawft-wasm-host --lib 2>&1; then
+    pass "clawft-wasm-host tests pass"
+else
+    fail "clawft-wasm-host tests failed"
+fi
+# Compat re-export: clawft-wasm --features wasm-plugins must still resolve.
+if cargo check -p clawft-wasm --features wasm-plugins 2>&1; then
+    pass "clawft-wasm wasm-plugins re-export compiles"
+else
+    fail "clawft-wasm wasm-plugins re-export failed"
+fi
+echo ""
+
 # Gate 4: WASI WASM (existing target)
 echo "--- Gate 4: WASI WASM ---"
 if rustup target list --installed | grep -q wasm32-wasip2; then

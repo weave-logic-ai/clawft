@@ -711,8 +711,7 @@ impl HostFunctionDispatcher {
             return;
         }
 
-        // Emit the log via tracing
-        #[cfg(feature = "wasm-plugins")]
+        // Emit the log via tracing (host crate always has tracing).
         {
             let plugin_id = &self.sandbox.plugin_id;
             match level {
@@ -750,6 +749,16 @@ impl HostFunctionDispatcher {
 mod tests {
     use super::*;
     use clawft_plugin::{PluginPermissions, PluginResourceConfig};
+
+
+    /// Canonical temp dir — see sandbox::tests::canonical_temp_dir for rationale
+    /// (macOS /var → /private/var intermediate symlink).
+    fn canonical_temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::canonicalize(&dir).expect("canonicalize temp dir")
+    }
+
 
     fn test_config() -> PluginConfig {
         PluginConfig::default_for("test-plugin")
@@ -1097,8 +1106,7 @@ mod tests {
     /// Verifies that every host function invocation produces an audit entry.
     #[test]
     fn t37_audit_all_host_functions() {
-        let dir = std::env::temp_dir().join("clawft_t37_audit");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_t37_audit");
         let file = dir.join("test.txt");
         std::fs::write(&file, "audit content").unwrap();
 
@@ -1222,8 +1230,7 @@ mod tests {
         let d_a = HostFunctionDispatcher::new(sandbox_a, audit_a);
 
         // Plugin B: filesystem access only
-        let dir = std::env::temp_dir().join("clawft_t40_isolation");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_t40_isolation");
         let file = dir.join("b_file.txt");
         std::fs::write(&file, "b content").unwrap();
 
@@ -1435,7 +1442,7 @@ mod tests {
         // Second invocation -- fresh store, full fuel budget
         let sandbox2 = test_sandbox(vec![], vec![], vec![]);
         let audit2 = Arc::new(AuditLog::new("test".into()));
-        let mut store2 = engine.create_store(&config, sandbox2, audit2).unwrap();
+        let store2 = engine.create_store(&config, sandbox2, audit2).unwrap();
         let fuel_before_2 = store2.get_fuel().unwrap();
 
         assert_eq!(
@@ -1496,8 +1503,7 @@ mod tests {
 
     #[test]
     fn dispatcher_read_file_within_sandbox() {
-        let dir = std::env::temp_dir().join("clawft_engine_read_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_engine_read_test");
         let file = dir.join("test.txt");
         std::fs::write(&file, "engine test content").unwrap();
 
@@ -1513,8 +1519,7 @@ mod tests {
 
     #[test]
     fn dispatcher_write_file_within_sandbox() {
-        let dir = std::env::temp_dir().join("clawft_engine_write_test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_engine_write_test");
 
         let d = test_dispatcher(vec![], vec![dir.to_string_lossy().to_string()], vec![]);
         let file = dir.join("output.txt");
@@ -1527,8 +1532,7 @@ mod tests {
 
     #[test]
     fn dispatcher_write_file_too_large() {
-        let dir = std::env::temp_dir().join("clawft_engine_write_large");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_engine_write_large");
 
         let d = test_dispatcher(vec![], vec![dir.to_string_lossy().to_string()], vec![]);
         let large = "x".repeat(5 * 1024 * 1024); // 5 MB > 4 MB limit
@@ -1709,8 +1713,7 @@ mod tests {
     #[test]
     fn t42_complete_audit_logging_verification() {
         // Set up temp directory for filesystem operations
-        let dir = std::env::temp_dir().join("clawft_t42_audit");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = canonical_temp_dir("clawft_t42_audit");
         let read_file = dir.join("readable.txt");
         std::fs::write(&read_file, "t42 readable content").unwrap();
 

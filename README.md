@@ -335,7 +335,8 @@ clawft-channels                Channel plugins
 clawft-services                Background services
 clawft-plugin-*                Plugin crates (git, cargo, oauth2, ...)
 clawft-security                Security policies
-clawft-wasm                    Browser WASM target
+clawft-wasm                    Browser / WASI WASM entrypoint
+clawft-wasm-host               Native wasmtime plugin host (WEFT-398)
 exo-resource-tree              Merkle resource tree with mutation log
 ```
 

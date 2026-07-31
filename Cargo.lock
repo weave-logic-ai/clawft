@@ -1859,27 +1859,37 @@ dependencies = [
  "clawft-core",
  "clawft-llm",
  "clawft-platform",
- "clawft-plugin",
  "clawft-tools",
  "clawft-types",
+ "clawft-wasm-host",
  "console_error_panic_hook",
- "dirs",
  "dlmalloc",
  "js-sys",
  "lol_alloc",
- "regex",
  "serde",
  "serde_json",
  "talc",
- "thiserror 2.0.18",
- "tracing",
- "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
+name = "clawft-wasm-host"
+version = "0.6.20"
+dependencies = [
+ "chrono",
+ "clawft-plugin",
+ "dirs",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
  "wasmtime",
  "wat",
- "web-sys",
 ]
 
 [[package]]

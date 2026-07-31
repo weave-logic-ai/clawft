@@ -17,7 +17,7 @@
 //!       v
 //! SandboxEnforcer (this module)
 //!       |
-//!       +---> WASM sandbox (clawft-wasm)
+//!       +---> WASM sandbox (clawft-wasm-host)
 //!       +---> OS sandbox (seccomp/landlock, Linux only)
 //! ```
 //!

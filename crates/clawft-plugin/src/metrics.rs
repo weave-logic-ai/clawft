@@ -1,7 +1,7 @@
 //! Per-plugin WASM fuel / memory observability (WEFT-68).
 //!
 //! Fuel and memory limits are enforced by the WASM host
-//! (`clawft-wasm::engine`). This module is the **observability surface**:
+//! (`clawft-wasm-host::engine`). This module is the **observability surface**:
 //! aggregate counters that plugin authors and operators can inspect to
 //! tune resource limits empirically.
 //!
