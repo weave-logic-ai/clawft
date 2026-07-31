@@ -43,6 +43,7 @@ Reports serialize to JSON (`VoiceBenchReport`) for CI artifacts.
 | Crate / path | Role |
 |--------------|------|
 | `clawft-bench-voice` | Voice latency / WER / CPU (this guide) |
+| `clawft-graphify::bench` | Graphify extraction + graph ops ([graphify-bench.md](graphify-bench.md)) |
 | `clawft-edge-bench` | ESP32-S3 edge compute/network scoring (out-of-workspace) |
 | `scripts/bench/` | Native binary startup / bundle size |
 | `clawft-core` criterion benches | Map contention, pipeline microbenches |

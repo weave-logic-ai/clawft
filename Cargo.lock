@@ -1304,6 +1304,7 @@ dependencies = [
  "blake3",
  "clawft-kernel",
  "clawft-treecalc",
+ "criterion",
  "dashmap",
  "eml-core",
  "html-escape",

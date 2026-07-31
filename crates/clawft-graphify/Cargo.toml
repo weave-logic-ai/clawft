@@ -97,3 +97,14 @@ tempfile = { workspace = true }
 # Prefer mockito over wiremock here: blocking reqwest cannot be used/dropped
 # inside a tokio async test context.
 mockito = "1"
+# WEFT-370 / GRAPH-041: criterion microbenches (extraction + graph_ops).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# WEFT-370: dedicated criterion targets named in MASTER_PLAN GRAPH-041.
+[[bench]]
+name = "extraction"
+harness = false
+
+[[bench]]
+name = "graph_ops"
+harness = false

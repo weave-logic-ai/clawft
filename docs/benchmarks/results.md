@@ -43,6 +43,24 @@ Key crate test counts (approximate):
 | clawft-cli | ~25 |
 | clawft-wasm | ~10 |
 
+## WEFT-370 — Graphify extraction + graph_ops (GRAPH-041)
+
+Harness: `clawft_graphify::bench` (mock CI path + criterion benches).
+
+```bash
+# CI-friendly (mock extraction, 128-node suite)
+scripts/build.sh test clawft-graphify
+
+# Criterion
+cargo bench -p clawft-graphify --bench extraction
+cargo bench -p clawft-graphify --bench graph_ops
+```
+
+See [docs/guides/graphify-bench.md](../guides/graphify-bench.md) for thresholds,
+API, and soak (`-- --ignored`) instructions. Numbers are host-dependent; the
+gate is structural (tests + optional regression ratio), not a checked-in
+baseline table.
+
 ## CONS-002 / WEFT-34 — Map contention (CostTracker / RateLimiter)
 
 **Decision (2026-07-30): keep `RwLock<HashMap>`; do not switch to DashMap.**

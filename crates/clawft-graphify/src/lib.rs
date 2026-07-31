@@ -15,6 +15,8 @@
 // Re-export core types at the crate root for convenience.
 pub mod alignment;
 pub mod analyze;
+// WEFT-370 / GRAPH-041: extraction + graph_ops benchmark harness.
+pub mod bench;
 pub mod build;
 pub mod cache;
 pub mod cluster;
