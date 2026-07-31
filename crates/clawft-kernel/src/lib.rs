@@ -178,6 +178,9 @@ pub mod capability;
 pub mod chain;
 #[cfg(feature = "exochain")]
 pub mod chain_anchor;
+// S10 key rotation needs Clock (mesh) + ChainManager (exochain). WEFT-107.
+#[cfg(all(feature = "exochain", feature = "mesh"))]
+pub mod key_rotation;
 pub mod cluster;
 pub mod config;
 pub mod console;
@@ -346,9 +349,16 @@ pub use causal_predict::{
 };
 #[cfg(feature = "exochain")]
 pub use chain::{
-    AnchorReceipt, ChainAnchor, ChainCheckpoint, ChainEvent, ChainLoggable, ChainManager,
-    ChainStatus, ChainVerifyResult, CustodyAttestation, GovernanceDecisionEvent,
+    AnchorReceipt, AppendSignedError, ChainAnchor, ChainCheckpoint, ChainEvent, ChainLoggable,
+    ChainManager, ChainStatus, ChainVerifyResult, CustodyAttestation, GovernanceDecisionEvent,
     IpcDeadLetterEvent, MockAnchor, RestartEvent,
+};
+#[cfg(all(feature = "exochain", feature = "mesh"))]
+pub use key_rotation::{
+    DEFAULT_GRACE_PERIOD_SECS, KIND_KEY_ROTATION, SOURCE_IDENTITY, KeyRotationError,
+    KeyRotationPayload, KeyRotationVerifier, build_key_rotation_payload, format_rotation_summary,
+    rotate_chain_signing_key, rotate_chain_signing_key_now, verify_key_rotation_event,
+    verify_key_rotation_payload,
 };
 #[cfg(feature = "exochain")]
 pub use chain_anchor::{

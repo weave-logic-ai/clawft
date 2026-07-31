@@ -707,32 +707,131 @@ impl MeshRuntime {
         self.discovery.as_ref()
     }
 
-    // ── Chain sync stubs ──────────────────────────────────────────
+    // ── Chain sync (WEFT-105 / K6.4) ──────────────────────────────
 
     /// Build a serialized [`ChainSyncRequest`] for sending to a peer.
     ///
     /// The request asks for chain events starting after `from_seq`.
-    /// This is a stub — the actual chain integration will replay
-    /// received events into the local chain manager.
+    /// When a chain manager is attached, `after_hash` is filled from the
+    /// local tip at `from_seq` (or the head hash when `from_seq` is the tip).
     pub fn build_chain_sync_request(&self, from_seq: u64) -> Vec<u8> {
+        let (after_hash, chain_id) = self.chain_tip_meta(from_seq);
         let req = ChainSyncRequest {
-            chain_id: 0,
+            chain_id,
             after_sequence: from_seq,
-            after_hash: String::new(),
+            after_hash,
             max_events: 256,
         };
         serde_json::to_vec(&req).unwrap_or_default()
     }
 
-    /// Handle an incoming chain sync response.
+    /// Build a chain sync **response** from the local chain (server side).
     ///
-    /// Deserializes the data and returns the number of events contained.
-    /// This is a stub — the actual implementation will replay events
-    /// into the local chain manager.
+    /// Returns `None` when no chain manager is attached.
+    #[cfg(feature = "exochain")]
+    pub fn build_chain_sync_response(
+        &self,
+        after_sequence: u64,
+        max_events: u32,
+    ) -> Option<ChainSyncResponse> {
+        let cm = self.chain_manager.get()?;
+        let mut events = cm.tail_from(after_sequence);
+        let has_more = events.len() > max_events as usize;
+        if has_more {
+            events.truncate(max_events as usize);
+        }
+        let json_events: Vec<serde_json::Value> = events
+            .iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect();
+        Some(ChainSyncResponse {
+            chain_id: cm.chain_id(),
+            events: json_events,
+            has_more,
+            tip_sequence: cm.head_sequence(),
+            tip_hash: cm
+                .head_hash()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        })
+    }
+
+    /// Handle an incoming chain sync response by replaying remote events
+    /// into the local [`ChainManager`] via [`ChainManager::append_signed`].
+    ///
+    /// Returns the number of events **newly applied** (idempotent skips
+    /// are not counted). When no chain manager is attached, returns the
+    /// number of events in the payload without applying them (legacy /
+    /// transport-only callers).
+    ///
+    /// Merge policy (ADR-089): linear catch-up only. A hash mismatch at
+    /// the same sequence surfaces as a mesh error (fork) rather than
+    /// silent overwrite — multi-parent merge commits are a later layer.
     pub fn handle_chain_sync_response(&self, data: &[u8]) -> KernelResult<usize> {
         let resp: ChainSyncResponse = serde_json::from_slice(data)
             .map_err(|e| KernelError::Mesh(format!("chain sync deserialize error: {e}")))?;
+
+        #[cfg(feature = "exochain")]
+        {
+            if let Some(cm) = self.chain_manager.get() {
+                let mut applied = 0usize;
+                for value in &resp.events {
+                    let event: crate::chain::ChainEvent = serde_json::from_value(value.clone())
+                        .map_err(|e| {
+                            KernelError::Mesh(format!("chain sync event decode: {e}"))
+                        })?;
+                    match cm.append_signed(event) {
+                        Ok(_) => applied += 1,
+                        Err(crate::chain::AppendSignedError::AlreadyPresent { .. }) => {}
+                        Err(e) => {
+                            return Err(KernelError::Mesh(format!(
+                                "chain sync append_signed: {e}"
+                            )));
+                        }
+                    }
+                }
+                debug!(
+                    applied,
+                    batch = resp.events.len(),
+                    tip = resp.tip_sequence,
+                    "chain sync response applied"
+                );
+                return Ok(applied);
+            }
+        }
+
         Ok(resp.events.len())
+    }
+
+    #[cfg(feature = "exochain")]
+    fn chain_tip_meta(&self, from_seq: u64) -> (String, u32) {
+        if let Some(cm) = self.chain_manager.get() {
+            let hash = if from_seq == 0 && cm.head_sequence() == 0 {
+                cm.head_hash()
+            } else {
+                cm.tail_from(from_seq.saturating_sub(1))
+                    .first()
+                    .map(|e| e.prev_hash)
+                    .unwrap_or_else(|| cm.head_hash())
+            };
+            // Prefer the event at `from_seq` if present.
+            let hash = cm
+                .tail(0)
+                .into_iter()
+                .find(|e| e.sequence == from_seq)
+                .map(|e| e.hash)
+                .unwrap_or(hash);
+            let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+            (hex, cm.chain_id())
+        } else {
+            (String::new(), 0)
+        }
+    }
+
+    #[cfg(not(feature = "exochain"))]
+    fn chain_tip_meta(&self, _from_seq: u64) -> (String, u32) {
+        (String::new(), 0)
     }
 }
 
@@ -1314,7 +1413,7 @@ mod tests {
         assert_eq!(req.max_events, 256);
     }
 
-    // ── Test 21: chain sync response handling ────────────────────
+    // ── Test 21: chain sync response handling (no chain attached) ─
 
     #[test]
     fn chain_sync_response_handling() {
@@ -1332,6 +1431,7 @@ mod tests {
         };
         let data = serde_json::to_vec(&resp).unwrap();
 
+        // Without a chain manager, events are counted but not applied.
         let count = rt.handle_chain_sync_response(&data).unwrap();
         assert_eq!(count, 2);
     }
@@ -1343,6 +1443,50 @@ mod tests {
         let rt = MeshRuntime::new("sync-node".into());
         let err = rt.handle_chain_sync_response(b"bad json").unwrap_err();
         assert!(err.to_string().contains("chain sync deserialize"));
+    }
+
+    // ── Test 22b: two-node chain convergence via append_signed ───
+
+    /// WEFT-105: source node is ahead; sink shares genesis and catches up
+    /// via chain sync response → both tips converge.
+    #[cfg(feature = "exochain")]
+    #[test]
+    fn two_node_chain_sync_convergence() {
+        use crate::chain::ChainManager;
+        use std::sync::Arc;
+
+        let source_cm = Arc::new(ChainManager::new(0, 1000));
+        source_cm.append("mesh", "peer.join", Some(serde_json::json!({"id": "a"})));
+        source_cm.append("mesh", "peer.join", Some(serde_json::json!({"id": "b"})));
+        source_cm.append("kernel", "boot", None);
+
+        // Sink starts from the same cluster genesis (shared identity).
+        let genesis = source_cm.tail(0)[0].clone();
+        let sink_cm = Arc::new(ChainManager::from_events(vec![genesis], 1000).unwrap());
+        assert!(sink_cm.head_sequence() < source_cm.head_sequence());
+
+        let source_rt = MeshRuntime::new("source".into());
+        source_rt.set_chain_manager(source_cm.clone());
+        let sink_rt = MeshRuntime::new("sink".into());
+        sink_rt.set_chain_manager(sink_cm.clone());
+
+        let after = sink_cm.head_sequence();
+        let resp = source_rt
+            .build_chain_sync_response(after, 256)
+            .expect("source has chain");
+        assert!(!resp.events.is_empty());
+        let data = serde_json::to_vec(&resp).unwrap();
+
+        let applied = sink_rt.handle_chain_sync_response(&data).unwrap();
+        assert_eq!(applied, 3);
+        assert_eq!(sink_cm.head_sequence(), source_cm.head_sequence());
+        assert_eq!(sink_cm.head_hash(), source_cm.head_hash());
+
+        // Second sync is idempotent — zero new applies.
+        let resp2 = source_rt
+            .build_chain_sync_response(sink_cm.head_sequence(), 256)
+            .unwrap();
+        assert!(resp2.events.is_empty());
     }
 
     // ── Test 23: inbound peer auto-registered, topic forwarded ───

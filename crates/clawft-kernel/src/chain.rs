@@ -184,6 +184,43 @@ pub struct ChainEvent {
 /// the whole chain. Configurable in a future pass if needed.
 pub const IDEMPOTENCY_LOOKBACK: usize = 1000;
 
+/// Errors from [`ChainManager::append_signed`] (WEFT-105 / K6.4 replay).
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum AppendSignedError {
+    /// Event with this sequence and hash is already on the local chain.
+    #[error("event seq {sequence} already present (idempotent skip)")]
+    AlreadyPresent { sequence: u64 },
+    /// Same sequence, different hash — DAG tip conflict (ADR-089).
+    #[error("fork at seq {sequence}: local and remote hashes diverge")]
+    Fork {
+        sequence: u64,
+        local_hash: [u8; 32],
+        remote_hash: [u8; 32],
+    },
+    /// Remote event skips ahead of the next expected sequence.
+    #[error("gap: expected seq {expected}, got {got}")]
+    Gap { expected: u64, got: u64 },
+    /// Chain ID mismatch between local and remote event.
+    #[error("chain_id mismatch: local={local}, remote={remote}")]
+    ChainIdMismatch { local: u32, remote: u32 },
+    /// `prev_hash` does not link to the local tip.
+    #[error("prev_hash mismatch at append")]
+    PrevHashMismatch {
+        expected: [u8; 32],
+        got: [u8; 32],
+    },
+    /// Stored `payload_hash` does not match a recomputation of the payload.
+    #[error("payload_hash mismatch at seq {sequence}")]
+    PayloadHashMismatch { sequence: u64 },
+    /// Stored event hash does not match a recomputation of the commitment.
+    #[error("event hash mismatch at seq {sequence}")]
+    HashMismatch {
+        sequence: u64,
+        recomputed: [u8; 32],
+        stored: [u8; 32],
+    },
+}
+
 /// A checkpoint snapshot of the chain state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainCheckpoint {
@@ -1021,6 +1058,37 @@ impl ChainManager {
         Self::new(0, 1000)
     }
 
+    /// Restore a chain manager from a verified event prefix (WEFT-105).
+    ///
+    /// Used when a joining node already shares a common genesis / prefix
+    /// with a peer (same cluster identity). Events must be non-empty and
+    /// pass integrity verification.
+    pub fn from_events(
+        events: Vec<ChainEvent>,
+        checkpoint_interval: u64,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if events.is_empty() {
+            return Err("from_events: empty event list".into());
+        }
+        let chain_id = events[0].chain_id;
+        let chain = LocalChain::from_events(chain_id, checkpoint_interval, events, Vec::new());
+        let mgr = Self {
+            inner: Mutex::new(chain),
+            signing_key: None,
+            ml_dsa_key: None,
+        };
+        let result = mgr.verify_integrity();
+        if !result.valid {
+            return Err(format!(
+                "from_events integrity check failed: {} errors ({})",
+                result.errors.len(),
+                result.errors.first().cloned().unwrap_or_default()
+            )
+            .into());
+        }
+        Ok(mgr)
+    }
+
     /// Attach an Ed25519 signing key for RVF segment signing.
     pub fn with_signing_key(mut self, key: SigningKey) -> Self {
         self.signing_key = Some(key);
@@ -1041,6 +1109,11 @@ impl ChainManager {
     /// Whether this chain manager has a signing key attached.
     pub fn has_signing_key(&self) -> bool {
         self.signing_key.is_some()
+    }
+
+    /// Clone the Ed25519 signing key (for key rotation, WEFT-107).
+    pub fn signing_key_clone(&self) -> Option<SigningKey> {
+        self.signing_key.clone()
     }
 
     /// Set the ML-DSA-65 key for post-quantum dual signing.
@@ -1208,6 +1281,122 @@ impl ChainManager {
             .filter(|e| e.sequence > after)
             .cloned()
             .collect()
+    }
+
+    /// Append a remote (pre-built) chain event after verifying hash linkage
+    /// (WEFT-105 / K6.4 chain replay).
+    ///
+    /// Unlike [`Self::append`], this does **not** re-hash or re-timestamp the
+    /// event — the remote node's event is accepted as-is when:
+    ///
+    /// 1. `event.chain_id` matches the local chain
+    /// 2. `event.sequence` equals the next expected sequence
+    /// 3. `event.prev_hash` equals the local tip hash
+    /// 4. `event.payload_hash` matches a recomputation of the payload
+    /// 5. `event.hash` matches a recomputation of the event commitment
+    ///
+    /// Idempotent: if an event with the same sequence **and** hash already
+    /// exists, returns [`AppendSignedError::AlreadyPresent`].
+    ///
+    /// Fork policy (ADR-089): same sequence with a different hash returns
+    /// [`AppendSignedError::Fork`] — tips are retained by rejecting silent
+    /// overwrite; higher-level merge commits are out of scope for linear
+    /// catch-up replay.
+    pub fn append_signed(&self, event: ChainEvent) -> Result<ChainEvent, AppendSignedError> {
+        let mut chain = self.inner.lock().unwrap();
+
+        // Idempotent: already have this exact event.
+        if let Some(existing) = chain.events.iter().find(|e| e.sequence == event.sequence) {
+            if existing.hash == event.hash {
+                return Err(AppendSignedError::AlreadyPresent {
+                    sequence: event.sequence,
+                });
+            }
+            return Err(AppendSignedError::Fork {
+                sequence: event.sequence,
+                local_hash: existing.hash,
+                remote_hash: event.hash,
+            });
+        }
+
+        if event.chain_id != chain.chain_id {
+            return Err(AppendSignedError::ChainIdMismatch {
+                local: chain.chain_id,
+                remote: event.chain_id,
+            });
+        }
+
+        let expected_seq = chain.sequence;
+        if event.sequence < expected_seq {
+            // Behind tip and not an exact match (handled above) → fork or gap
+            // in history we already advanced past.
+            return Err(AppendSignedError::Fork {
+                sequence: event.sequence,
+                local_hash: chain
+                    .events
+                    .iter()
+                    .find(|e| e.sequence == event.sequence)
+                    .map(|e| e.hash)
+                    .unwrap_or([0u8; 32]),
+                remote_hash: event.hash,
+            });
+        }
+        if event.sequence > expected_seq {
+            return Err(AppendSignedError::Gap {
+                expected: expected_seq,
+                got: event.sequence,
+            });
+        }
+
+        if event.prev_hash != chain.last_hash {
+            return Err(AppendSignedError::PrevHashMismatch {
+                expected: chain.last_hash,
+                got: event.prev_hash,
+            });
+        }
+
+        let recomputed_payload = compute_payload_hash(&event.payload);
+        if event.payload_hash != recomputed_payload {
+            return Err(AppendSignedError::PayloadHashMismatch {
+                sequence: event.sequence,
+            });
+        }
+
+        let recomputed = compute_event_hash(
+            event.sequence,
+            event.chain_id,
+            &event.prev_hash,
+            &event.source,
+            &event.kind,
+            &event.timestamp,
+            &event.payload_hash,
+        );
+        if event.hash != recomputed {
+            return Err(AppendSignedError::HashMismatch {
+                sequence: event.sequence,
+                recomputed,
+                stored: event.hash,
+            });
+        }
+
+        // Accept remote event as-is.
+        chain.witness_entries.push(WitnessEntry {
+            prev_hash: [0u8; 32], // linked at serialization time
+            action_hash: event.hash,
+            timestamp_ns: event.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
+            witness_type: WITNESS_PROVENANCE,
+        });
+        chain.last_hash = event.hash;
+        chain.sequence = event.sequence.saturating_add(1);
+        chain.events_since_checkpoint = chain.events_since_checkpoint.saturating_add(1);
+        chain.events.push(event);
+        if chain.checkpoint_interval > 0
+            && chain.events_since_checkpoint >= chain.checkpoint_interval
+        {
+            let _ = chain.create_checkpoint();
+        }
+
+        Ok(chain.events.last().cloned().expect("just pushed"))
     }
 
     /// Get the current head sequence number (sequence of the last event).
@@ -2661,6 +2850,58 @@ mod tests {
         let head_seq = cm.head_sequence();
         let after = cm.tail_from(head_seq);
         assert!(after.is_empty());
+    }
+
+    /// WEFT-105: remote events apply via append_signed with hash verification.
+    /// Sink shares the source genesis (same cluster prefix).
+    #[test]
+    fn append_signed_replays_remote_events() {
+        let source = ChainManager::new(0, 1000);
+        source.append("test", "a", Some(serde_json::json!({"n": 1})));
+        source.append("test", "b", Some(serde_json::json!({"n": 2})));
+        let remote_events = source.tail_from(0);
+        assert_eq!(remote_events.len(), 2);
+
+        let genesis = source.tail(0)[0].clone();
+        let sink = ChainManager::from_events(vec![genesis], 1000).unwrap();
+
+        for ev in remote_events {
+            sink.append_signed(ev).unwrap();
+        }
+        assert_eq!(sink.head_sequence(), source.head_sequence());
+        assert_eq!(sink.head_hash(), source.head_hash());
+        assert_eq!(sink.len(), source.len());
+    }
+
+    #[test]
+    fn append_signed_idempotent_and_rejects_tamper() {
+        let source = ChainManager::new(0, 1000);
+        let e = source.append("test", "x", None);
+
+        let genesis = source.tail(0)[0].clone();
+        let sink = ChainManager::from_events(vec![genesis], 1000).unwrap();
+        sink.append_signed(e.clone()).unwrap();
+        let err = sink.append_signed(e.clone()).unwrap_err();
+        assert!(matches!(err, AppendSignedError::AlreadyPresent { .. }));
+
+        let mut tampered = e;
+        tampered.hash[0] ^= 0xFF;
+        // sequence already present with different hash → fork
+        let err = sink.append_signed(tampered).unwrap_err();
+        assert!(matches!(err, AppendSignedError::Fork { .. }));
+    }
+
+    #[test]
+    fn append_signed_gap_when_skip_sequence() {
+        let source = ChainManager::new(0, 1000);
+        source.append("test", "a", None);
+        let e2 = source.append("test", "b", None);
+
+        let genesis = source.tail(0)[0].clone();
+        let sink = ChainManager::from_events(vec![genesis], 1000).unwrap();
+        // Skip event "a" (seq 1), try to append "b" (seq 2)
+        let err = sink.append_signed(e2).unwrap_err();
+        assert!(matches!(err, AppendSignedError::Gap { expected: 1, got: 2 }));
     }
 
     #[test]

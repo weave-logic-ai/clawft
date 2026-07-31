@@ -110,14 +110,121 @@ impl TreeManager {
     ///
     /// Format: `"<operation>|<path>|<timestamp_rfc3339>"` encoded as UTF-8.
     #[cfg(feature = "exochain")]
+    pub fn mutation_canonical_bytes(
+        operation: &str,
+        path: &str,
+        timestamp: &chrono::DateTime<Utc>,
+    ) -> Vec<u8> {
+        format!("{operation}|{path}|{}", timestamp.to_rfc3339()).into_bytes()
+    }
+
+    /// Build the canonical bytes for a mutation signature.
+    ///
+    /// Format: `"<operation>|<path>|<timestamp_rfc3339>"` encoded as UTF-8.
+    #[cfg(feature = "exochain")]
     fn mutation_signature(
         &self,
         operation: &str,
         path: &str,
         timestamp: &chrono::DateTime<Utc>,
     ) -> Option<Vec<u8>> {
-        let canonical = format!("{operation}|{path}|{}", timestamp.to_rfc3339());
-        self.sign_bytes(canonical.as_bytes())
+        let canonical = Self::mutation_canonical_bytes(operation, path, timestamp);
+        self.sign_bytes(&canonical)
+    }
+
+    /// Extract (operation, path, timestamp, signature) from a mutation event.
+    #[cfg(feature = "exochain")]
+    pub fn mutation_sign_parts(
+        event: &MutationEvent,
+    ) -> Option<(String, String, chrono::DateTime<Utc>, Option<Vec<u8>>)> {
+        match event {
+            MutationEvent::Create {
+                id,
+                timestamp,
+                signature,
+                ..
+            } => Some((
+                "create".into(),
+                id.to_string(),
+                *timestamp,
+                signature.clone(),
+            )),
+            MutationEvent::Remove {
+                id,
+                timestamp,
+                signature,
+            } => Some((
+                "remove".into(),
+                id.to_string(),
+                *timestamp,
+                signature.clone(),
+            )),
+            MutationEvent::UpdateMeta {
+                id,
+                timestamp,
+                signature,
+                ..
+            } => Some((
+                "update_meta".into(),
+                id.to_string(),
+                *timestamp,
+                signature.clone(),
+            )),
+            MutationEvent::Move {
+                id,
+                timestamp,
+                signature,
+                ..
+            } => Some((
+                "move".into(),
+                id.to_string(),
+                *timestamp,
+                signature.clone(),
+            )),
+            MutationEvent::UpdateScoring {
+                id,
+                timestamp,
+                signature,
+                ..
+            } => Some((
+                "update_scoring".into(),
+                id.to_string(),
+                *timestamp,
+                signature.clone(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Verify an Ed25519 signature on a mutation event (WEFT-144).
+    ///
+    /// Returns `Ok(())` when the signature is present and valid under
+    /// `pubkey`. Errors when the signature is missing, malformed, or
+    /// does not verify.
+    #[cfg(feature = "exochain")]
+    pub fn verify_mutation_signature(
+        event: &MutationEvent,
+        pubkey: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use ed25519_dalek::{Signature, Verifier};
+
+        let (op, path, ts, sig_opt) = Self::mutation_sign_parts(event)
+            .ok_or("unsupported mutation variant for signature verification")?;
+        let sig_bytes = sig_opt.ok_or("mutation event has no signature")?;
+        if sig_bytes.len() != 64 {
+            return Err(format!(
+                "mutation signature length {}, expected 64",
+                sig_bytes.len()
+            )
+            .into());
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&sig_bytes);
+        let sig = Signature::from_bytes(&arr);
+        let canonical = Self::mutation_canonical_bytes(&op, &path, &ts);
+        pubkey
+            .verify(&canonical, &sig)
+            .map_err(|e| format!("mutation signature verify failed: {e}").into())
     }
 
     /// Bootstrap the tree with well-known WeftOS namespaces.
@@ -1149,11 +1256,32 @@ impl TreeManager {
     /// Apply a remote mutation received from a peer node.
     /// Records the mutation in the local log.
     ///
-    /// **Security note** (K6.4): Full implementation should verify
-    /// `event.signature` against the sending node's Ed25519 public key
-    /// before applying. Currently signature verification is deferred to
-    /// the mesh transport layer (Noise channel authenticates the peer).
+    /// Does **not** verify signatures — prefer
+    /// [`Self::apply_remote_mutation_verified`] for cross-node events
+    /// (WEFT-144). Kept for local/unsigned bootstrap paths.
     pub fn apply_remote_mutation(
+        &self,
+        event: MutationEvent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.apply_remote_mutation_inner(event)
+    }
+
+    /// Apply a remote mutation after verifying its Ed25519 signature
+    /// against the peer's public key (WEFT-144).
+    ///
+    /// Rejects missing, malformed, and invalid signatures. Create is
+    /// idempotent when the node already exists (replay-safe).
+    #[cfg(feature = "exochain")]
+    pub fn apply_remote_mutation_verified(
+        &self,
+        event: MutationEvent,
+        peer_pubkey: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Self::verify_mutation_signature(&event, peer_pubkey)?;
+        self.apply_remote_mutation_inner(event)
+    }
+
+    fn apply_remote_mutation_inner(
         &self,
         event: MutationEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1162,6 +1290,14 @@ impl TreeManager {
             .mutation_log
             .lock()
             .map_err(|e| format!("log lock: {e}"))?;
+
+        // Replay defense: reject exact duplicate of the latest event
+        // for the same operation identity (kind + id + timestamp).
+        if let Some(last) = log.events().last() {
+            if mutation_event_eq(last, &event) {
+                return Err("mutation replay rejected: exact duplicate of last event".into());
+            }
+        }
 
         // Apply based on mutation type
         match &event {
@@ -1206,6 +1342,59 @@ impl TreeManager {
         log.append(event);
 
         Ok(())
+    }
+}
+
+/// Structural equality for mutation replay detection (ignores signature
+/// byte-identity only when both sides carry the same fields).
+fn mutation_event_eq(a: &MutationEvent, b: &MutationEvent) -> bool {
+    use MutationEvent::*;
+    match (a, b) {
+        (
+            Create {
+                id: id_a,
+                kind: k_a,
+                parent: p_a,
+                timestamp: t_a,
+                ..
+            },
+            Create {
+                id: id_b,
+                kind: k_b,
+                parent: p_b,
+                timestamp: t_b,
+                ..
+            },
+        ) => id_a == id_b && k_a == k_b && p_a == p_b && t_a == t_b,
+        (
+            Remove {
+                id: id_a,
+                timestamp: t_a,
+                ..
+            },
+            Remove {
+                id: id_b,
+                timestamp: t_b,
+                ..
+            },
+        ) => id_a == id_b && t_a == t_b,
+        (
+            UpdateMeta {
+                id: id_a,
+                key: key_a,
+                value: v_a,
+                timestamp: t_a,
+                ..
+            },
+            UpdateMeta {
+                id: id_b,
+                key: key_b,
+                value: v_b,
+                timestamp: t_b,
+                ..
+            },
+        ) => id_a == id_b && key_a == key_b && v_a == v_b && t_a == t_b,
+        _ => false,
     }
 }
 
@@ -1991,5 +2180,79 @@ mod tests {
                 assert!(signature.is_none(), "should be None without signing key");
             }
         }
+    }
+
+    /// WEFT-144: valid signature applies; tampered rejects; replay rejects.
+    #[test]
+    fn remote_mutation_signature_valid_tampered_replay() {
+        use ed25519_dalek::Signer;
+
+        let chain = test_chain();
+        let mut tm = TreeManager::new(Arc::clone(&chain));
+        let key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let vk = key.verifying_key();
+        tm.set_signing_key(key.clone());
+        tm.bootstrap().unwrap();
+
+        let ts = Utc::now();
+        let path = "/kernel/services/verified_svc";
+        let canonical = TreeManager::mutation_canonical_bytes("create", path, &ts);
+        let sig = key.sign(&canonical).to_bytes().to_vec();
+
+        let event = MutationEvent::Create {
+            id: ResourceId::new(path),
+            kind: ResourceKind::Service,
+            parent: ResourceId::new("/kernel/services"),
+            timestamp: ts,
+            signature: Some(sig.clone()),
+        };
+
+        // Valid signature applies.
+        tm.apply_remote_mutation_verified(event.clone(), &vk)
+            .unwrap();
+        {
+            let tree = tm.tree().lock().unwrap();
+            assert!(tree.get(&ResourceId::new(path)).is_some());
+        }
+
+        // Replay of the exact same event is rejected.
+        let replay_err = tm
+            .apply_remote_mutation_verified(event.clone(), &vk)
+            .unwrap_err();
+        assert!(
+            replay_err.to_string().contains("replay"),
+            "expected replay reject, got {replay_err}"
+        );
+
+        // Tampered signature rejected.
+        let mut bad_sig = sig;
+        bad_sig[0] ^= 0xFF;
+        let tampered = MutationEvent::Create {
+            id: ResourceId::new("/kernel/services/tampered_svc"),
+            kind: ResourceKind::Service,
+            parent: ResourceId::new("/kernel/services"),
+            timestamp: ts,
+            signature: Some(bad_sig),
+        };
+        let err = tm
+            .apply_remote_mutation_verified(tampered, &vk)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("verify") || err.to_string().contains("signature"),
+            "expected verify failure, got {err}"
+        );
+
+        // Missing signature rejected by verified path.
+        let unsigned = MutationEvent::Create {
+            id: ResourceId::new("/kernel/services/unsigned_remote"),
+            kind: ResourceKind::Service,
+            parent: ResourceId::new("/kernel/services"),
+            timestamp: Utc::now(),
+            signature: None,
+        };
+        let err = tm
+            .apply_remote_mutation_verified(unsigned, &vk)
+            .unwrap_err();
+        assert!(err.to_string().contains("no signature"));
     }
 }

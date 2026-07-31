@@ -88,6 +88,22 @@ pub enum KernelAction {
         #[arg(short, long)]
         level: Option<String>,
     },
+
+    /// Rotate the node Ed25519 identity key (S10 / WEFT-107).
+    ///
+    /// Generates a new keypair, dual-signs an `identity.key_rotation`
+    /// ExoChain event with both old and new keys, appends it to the local
+    /// chain export, and replaces `<runtime>/node.key`.
+    #[command(name = "rotate-key")]
+    RotateKey {
+        /// Grace period in seconds during which the old key remains trusted.
+        #[arg(long, default_value_t = 86_400)]
+        grace_period_secs: u64,
+
+        /// Dry-run: build and verify the dual-signed payload without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Run the kernel subcommand.
@@ -233,6 +249,12 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 print_ps(&kernel);
             }
         }
+        KernelAction::RotateKey {
+            grace_period_secs,
+            dry_run,
+        } => {
+            run_rotate_key(grace_period_secs, dry_run)?;
+        }
         KernelAction::Attach { tail, level } => {
             let mut client = DaemonClient::connect().await.ok_or_else(|| {
                 anyhow::anyhow!("no daemon running (use 'weaver kernel start' first)")
@@ -346,6 +368,93 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ── S10 key rotation (WEFT-107) ───────────────────────────────────
+
+/// Rotate the node identity key: dual-sign chain event + rewrite node.key.
+fn run_rotate_key(grace_period_secs: u64, dry_run: bool) -> anyhow::Result<()> {
+    use clawft_kernel::{
+        ChainManager, DEFAULT_GRACE_PERIOD_SECS, format_rotation_summary,
+        rotate_chain_signing_key_now, verify_key_rotation_event,
+    };
+    use ed25519_dalek::SigningKey;
+    use std::fs;
+    use std::path::PathBuf;
+
+    let grace = if grace_period_secs == 0 {
+        DEFAULT_GRACE_PERIOD_SECS
+    } else {
+        grace_period_secs
+    };
+
+    let runtime_dir = protocol::runtime_dir();
+    fs::create_dir_all(&runtime_dir)?;
+    let key_path: PathBuf = runtime_dir.join("node.key");
+
+    // Load or generate current identity (same layout as node_identity).
+    let old_key = if key_path.exists() {
+        let bytes = fs::read(&key_path)?;
+        if bytes.len() != 32 {
+            anyhow::bail!(
+                "node.key at {} is malformed (expected 32 bytes, got {})",
+                key_path.display(),
+                bytes.len()
+            );
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&bytes);
+        SigningKey::from_bytes(&seed)
+    } else {
+        eprintln!(
+            "(no {} — generating a temporary identity for rotation)",
+            key_path.display()
+        );
+        let mut seed = [0u8; 32];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        SigningKey::from_bytes(&seed)
+    };
+
+    let mut chain = ChainManager::new(0, 1000).with_signing_key(old_key);
+    let (event, new_key) = rotate_chain_signing_key_now(&mut chain, grace)
+        .map_err(|e| anyhow::anyhow!("key rotation failed: {e}"))?;
+    let payload = verify_key_rotation_event(&event)
+        .map_err(|e| anyhow::anyhow!("post-rotate verify failed: {e}"))?;
+
+    let new_pk = new_key.verifying_key().to_bytes();
+    let new_node_id = clawft_kernel::node_id_from_pubkey(&new_pk);
+    println!("{}", format_rotation_summary(&event, &payload, &new_node_id));
+
+    if dry_run {
+        println!("dry-run: no files written");
+        return Ok(());
+    }
+
+    // Persist new key with 0600 perms.
+    fs::write(&key_path, new_key.to_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&key_path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&key_path, perms)?;
+    }
+
+    // Append rotation event to local chain export (best-effort).
+    let chain_dir = runtime_dir.join("chain");
+    fs::create_dir_all(&chain_dir)?;
+    let chain_path = chain_dir.join("local.jsonl");
+    if let Err(e) = chain.save_to_file(&chain_path) {
+        eprintln!("warning: failed to save chain export: {e}");
+    } else {
+        println!("chain export: {}", chain_path.display());
+    }
+    println!("new key written: {}", key_path.display());
+    println!(
+        "note: restart the daemon (`weaver kernel restart`) so peers pick up the new identity"
+    );
     Ok(())
 }
 
