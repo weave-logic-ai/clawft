@@ -104,6 +104,20 @@ pub use weftos_worldmodel_impls::{
 #[cfg_attr(docsrs, doc(cfg(feature = "candle")))]
 pub use weftos_worldmodel_impls::{candle_cpu_device, AdaLnPredictor, CandleVitEncoder, VitTinyConfig};
 
+// ── ServiceApi-shaped LatticeApi facade (WEFT-527) ─────────────────────────
+/// LatticeApi via ServiceApi-shaped call surface (requires `service-api`).
+#[cfg(feature = "service-api")]
+#[cfg_attr(docsrs, doc(cfg(feature = "service-api")))]
+pub mod service_api;
+
+#[cfg(feature = "service-api")]
+#[cfg_attr(docsrs, doc(cfg(feature = "service-api")))]
+pub use service_api::{
+    default_lattice_service, dispatch_typed, observe_json, parse_lattice_method, FacadeHealth,
+    FacadeServiceInfo, LatticeServiceError, LatticeServiceFacade, LatticeServiceResult,
+    LATTICE_SERVICE_NAME, LATTICE_SERVICE_TYPE,
+};
+
 /// Facade crate version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

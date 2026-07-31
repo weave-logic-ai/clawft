@@ -24,6 +24,8 @@ std = [
 # Forward optional candle ML skeleton from impls (no weights / no training).
 # Default CI never enables this — see weftos-worldmodel-impls README.
 candle = ["weftos-worldmodel-impls/candle", "std"]
+# ServiceApi-shaped LatticeApi facade (WEFT-527). Pulls serde_json; implies std.
+service-api = ["std", "dep:serde_json"]
 
 [dependencies]
 weftos-worldmodel-core = { workspace = true, default-features = false }
