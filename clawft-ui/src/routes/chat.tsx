@@ -21,16 +21,15 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       <div
         className={cn(
           "max-w-[80%] rounded-lg px-4 py-2.5 text-sm",
-          isUser &&
-            "bg-blue-600 text-white",
+          isUser && "bg-blue-600 text-white",
           !isUser &&
             !isSystem &&
             !isTool &&
             "bg-gray-100 text-gray-900 dark:bg-gray-700 dark:text-gray-100",
           isSystem &&
-            "bg-yellow-50 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300 border border-yellow-200 dark:border-yellow-800",
+            "border border-yellow-200 bg-yellow-50 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
           isTool &&
-            "bg-purple-50 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300 border border-purple-200 dark:border-purple-800 font-mono text-xs",
+            "border border-purple-200 bg-purple-50 font-mono text-xs text-purple-800 dark:border-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
         )}
       >
         {(isSystem || isTool) && (
@@ -74,7 +73,7 @@ function SessionSidebar({
   isLoading: boolean;
 }) {
   return (
-    <div className="flex h-full w-64 shrink-0 flex-col border-r border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
+    <div className="hidden h-full w-64 shrink-0 flex-col border-r border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800 md:flex">
       <div className="p-3">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
           Sessions
@@ -94,9 +93,10 @@ function SessionSidebar({
           sessions.map((s) => (
             <button
               key={s.key}
+              type="button"
               onClick={() => onSelect(s.key)}
               className={cn(
-                "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+                "min-h-11 w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
                 activeKey === s.key
                   ? "bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
                   : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700",
@@ -129,12 +129,16 @@ function StreamingIndicator() {
   );
 }
 
+const SWIPE_THRESHOLD_PX = 60;
+
 export function ChatPage() {
   const queryClient = useQueryClient();
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const touchStartX = useRef<number | null>(null);
 
   const sessions = useQuery<SessionSummary[]>({
     queryKey: ["sessions"],
@@ -202,6 +206,42 @@ export function ChatPage() {
     };
   }, [activeSession, queryClient]);
 
+  const sessionList = sessions.data ?? [];
+
+  /** Swipe left → next session; swipe right → previous (WEFT-312). */
+  const switchSessionByDelta = useCallback(
+    (delta: number) => {
+      if (sessionList.length === 0) return;
+      const idx = activeSession
+        ? sessionList.findIndex((s) => s.key === activeSession)
+        : -1;
+      const next =
+        idx < 0
+          ? sessionList[0]
+          : sessionList[
+              Math.max(0, Math.min(sessionList.length - 1, idx + delta))
+            ];
+      if (next && next.key !== activeSession) {
+        setActiveSession(next.key);
+      }
+    },
+    [sessionList, activeSession],
+  );
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.changedTouches[0]?.clientX ?? null;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX.current == null) return;
+    const endX = e.changedTouches[0]?.clientX ?? touchStartX.current;
+    const dx = endX - touchStartX.current;
+    touchStartX.current = null;
+    if (Math.abs(dx) < SWIPE_THRESHOLD_PX) return;
+    // Swipe left (negative dx) → next; swipe right → previous.
+    switchSessionByDelta(dx < 0 ? 1 : -1);
+  };
+
   const handleSend = () => {
     const trimmed = input.trim();
     if (!trimmed || !activeSession || sendMessage.isPending) return;
@@ -212,45 +252,117 @@ export function ChatPage() {
   const messages = sessionDetail.data?.messages ?? [];
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-h-0">
       <SessionSidebar
-        sessions={sessions.data ?? []}
+        sessions={sessionList}
         activeKey={activeSession}
         onSelect={setActiveSession}
         isLoading={sessions.isLoading}
       />
 
-      <div className="flex flex-1 flex-col">
-        {!activeSession ? (
-          <div className="flex flex-1 items-center justify-center">
-            <div className="text-center">
-              <p className="text-lg text-gray-500 dark:text-gray-400">
-                Select a session to start chatting
-              </p>
-              <p className="mt-1 text-sm text-gray-400 dark:text-gray-500">
-                Or create a new session from the Agents page
-              </p>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {/* Mobile session picker sheet */}
+        {mobileSessionsOpen && (
+          <div
+            className="absolute inset-0 z-20 flex flex-col bg-white dark:bg-gray-800 md:hidden"
+            role="dialog"
+            aria-label="Select session"
+          >
+            <div className="flex min-h-12 items-center justify-between border-b border-gray-200 px-3 dark:border-gray-700">
+              <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Sessions
+              </h2>
+              <button
+                type="button"
+                onClick={() => setMobileSessionsOpen(false)}
+                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700"
+                aria-label="Close sessions"
+              >
+                ✕
+              </button>
             </div>
+            <div className="flex-1 overflow-y-auto p-2">
+              {sessionList.length === 0 ? (
+                <p className="px-2 py-4 text-xs text-gray-400">No sessions</p>
+              ) : (
+                sessionList.map((s) => (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onClick={() => {
+                      setActiveSession(s.key);
+                      setMobileSessionsOpen(false);
+                    }}
+                    className={cn(
+                      "min-h-11 w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+                      activeSession === s.key
+                        ? "bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                        : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700",
+                    )}
+                  >
+                    <p className="truncate font-medium">{s.key}</p>
+                    <p className="text-xs opacity-60">
+                      {s.message_count} msgs &middot;{" "}
+                      {formatRelativeTime(s.updated_at)}
+                    </p>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {!activeSession ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4">
+            <p className="text-center text-lg text-gray-500 dark:text-gray-400">
+              Select a session to start chatting
+            </p>
+            <p className="text-center text-sm text-gray-400 dark:text-gray-500">
+              Or create a new session from the Agents page
+            </p>
+            <button
+              type="button"
+              onClick={() => setMobileSessionsOpen(true)}
+              className="inline-flex min-h-11 items-center rounded-md bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 md:hidden"
+            >
+              Browse sessions
+            </button>
           </div>
         ) : (
           <>
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-700">
-              <div>
-                <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  {activeSession}
-                </h2>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  {messages.length} messages
-                </p>
+            <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-3 py-2 dark:border-gray-700 sm:px-4 sm:py-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setMobileSessionsOpen(true)}
+                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700 md:hidden"
+                    aria-label="Browse sessions"
+                  >
+                    ☰
+                  </button>
+                  <div className="min-w-0">
+                    <h2 className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">
+                      {activeSession}
+                    </h2>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {messages.length} messages · swipe to switch
+                    </p>
+                  </div>
+                </div>
               </div>
               <Badge variant="secondary">
                 {sessionDetail.data?.agent_id ?? "..."}
               </Badge>
             </div>
 
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {/* Messages — scroll-up list (WEFT-312) */}
+            <div
+              className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4"
+              onTouchStart={handleTouchStart}
+              onTouchEnd={handleTouchEnd}
+            >
               {sessionDetail.isLoading ? (
                 <div className="space-y-3">
                   {Array.from({ length: 3 }).map((_, i) => (
@@ -267,13 +379,11 @@ export function ChatPage() {
                 ))
               )}
               {streamingContent !== null && (
-                <>
-                  <div className="flex justify-start">
-                    <div className="max-w-[80%] rounded-lg bg-gray-100 px-4 py-2.5 text-sm text-gray-900 dark:bg-gray-700 dark:text-gray-100">
-                      <p className="whitespace-pre-wrap">{streamingContent}</p>
-                    </div>
+                <div className="flex justify-start">
+                  <div className="max-w-[80%] rounded-lg bg-gray-100 px-4 py-2.5 text-sm text-gray-900 dark:bg-gray-700 dark:text-gray-100">
+                    <p className="whitespace-pre-wrap">{streamingContent}</p>
                   </div>
-                </>
+                </div>
               )}
               {sendMessage.isPending && streamingContent === null && (
                 <StreamingIndicator />
@@ -281,10 +391,16 @@ export function ChatPage() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input */}
-            <div className="border-t border-gray-200 p-4 dark:border-gray-700">
+            {/* Bottom-anchored input (WEFT-312) */}
+            <div
+              className="shrink-0 border-t border-gray-200 bg-white p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] dark:border-gray-700 dark:bg-gray-900 sm:p-4"
+            >
               <div className="flex gap-2">
+                <label htmlFor="chat-message-input" className="sr-only">
+                  Message
+                </label>
                 <input
+                  id="chat-message-input"
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
@@ -295,12 +411,13 @@ export function ChatPage() {
                     }
                   }}
                   placeholder="Type a message..."
-                  className="flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
+                  className="min-h-11 flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
                   disabled={sendMessage.isPending}
                 />
                 <Button
                   onClick={handleSend}
                   disabled={!input.trim() || sendMessage.isPending}
+                  className="min-h-11 min-w-11"
                 >
                   Send
                 </Button>

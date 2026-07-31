@@ -152,10 +152,15 @@ export function VoiceSettings() {
       {/* Language */}
       <Card>
         <CardHeader>
-          <CardTitle>Language</CardTitle>
+          <CardTitle id="voice-language-heading">Language</CardTitle>
         </CardHeader>
         <CardContent>
+          <label htmlFor="voice-language" className="sr-only">
+            Recognition language
+          </label>
           <select
+            id="voice-language"
+            aria-labelledby="voice-language-heading"
             value={settings.language}
             onChange={(e) => handleSettingChange("language", e.target.value)}
             className={cn(

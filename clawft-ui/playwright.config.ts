@@ -48,7 +48,12 @@ export default defineConfig({
   webServer: process.env.CLAWFT_UI_E2E_SKIP_SERVER
     ? undefined
     : {
-        command: "npm run build && VITE_MOCK_API=true npm run preview -- --port " + PORT,
+        // VITE_MOCK_API is a build-time Vite env — must be set during
+        // `npm run build`, not only at preview, so MSW is baked into the
+        // production bundle under test.
+        command:
+          "VITE_MOCK_API=true npm run build && VITE_MOCK_API=true npm run preview -- --host 127.0.0.1 --port " +
+          PORT,
         url: BASE_URL,
         reuseExistingServer: !process.env.CI,
         timeout: 180_000,

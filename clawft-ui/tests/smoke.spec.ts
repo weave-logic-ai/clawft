@@ -20,9 +20,9 @@ test.describe("Dashboard bootstrap", () => {
 
     await page.goto("/");
 
-    // Vite's index.html ships with a <title>; assert it loaded so we know
+    // index.html ships with a product title; assert it loaded so we know
     // the SPA shell came down before any client-side render kicked in.
-    await expect(page).toHaveTitle(/clawft|vite|react/i);
+    await expect(page).toHaveTitle(/weftos|clawft|vite|react/i);
 
     // The root mount point must exist (and contain at least one child) so
     // we know React mounted.
@@ -39,15 +39,18 @@ test.describe("Dashboard bootstrap", () => {
     expect(realErrors, `console errors during boot:\n${realErrors.join("\n")}`).toEqual([]);
   });
 
-  test("strips the ?token= query param after first paint (WEFT-309)", async ({ page }) => {
-    await page.goto("/?token=test-token-uuid&mode=mock");
+  test("strips the #token= fragment after first paint (WEFT-309 / WEFT-569)", async ({
+    page,
+  }) => {
+    // Tokens travel in the URL fragment (never the query string) so they
+    // cannot leak into access logs. See use-auth.ts.
+    await page.goto("/#token=test-token-uuid");
 
     // The use-auth hook persists the token to localStorage and replaces
     // the URL via history.replaceState. After the first effect fires the
-    // address bar should no longer contain ?token=.
-    await page.waitForFunction(() => !window.location.search.includes("token="));
-    const url = new URL(page.url());
-    expect(url.searchParams.get("token")).toBeNull();
+    // address bar should no longer contain #token=.
+    await page.waitForFunction(() => !window.location.hash.includes("token="));
+    expect(new URL(page.url()).hash).not.toMatch(/token=/);
 
     const stored = await page.evaluate(() => localStorage.getItem("clawft-token"));
     expect(stored).toBe("test-token-uuid");

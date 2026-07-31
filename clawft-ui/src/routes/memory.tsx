@@ -130,10 +130,14 @@ export function MemoryPage() {
       <div className="flex flex-wrap items-end gap-4">
         {/* Semantic search */}
         <div className="flex-1 min-w-[200px]">
-          <label className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+          <label
+            htmlFor="memory-search"
+            className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+          >
             Semantic Search
           </label>
           <input
+            id="memory-search"
             type="text"
             placeholder="Search memory..."
             value={searchQuery}
@@ -144,10 +148,14 @@ export function MemoryPage() {
 
         {/* Threshold slider */}
         <div className="w-48">
-          <label className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+          <label
+            htmlFor="memory-threshold"
+            className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+          >
             Similarity: {threshold.toFixed(2)}
           </label>
           <input
+            id="memory-threshold"
             type="range"
             min="0"
             max="1"
@@ -155,15 +163,22 @@ export function MemoryPage() {
             value={threshold}
             onChange={(e) => handleThresholdChange(parseFloat(e.target.value))}
             className="w-full"
+            aria-valuemin={0}
+            aria-valuemax={1}
+            aria-valuenow={threshold}
           />
         </div>
 
         {/* Namespace filter */}
         <div className="w-40">
-          <label className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+          <label
+            htmlFor="memory-namespace"
+            className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+          >
             Namespace
           </label>
           <select
+            id="memory-namespace"
             value={selectedNamespace}
             onChange={(e) => setSelectedNamespace(e.target.value)}
             className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
@@ -335,10 +350,14 @@ export function MemoryPage() {
 
         <div className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            <label
+              htmlFor="memory-new-key"
+              className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+            >
               Key
             </label>
             <input
+              id="memory-new-key"
               type="text"
               value={newKey}
               onChange={(e) => setNewKey(e.target.value)}
@@ -347,10 +366,14 @@ export function MemoryPage() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            <label
+              htmlFor="memory-new-value"
+              className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+            >
               Value
             </label>
             <textarea
+              id="memory-new-value"
               value={newValue}
               onChange={(e) => setNewValue(e.target.value)}
               rows={3}
@@ -360,10 +383,14 @@ export function MemoryPage() {
           </div>
           <div className="flex gap-4">
             <div className="flex-1">
-              <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+              <label
+                htmlFor="memory-new-namespace"
+                className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
                 Namespace
               </label>
               <input
+                id="memory-new-namespace"
                 type="text"
                 value={newNamespace}
                 onChange={(e) => setNewNamespace(e.target.value)}
@@ -371,10 +398,14 @@ export function MemoryPage() {
               />
             </div>
             <div className="flex-1">
-              <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+              <label
+                htmlFor="memory-new-tags"
+                className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
                 Tags (comma-separated)
               </label>
               <input
+                id="memory-new-tags"
                 type="text"
                 value={newTags}
                 onChange={(e) => setNewTags(e.target.value)}
