@@ -52,6 +52,7 @@ fn minimal_kernel_config() -> KernelConfig {
         ipc_tcp: None,
         llm: None,
         agent: None,
+        spatial: None,
     }
 }
 
