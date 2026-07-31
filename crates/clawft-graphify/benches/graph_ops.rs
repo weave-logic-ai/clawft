@@ -64,6 +64,25 @@ fn graph_ops_individual(c: &mut Criterion) {
     }
     group.finish();
 
+    // WEFT-516: label-propagation vs SASE on the same synthetic graphs.
+    let mut group = c.benchmark_group("graph_ops_cluster_method");
+    for (label, kg) in [("1k", &kg_1k), ("10k", &kg_10k)] {
+        group.bench_function(format!("label_prop/{label}"), |b| {
+            b.iter(|| {
+                let communities =
+                    cluster::cluster_with(kg, cluster::ClusterMethod::LabelPropagation);
+                black_box(communities.len());
+            });
+        });
+        group.bench_function(format!("sase/{label}"), |b| {
+            b.iter(|| {
+                let communities = cluster::cluster_with(kg, cluster::ClusterMethod::Sase);
+                black_box(communities.len());
+            });
+        });
+    }
+    group.finish();
+
     let mut group = c.benchmark_group("graph_ops_god_nodes");
     for (label, kg) in [("1k", &kg_1k), ("10k", &kg_10k)] {
         group.bench_function(label, |b| {

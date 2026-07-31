@@ -1,21 +1,52 @@
-//! Community detection via label propagation, oversized community splitting,
-//! cohesion scoring, and auto-labeling.
+//! Community detection via label propagation or SASE, oversized community
+//! splitting, cohesion scoring, and auto-labeling.
 //!
-//! Ported from Python `graphify/cluster.py`. Uses label propagation instead of
-//! Leiden/Louvain since it's simpler, deterministic with a fixed seed, and matches
-//! the WeftOS `causal.rs` community detection approach.
+//! Ported from Python `graphify/cluster.py`. Default path is label propagation
+//! (deterministic, matches WeftOS `causal.rs`). SASE (k-order graph convolution
+//! + RFF + k-means; WEFT-516 / arXiv:2408.05765) is available via
+//! [`ClusterMethod::Sase`] / [`cluster_with`]. Enable Cargo feature
+//! `sase-cluster` to make SASE the default for [`cluster`].
 
+use crate::cluster_sase;
 use crate::eml_models::ClusterThresholdModel;
 use crate::entity::EntityId;
 use crate::model::KnowledgeGraph;
 use std::collections::HashMap;
+
+// Re-export SASE config for callers / benches.
+pub use crate::cluster_sase::SaseConfig;
 
 /// Communities larger than 25% of the graph get split.
 pub const MAX_COMMUNITY_FRACTION: f64 = 0.25;
 /// Only split if community has at least this many nodes.
 pub const MIN_SPLIT_SIZE: usize = 10;
 
-/// Run community detection on the knowledge graph.
+/// Community detection algorithm selection (WEFT-516).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClusterMethod {
+    /// Classic label propagation (default when `sase-cluster` is off).
+    #[default]
+    LabelPropagation,
+    /// SASE: adaptive k-order SGC + Random Fourier Features + k-means.
+    Sase,
+}
+
+/// Resolve the default clustering method.
+///
+/// - Without Cargo feature `sase-cluster`: [`ClusterMethod::LabelPropagation`]
+/// - With `sase-cluster`: [`ClusterMethod::Sase`] (opt-in default migration)
+pub fn default_cluster_method() -> ClusterMethod {
+    #[cfg(feature = "sase-cluster")]
+    {
+        ClusterMethod::Sase
+    }
+    #[cfg(not(feature = "sase-cluster"))]
+    {
+        ClusterMethod::LabelPropagation
+    }
+}
+
+/// Run community detection on the knowledge graph using [`default_cluster_method`].
 ///
 /// Returns `{community_id: [entity_ids]}` where community 0 is the largest.
 /// - Empty graph returns `{}`
@@ -23,73 +54,12 @@ pub const MIN_SPLIT_SIZE: usize = 10;
 /// - Oversized communities (>25% of graph, >=10 nodes) are recursively split
 /// - Communities are re-indexed by size descending
 pub fn cluster(kg: &KnowledgeGraph) -> HashMap<usize, Vec<EntityId>> {
-    if kg.node_count() == 0 {
-        return HashMap::new();
-    }
+    cluster_with(kg, default_cluster_method())
+}
 
-    if kg.edge_count() == 0 {
-        let mut result = HashMap::new();
-        let mut ids: Vec<EntityId> = kg.entity_ids().cloned().collect();
-        ids.sort_by(|a, b| a.0.cmp(&b.0));
-        for (i, id) in ids.into_iter().enumerate() {
-            result.insert(i, vec![id]);
-        }
-        return result;
-    }
-
-    // Separate isolates from connected nodes
-    let isolates: Vec<EntityId> = kg
-        .entity_ids()
-        .filter(|id| kg.degree(id) == 0)
-        .cloned()
-        .collect();
-    let connected: Vec<EntityId> = kg
-        .entity_ids()
-        .filter(|id| kg.degree(id) > 0)
-        .cloned()
-        .collect();
-
-    // Run label propagation on connected subgraph
-    let mut raw: HashMap<usize, Vec<EntityId>> = HashMap::new();
-    if !connected.is_empty() {
-        let partition = label_propagation(kg, &connected);
-        for (node, cid) in partition {
-            raw.entry(cid).or_default().push(node);
-        }
-    }
-
-    // Each isolate becomes its own single-node community
-    let mut next_cid = raw.keys().copied().max().unwrap_or(0) + 1;
-    for node in isolates {
-        raw.insert(next_cid, vec![node]);
-        next_cid += 1;
-    }
-
-    // Split oversized communities
-    let max_size = std::cmp::max(
-        MIN_SPLIT_SIZE,
-        (kg.node_count() as f64 * MAX_COMMUNITY_FRACTION) as usize,
-    );
-
-    let mut final_communities: Vec<Vec<EntityId>> = Vec::new();
-    for nodes in raw.into_values() {
-        if nodes.len() > max_size {
-            final_communities.extend(split_community(kg, &nodes));
-        } else {
-            final_communities.push(nodes);
-        }
-    }
-
-    // Re-index by size descending
-    final_communities.sort_by_key(|c| std::cmp::Reverse(c.len()));
-    final_communities
-        .into_iter()
-        .enumerate()
-        .map(|(i, mut nodes)| {
-            nodes.sort_by(|a, b| a.0.cmp(&b.0));
-            (i, nodes)
-        })
-        .collect()
+/// Run community detection with an explicit [`ClusterMethod`].
+pub fn cluster_with(kg: &KnowledgeGraph, method: ClusterMethod) -> HashMap<usize, Vec<EntityId>> {
+    cluster_with_config(kg, method, &SaseConfig::default(), MAX_COMMUNITY_FRACTION, MIN_SPLIT_SIZE)
 }
 
 /// Run community detection with an optional EML threshold model.
@@ -97,9 +67,42 @@ pub fn cluster(kg: &KnowledgeGraph) -> HashMap<usize, Vec<EntityId>> {
 /// When `eml_model` is `Some` and trained, uses learned thresholds
 /// for max community fraction, min split size, and cohesion.
 /// Pass `None` to use the original hardcoded constants.
+/// Uses [`default_cluster_method`] for the partition algorithm.
 pub fn cluster_eml(
     kg: &KnowledgeGraph,
     eml_model: Option<&ClusterThresholdModel>,
+) -> HashMap<usize, Vec<EntityId>> {
+    cluster_eml_with(kg, eml_model, default_cluster_method())
+}
+
+/// EML thresholds + explicit partition method.
+pub fn cluster_eml_with(
+    kg: &KnowledgeGraph,
+    eml_model: Option<&ClusterThresholdModel>,
+    method: ClusterMethod,
+) -> HashMap<usize, Vec<EntityId>> {
+    let (max_fraction, min_split) = match eml_model {
+        Some(model) if model.is_trained() => {
+            let node_count = kg.node_count() as f64;
+            let edge_density = if kg.node_count() > 1 {
+                kg.edge_count() as f64 / (kg.node_count() as f64 * (kg.node_count() as f64 - 1.0))
+            } else {
+                0.0
+            };
+            let (frac, split, _cohesion) = model.predict(node_count, edge_density, 0.0);
+            (frac, split as usize)
+        }
+        _ => (MAX_COMMUNITY_FRACTION, MIN_SPLIT_SIZE),
+    };
+    cluster_with_config(kg, method, &SaseConfig::default(), max_fraction, min_split)
+}
+
+fn cluster_with_config(
+    kg: &KnowledgeGraph,
+    method: ClusterMethod,
+    sase: &SaseConfig,
+    max_fraction: f64,
+    min_split: usize,
 ) -> HashMap<usize, Vec<EntityId>> {
     if kg.node_count() == 0 {
         return HashMap::new();
@@ -115,23 +118,6 @@ pub fn cluster_eml(
         return result;
     }
 
-    // Resolve thresholds from EML model or hardcoded defaults.
-    let (max_fraction, min_split) = match eml_model {
-        Some(model) if model.is_trained() => {
-            let node_count = kg.node_count() as f64;
-            let edge_density = if kg.node_count() > 1 {
-                kg.edge_count() as f64 / (kg.node_count() as f64 * (kg.node_count() as f64 - 1.0))
-            } else {
-                0.0
-            };
-            // Use 0.0 for community count since we haven't computed it yet.
-            let (frac, split, _cohesion) = model.predict(node_count, edge_density, 0.0);
-            (frac, split as usize)
-        }
-        _ => (MAX_COMMUNITY_FRACTION, MIN_SPLIT_SIZE),
-    };
-
-    // Separate isolates from connected nodes.
     let isolates: Vec<EntityId> = kg
         .entity_ids()
         .filter(|id| kg.degree(id) == 0)
@@ -145,7 +131,7 @@ pub fn cluster_eml(
 
     let mut raw: HashMap<usize, Vec<EntityId>> = HashMap::new();
     if !connected.is_empty() {
-        let partition = label_propagation(kg, &connected);
+        let partition = partition_connected(kg, &connected, method, sase);
         for (node, cid) in partition {
             raw.entry(cid).or_default().push(node);
         }
@@ -162,7 +148,7 @@ pub fn cluster_eml(
     let mut final_communities: Vec<Vec<EntityId>> = Vec::new();
     for nodes in raw.into_values() {
         if nodes.len() > max_size {
-            final_communities.extend(split_community(kg, &nodes));
+            final_communities.extend(split_community(kg, &nodes, method, sase));
         } else {
             final_communities.push(nodes);
         }
@@ -177,6 +163,18 @@ pub fn cluster_eml(
             (i, nodes)
         })
         .collect()
+}
+
+fn partition_connected(
+    kg: &KnowledgeGraph,
+    connected: &[EntityId],
+    method: ClusterMethod,
+    sase: &SaseConfig,
+) -> HashMap<EntityId, usize> {
+    match method {
+        ClusterMethod::LabelPropagation => label_propagation(kg, connected),
+        ClusterMethod::Sase => cluster_sase::sase_partition(kg, connected, sase),
+    }
 }
 
 /// Label propagation community detection.
@@ -263,8 +261,14 @@ fn label_propagation(kg: &KnowledgeGraph, nodes: &[EntityId]) -> HashMap<EntityI
         .collect()
 }
 
-/// Split an oversized community by running label propagation on its subgraph.
-fn split_community(kg: &KnowledgeGraph, nodes: &[EntityId]) -> Vec<Vec<EntityId>> {
+/// Split an oversized community by re-running the chosen partition method
+/// on its subgraph.
+fn split_community(
+    kg: &KnowledgeGraph,
+    nodes: &[EntityId],
+    method: ClusterMethod,
+    sase: &SaseConfig,
+) -> Vec<Vec<EntityId>> {
     let sub = kg.subgraph(nodes);
     if sub.edge_count() == 0 {
         // No edges: each node is its own community
@@ -281,7 +285,7 @@ fn split_community(kg: &KnowledgeGraph, nodes: &[EntityId]) -> Vec<Vec<EntityId>
         return vec![nodes.to_vec()];
     }
 
-    let partition = label_propagation(&sub, &connected);
+    let partition = partition_connected(&sub, &connected, method, sase);
     let mut sub_communities: HashMap<usize, Vec<EntityId>> = HashMap::new();
     for (node, cid) in partition {
         sub_communities.entry(cid).or_default().push(node);
@@ -698,5 +702,153 @@ mod tests {
         let ids: Vec<EntityId> = kg.entity_ids().cloned().collect();
         let label = auto_label(&kg, &ids);
         assert_eq!(label, "auth");
+    }
+
+    #[test]
+    fn default_method_is_label_prop_without_feature() {
+        #[cfg(not(feature = "sase-cluster"))]
+        assert_eq!(default_cluster_method(), ClusterMethod::LabelPropagation);
+        #[cfg(feature = "sase-cluster")]
+        assert_eq!(default_cluster_method(), ClusterMethod::Sase);
+    }
+
+    #[test]
+    fn sase_covers_all_nodes() {
+        let entities = vec![
+            make_entity("a", "f.py"),
+            make_entity("b", "f.py"),
+            make_entity("c", "f.py"),
+            make_entity("d", "g.py"),
+        ];
+        let rels = vec![
+            make_rel("a", "f.py", "b", "f.py"),
+            make_rel("b", "f.py", "c", "f.py"),
+            make_rel("a", "f.py", "c", "f.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let c = cluster_with(&kg, ClusterMethod::Sase);
+        let all_nodes: Vec<&EntityId> = c.values().flat_map(|v| v.iter()).collect();
+        assert_eq!(all_nodes.len(), 4);
+        // Isolate `d` is its own community.
+        assert!(c.values().any(|v| v.len() == 1));
+    }
+
+    #[test]
+    fn sase_empty_and_edgeless() {
+        let empty = KnowledgeGraph::new();
+        assert!(cluster_with(&empty, ClusterMethod::Sase).is_empty());
+
+        let entities = vec![make_entity("a", "a.py"), make_entity("b", "b.py")];
+        let kg = KnowledgeGraph::from_parts(entities, vec![], vec![]);
+        let c = cluster_with(&kg, ClusterMethod::Sase);
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn sase_two_cliques_modularity_positive() {
+        let entities = vec![
+            make_entity("a1", "f.py"),
+            make_entity("a2", "f.py"),
+            make_entity("a3", "f.py"),
+            make_entity("b1", "g.py"),
+            make_entity("b2", "g.py"),
+            make_entity("b3", "g.py"),
+        ];
+        let rels = vec![
+            make_rel("a1", "f.py", "a2", "f.py"),
+            make_rel("a2", "f.py", "a3", "f.py"),
+            make_rel("a1", "f.py", "a3", "f.py"),
+            make_rel("b1", "g.py", "b2", "g.py"),
+            make_rel("b2", "g.py", "b3", "g.py"),
+            make_rel("b1", "g.py", "b3", "g.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let communities = cluster_with(&kg, ClusterMethod::Sase);
+        assert_eq!(
+            communities.values().map(|v| v.len()).sum::<usize>(),
+            6
+        );
+        assert!(communities.len() >= 2, "expected ≥2 communities, got {}", communities.len());
+        let q = newman_modularity(&kg, &communities);
+        assert!(
+            q > 0.2,
+            "SASE on two cliques should have solid modularity, got {q}"
+        );
+    }
+
+    #[test]
+    fn sase_deterministic_full_pipeline() {
+        let entities = vec![
+            make_entity("a", "f.py"),
+            make_entity("b", "f.py"),
+            make_entity("c", "f.py"),
+            make_entity("d", "g.py"),
+        ];
+        let rels = vec![
+            make_rel("a", "f.py", "b", "f.py"),
+            make_rel("b", "f.py", "c", "f.py"),
+            make_rel("a", "f.py", "c", "f.py"),
+            make_rel("c", "f.py", "d", "g.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let c1 = cluster_with(&kg, ClusterMethod::Sase);
+        let c2 = cluster_with(&kg, ClusterMethod::Sase);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn label_prop_and_sase_both_cover() {
+        let entities = vec![
+            make_entity("a", "f.py"),
+            make_entity("b", "f.py"),
+            make_entity("c", "f.py"),
+            make_entity("d", "g.py"),
+            make_entity("e", "g.py"),
+        ];
+        let rels = vec![
+            make_rel("a", "f.py", "b", "f.py"),
+            make_rel("b", "f.py", "c", "f.py"),
+            make_rel("d", "g.py", "e", "g.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let lp = cluster_with(&kg, ClusterMethod::LabelPropagation);
+        let sase = cluster_with(&kg, ClusterMethod::Sase);
+        let count = |c: &HashMap<usize, Vec<EntityId>>| c.values().map(|v| v.len()).sum::<usize>();
+        assert_eq!(count(&lp), 5);
+        assert_eq!(count(&sase), 5);
+    }
+
+    /// Lightweight microbench (not criterion): times LP vs SASE on a 200-node
+    /// ring+skip synthetic graph. Prints durations; asserts both finish and
+    /// cover all nodes. Full criterion: `cargo bench -p clawft-graphify
+    /// --bench graph_ops -- graph_ops_cluster_method`.
+    #[test]
+    fn microbench_lp_vs_sase_covers() {
+        use crate::bench::fixtures::synthetic_graph;
+        use std::time::Instant;
+
+        let kg = synthetic_graph(200);
+        let n = kg.node_count();
+
+        let t0 = Instant::now();
+        let lp = cluster_with(&kg, ClusterMethod::LabelPropagation);
+        let lp_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let t1 = Instant::now();
+        let sase = cluster_with(&kg, ClusterMethod::Sase);
+        let sase_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        let cover = |c: &HashMap<usize, Vec<EntityId>>| c.values().map(|v| v.len()).sum::<usize>();
+        assert_eq!(cover(&lp), n);
+        assert_eq!(cover(&sase), n);
+
+        let lp_q = newman_modularity(&kg, &lp);
+        let sase_q = newman_modularity(&kg, &sase);
+        eprintln!(
+            "WEFT-516 microbench n={n}: LP {lp_ms:.2}ms Q={lp_q:.3} | SASE {sase_ms:.2}ms Q={sase_q:.3}"
+        );
+        // Both should produce a valid modularity in range (quality comparison is informational).
+        assert!((-0.5..=1.0).contains(&lp_q));
+        assert!((-0.5..=1.0).contains(&sase_q));
     }
 }

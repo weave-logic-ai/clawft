@@ -20,6 +20,8 @@ pub mod bench;
 pub mod build;
 pub mod cache;
 pub mod cluster;
+/// WEFT-516: SASE (k-order SGC + RFF) spectral clustering internals.
+pub mod cluster_sase;
 pub mod conversation;
 pub mod domain;
 // WEFT-375 / LightRAG P5: edge embeddings for relationship-level queries.

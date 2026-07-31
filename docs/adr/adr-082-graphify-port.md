@@ -166,7 +166,7 @@ separate product:
 | KG-001 | EML query score fusion | Done |
 | KG-002 | Community summaries (GraphRAG) | Done |
 | KG-003 | Causal chain tracing | Done (kernel) |
-| KG-004 | RFF spectral embedding (SASE) | Done in tree; size-threshold vs Lanczos open |
+| KG-004 | RFF spectral embedding (SASE) | Kernel RFF done; graphify SASE clustering (WEFT-516) selectable via `ClusterMethod::Sase` / feature `sase-cluster` |
 | KG-005 | Information-gain pruning | Done (kernel) |
 | KG-006 | BFS dependency retrieval (SGKR) | Done |
 | KG-007 | MCTS exploration (RANGER) | Done |

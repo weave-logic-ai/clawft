@@ -49,7 +49,17 @@ cargo test -p clawft-graphify --test bench_harness_integration -- --ignored
 # Criterion microbenches (not part of `scripts/build.sh test`)
 cargo bench -p clawft-graphify --bench extraction
 cargo bench -p clawft-graphify --bench graph_ops
+
+# WEFT-516: label-propagation vs SASE clustering only
+cargo bench -p clawft-graphify --bench graph_ops -- graph_ops_cluster_method
 ```
+
+### Cluster method comparison (WEFT-516)
+
+`graph_ops_cluster_method` times `ClusterMethod::LabelPropagation` vs
+`ClusterMethod::Sase` at 1K and 10K nodes on the same synthetic ring+skip
+graphs. SASE is always available via `cluster_with`; Cargo feature
+`sase-cluster` only switches the default for `cluster()`.
 
 Reports serialize to JSON (`GraphifyBenchReport`) for CI artifacts.
 

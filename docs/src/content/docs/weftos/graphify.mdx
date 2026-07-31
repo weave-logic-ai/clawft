@@ -16,7 +16,7 @@ WeftOS needs to understand the systems it manages. Graphify provides two domain-
 - **Code Assessment**: Map modules, classes, functions, imports, call graphs, and inferred dependencies into a queryable knowledge graph. Detect god nodes, surprising cross-module coupling, and architectural drift.
 - **Forensic Analysis**: Extract persons, events, evidence, locations, timelines, and their relationships from investigative documents. Run gap analysis, coherence scoring, and counterfactual predictions.
 
-Both domains share the same underlying graph infrastructure: BLAKE3-hashed entity IDs, confidence-weighted edges, label propagation clustering, and petgraph-backed traversal.
+Both domains share the same underlying graph infrastructure: BLAKE3-hashed entity IDs, confidence-weighted edges, community detection (label propagation by default; optional SASE spectral clustering), and petgraph-backed traversal.
 
 ### LightRAG dual-level retrieval (WEFT-517)
 
@@ -407,11 +407,32 @@ Edge comparison uses undirected keys `(min_hex, max_hex, relation)` to avoid ord
 
 ## Community Detection
 
-Label propagation with three post-processing steps.
+Two partition algorithms share the same post-processing pipeline (WEFT-516).
 
-**Algorithm**: Each node starts with a unique label. In each iteration, every node adopts the most frequent label among its neighbors (ties broken by smallest label for determinism). Converges when no labels change, with a 50-iteration safety cap.
+### Label propagation (default)
 
-**Oversized splitting**: Communities larger than 25% of the graph (and at least 10 nodes) are recursively split by running label propagation on their subgraph.
+Each node starts with a unique label. In each iteration, every node adopts the most frequent label among its neighbors (ties broken by smallest label for determinism). Converges when no labels change, with a 50-iteration safety cap. This remains the default for `cluster()` unless the crate is built with `--features sase-cluster`.
+
+### SASE (selectable)
+
+**SASE** (Scalable and Adaptive Spectral Embedding; Liu et al., CIKM 2024, arXiv:2408.05765) is available via `ClusterMethod::Sase` / `cluster_with`. Pipeline:
+
+1. Deterministic Gaussian initial features
+2. Adaptive k-order simple graph convolution (`S = D⁻¹A`) until embedding stabilizes
+3. Random Fourier Features map into an approximate spectral space
+4. k-means on the embeddings (modularity-guided k on small graphs; √n heuristic on large ones)
+
+Enable Cargo feature `sase-cluster` to make SASE the default for `cluster()` once parity benchmarks justify the migration. Until then, label-propagation stays default; call `cluster_with(kg, ClusterMethod::Sase)` to opt in.
+
+Compare both on synthetic graphs:
+
+```bash
+cargo bench -p clawft-graphify --bench graph_ops -- graph_ops_cluster_method
+```
+
+### Shared post-processing
+
+**Oversized splitting**: Communities larger than 25% of the graph (and at least 10 nodes) are recursively split by re-running the chosen partition method on their subgraph.
 
 **Re-indexing**: Final communities are sorted by size descending so community 0 is always the largest.
 
