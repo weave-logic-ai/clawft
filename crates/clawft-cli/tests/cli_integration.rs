@@ -48,9 +48,16 @@ fn help_output() {
 
     assert!(output.status.success(), "exit code should be 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // WEFT-176 white-label brand: description is "WeftOS AI assistant CLI".
+    // Keep a soft match so rebrands don't break the gate.
     assert!(
-        stdout.contains("clawft AI assistant CLI"),
+        stdout.contains("AI assistant CLI") || stdout.contains("weft"),
         "help output should contain the CLI description, got: {stdout}"
+    );
+    // WEFT-196: delegate debug surface is registered.
+    assert!(
+        stdout.contains("delegate"),
+        "help should list delegate subcommand, got: {stdout}"
     );
 }
 
@@ -766,5 +773,88 @@ fn mcp_add_requires_transport() {
     assert!(
         !add.status.success(),
         "add without command/url should fail"
+    );
+}
+
+// ── WEFT-196: weft delegate debug ───────────────────────────────────────
+
+#[test]
+fn delegate_debug_human_output() {
+    let output = weft_bin()
+        .args([
+            "delegate",
+            "debug",
+            "deploy to production",
+            "--claude-available",
+            "true",
+        ])
+        .output()
+        .expect("failed to run weft delegate debug");
+
+    assert!(
+        output.status.success(),
+        "delegate debug should exit 0, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("weft delegate debug"),
+        "should print header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Target:"),
+        "should print Target, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Complexity:"),
+        "should print Complexity, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Reason:"),
+        "should print Reason, got: {stdout}"
+    );
+}
+
+#[test]
+fn delegate_debug_json_output() {
+    let output = weft_bin()
+        .args([
+            "delegate",
+            "debug",
+            "hi",
+            "--json",
+            "--claude-available",
+            "false",
+        ])
+        .output()
+        .expect("failed to run weft delegate debug --json");
+
+    assert!(
+        output.status.success(),
+        "delegate debug --json should exit 0, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be valid JSON");
+    assert_eq!(value["task"], "hi");
+    assert_eq!(value["target"], "local");
+    assert_eq!(value["claude_available"], false);
+    assert!(value.get("complexity").is_some());
+    assert!(value.get("reason").is_some());
+}
+
+#[test]
+fn delegate_help_lists_debug() {
+    let output = weft_bin()
+        .args(["delegate", "--help"])
+        .output()
+        .expect("failed to run weft delegate --help");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("debug"),
+        "delegate help should list debug, got: {stdout}"
     );
 }

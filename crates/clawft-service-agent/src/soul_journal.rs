@@ -1,12 +1,22 @@
-//! Substrate-backed [`SoulJournal`](clawft_core::agent::soul_journal::SoulJournal)
-//! (WEFT-330 / agent-core-v1.1).
+//! Substrate-backed soul journal (WEFT-330 write + WEFT-96 read).
 //!
-//! Publishes each drift observation under the mesh-canonical path
-//! `substrate/_derived/soul_journal/<ulid>` through
+//! ## Write path (WEFT-330)
+//!
+//! [`SubstrateSoulJournal`] publishes each drift observation under the
+//! mesh-canonical path `substrate/_derived/soul_journal/<ulid>` through
 //! [`SubstrateService::publish_gated_with_grants`] so the F1
 //! `soul_journal` [`DerivedWriteGrant`] is enforced. Without the
 //! grant (or with a wrong node id) the publish is rejected and the
 //! error surfaces to the loop as a non-fatal journal failure.
+//!
+//! ## Read path (WEFT-96 / WS-D1)
+//!
+//! [`SubstrateSoulJournalReader`] lists + reads the same prefix on every
+//! identity turn via
+//! [`JournalAwareIdentityProvider`](clawft_core::agent::identity::JournalAwareIdentityProvider).
+//! Reads are unauthenticated mesh reads (`SubstrateClient::list` /
+//! `read`) — matching `weaver soul promote` — so they do not need the
+//! derived-write grant.
 //!
 //! Path layout matches what `weaver soul promote` lists
 //! (`SOUL_JOURNAL_SUBSTRATE_PREFIX` in clawft-core). Entry payload
@@ -17,7 +27,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clawft_core::agent::soul_journal::{
-    DriftObservation, SoulJournal, SOUL_JOURNAL_SUBSTRATE_PREFIX,
+    DriftObservation, PendingJournalEntry, SoulJournal, SoulJournalReader,
+    SOUL_JOURNAL_SUBSTRATE_PREFIX,
 };
 use tracing::debug;
 use ulid::Ulid;
@@ -66,6 +77,63 @@ impl SoulJournal for SubstrateSoulJournal {
             "soul journal: substrate entry published"
         );
         Ok(())
+    }
+}
+
+/// Substrate-backed [`SoulJournalReader`] for the every-turn identity
+/// path (WEFT-96 / WS-D1).
+///
+/// Lists value-bearing children under [`SOUL_JOURNAL_SUBSTRATE_PREFIX`]
+/// and decodes each payload into a [`PendingJournalEntry`]. Intended
+/// to be wrapped by
+/// [`JournalAwareIdentityProvider`](clawft_core::agent::identity::JournalAwareIdentityProvider)
+/// so identity loads consult pending journal rows without auto-promoting
+/// them into `SOUL.md`.
+pub struct SubstrateSoulJournalReader {
+    client: Arc<dyn SubstrateClient>,
+}
+
+impl SubstrateSoulJournalReader {
+    /// Construct a reader over a shared substrate client.
+    pub fn new(client: Arc<dyn SubstrateClient>) -> Self {
+        Self { client }
+    }
+
+    /// Extract the entry id (final path segment) from a full substrate path.
+    fn entry_id_from_path(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or(path)
+    }
+}
+
+#[async_trait]
+impl SoulJournalReader for SubstrateSoulJournalReader {
+    async fn list_pending(&self) -> Result<Vec<PendingJournalEntry>, String> {
+        // depth=1: immediate children under the journal prefix
+        // (each child is one ULID entry path).
+        let mut paths = self
+            .client
+            .list(SOUL_JOURNAL_SUBSTRATE_PREFIX, 1)
+            .map_err(|e| format!("substrate list soul_journal: {e}"))?;
+        // Stable order for deterministic prompt annotations / tests.
+        paths.sort();
+
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            let value = self
+                .client
+                .read(&path)
+                .map_err(|e| format!("substrate read {path}: {e}"))?;
+            let Some(value) = value else {
+                continue;
+            };
+            let entry_id = Self::entry_id_from_path(&path).to_string();
+            out.push(PendingJournalEntry::from_substrate_value(entry_id, &value));
+        }
+        debug!(
+            count = out.len(),
+            "soul journal: substrate read-on-every-turn listed pending"
+        );
+        Ok(out)
     }
 }
 
@@ -151,6 +219,44 @@ mod tests {
             "prefer narrative paragraphs over bullet lists"
         );
         assert!(!value["ts"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn substrate_journal_reader_lists_pending_after_write() {
+        // WEFT-96: write via SubstrateSoulJournal, read via
+        // SubstrateSoulJournalReader (every-turn identity path).
+        use clawft_core::agent::soul_journal::SoulJournalReader;
+
+        let client = Arc::new(MapClient::new());
+        let journal = SubstrateSoulJournal::new(client.clone(), "n-daemon");
+        journal
+            .append(DriftObservation::synthetic(
+                "prefer terse",
+                "user wants shorter answers",
+            ))
+            .await
+            .unwrap();
+        journal
+            .append(DriftObservation::synthetic("second", "another note"))
+            .await
+            .unwrap();
+
+        let reader = SubstrateSoulJournalReader::new(client);
+        let pending = reader.list_pending().await.expect("list");
+        assert_eq!(pending.len(), 2);
+        // Sorted by full path → stable ULID order.
+        assert!(pending.iter().any(|p| p.summary == "prefer terse"));
+        assert!(pending.iter().any(|p| p.content == "another note"));
+        assert!(!pending[0].entry_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn substrate_journal_reader_returns_empty_when_none() {
+        use clawft_core::agent::soul_journal::SoulJournalReader;
+
+        let reader = SubstrateSoulJournalReader::new(Arc::new(MapClient::new()));
+        let pending = reader.list_pending().await.unwrap();
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]

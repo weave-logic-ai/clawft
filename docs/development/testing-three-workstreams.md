@@ -529,12 +529,22 @@ distance <= 2 for trigger words.
 
 ```bash
 # Check that service file templates exist
-ls scripts/clawft-wake.service    # systemd
-ls scripts/com.clawft.wake.plist  # launchd
+ls scripts/clawft-wake.service                 # systemd (Linux)
+ls scripts/com.clawft.wake.plist               # launchd (macOS)
+ls scripts/install-clawft-wake-schtasks.ps1    # schtasks (Windows, WEFT-220)
 ```
 
-**Verify:** Both files exist. The CLI `install-service` command detects the
-platform and installs the appropriate file.
+**Verify:** All three exist. The CLI `install-service` command detects the
+platform (`systemd` / `launchd` / `schtasks`) and installs the appropriate
+definition. On Windows the final route is Task Scheduler ONLOGON
+(`ClawftWake`), not a Windows Service — see `docs/guides/voice.md`
+§ Wake word service.
+
+```bash
+# Unit tests for schtasks helpers (host OS detect + /TR quoting)
+# voice module is feature-gated; clawft-cli is bin-only so tests ride the bin crate.
+cargo test -p clawft-cli --features voice install_service_tests -- --nocapture
+```
 
 ### 4.10 Test fixture config
 

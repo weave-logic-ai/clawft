@@ -87,7 +87,7 @@ pub use protocol::{
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError, ReplySubmitter};
 pub use session_tier::SessionTier;
 pub use routing_log::SubstrateRouterDecisionLog;
-pub use soul_journal::SubstrateSoulJournal;
+pub use soul_journal::{SubstrateSoulJournal, SubstrateSoulJournalReader};
 pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
 pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
 pub use substrate_budget::SubstrateBudgetStore;

@@ -33,10 +33,26 @@ const INVALID_REQUEST: i32 = -32600;
 /// `notifications/initialized` methods. Unknown methods receive a
 /// `-32601 Method not found` error. Requests sent before `initialize`
 /// receive a `-32002 Server not initialized` error.
+///
+/// # Tool list changes (WEFT-200)
+///
+/// `initialize` advertises `capabilities.tools.listChanged: true`. When
+/// the composite provider registry changes after handshake, hosts should
+/// call [`Self::emit_tools_list_changed`] (or write
+/// [`tools_list_changed_notification`]) so clients re-fetch `tools/list`.
 pub struct McpServerShell {
     provider: CompositeToolProvider,
     middlewares: Vec<Box<dyn Middleware>>,
     initialized: bool,
+}
+
+/// JSON-RPC notification body for `notifications/tools/list_changed` (WEFT-200).
+pub fn tools_list_changed_notification() -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": super::TOOLS_LIST_CHANGED_METHOD,
+        "params": {}
+    })
 }
 
 impl McpServerShell {
@@ -52,6 +68,22 @@ impl McpServerShell {
     /// Add a middleware to the processing pipeline.
     pub fn add_middleware(&mut self, middleware: Box<dyn Middleware>) {
         self.middlewares.push(middleware);
+    }
+
+    /// Mutable access to the composite provider (hot-reload / tests).
+    pub fn provider_mut(&mut self) -> &mut CompositeToolProvider {
+        &mut self.provider
+    }
+
+    /// Emit `notifications/tools/list_changed` on the writer (WEFT-200).
+    ///
+    /// Call after mutating the tool registry (e.g. `provider_mut().register(...)`)
+    /// so clients that respect `listChanged` re-fetch `tools/list`.
+    pub async fn emit_tools_list_changed<W: AsyncWrite + Unpin>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        write_response(writer, &tools_list_changed_notification()).await
     }
 
     /// Run the server loop, reading lines from `reader` and writing
@@ -493,6 +525,41 @@ mod tests {
                 .unwrap()
                 .contains("completions/complete")
         );
+    }
+
+    #[test]
+    fn tools_list_changed_notification_wire_format() {
+        let n = tools_list_changed_notification();
+        assert_eq!(n["jsonrpc"], "2.0");
+        assert_eq!(n["method"], "notifications/tools/list_changed");
+        assert!(n.get("id").is_none());
+        assert!(n["params"].is_object());
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_tools_list_changed_true() {
+        let mut server = McpServerShell::new(CompositeToolProvider::new());
+        let input = init_line(1);
+        let reader = Cursor::new(input.into_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let resps = parse_responses(&output);
+        assert_eq!(resps.len(), 1);
+        assert_eq!(
+            resps[0]["result"]["capabilities"]["tools"]["listChanged"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_tools_list_changed_writes_notification() {
+        let server = McpServerShell::new(CompositeToolProvider::new());
+        let mut output = Vec::new();
+        server.emit_tools_list_changed(&mut output).await.unwrap();
+        let resps = parse_responses(&output);
+        assert_eq!(resps.len(), 1);
+        assert_eq!(resps[0]["method"], "notifications/tools/list_changed");
+        assert!(resps[0].get("id").is_none());
     }
 
     #[tokio::test]

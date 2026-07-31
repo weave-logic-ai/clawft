@@ -19,8 +19,9 @@ pub use provider::{
     skill_to_tool_definition, skills_to_tool_definitions,
 };
 pub use transport::{
-    DefaultTransportFactory, McpTransportFactory, SpecReconnect, TransportFactoryConfig,
-    TransportReconnect, TransportSpec, validate_command_path, validate_tempfile_path, validate_url,
+    DefaultTransportFactory, McpTransportFactory, SpecReconnect, TOOLS_LIST_CHANGED_METHOD,
+    TransportFactoryConfig, TransportReconnect, TransportSpec, validate_command_path,
+    validate_tempfile_path, validate_url,
 };
 
 // WEFT-187 / WEFT-493: MCP config hot-reload watcher + daemon boot surface.
@@ -143,6 +144,25 @@ pub struct ServerCapabilities {
     #[serde(default)]
     pub tools: Option<serde_json::Value>,
     // Other capability fields can be added as needed.
+}
+
+impl ServerCapabilities {
+    /// Whether the server advertised `tools.listChanged` (WEFT-200).
+    ///
+    /// Accepts both `{ "listChanged": true }` and bare `true` / object shapes
+    /// seen in the wild.
+    pub fn tools_list_changed(&self) -> bool {
+        let Some(tools) = self.tools.as_ref() else {
+            return false;
+        };
+        if let Some(b) = tools.get("listChanged").and_then(|v| v.as_bool()) {
+            return b;
+        }
+        if let Some(b) = tools.get("list_changed").and_then(|v| v.as_bool()) {
+            return b;
+        }
+        false
+    }
 }
 
 /// Server information returned from the MCP initialize handshake.
@@ -283,6 +303,37 @@ impl McpClient {
 
         let tools: Vec<ToolDefinition> = serde_json::from_value(tools_value)?;
         Ok(tools)
+    }
+
+    /// Poll one inbound server→client notification (WEFT-200).
+    pub async fn poll_notification(&self) -> Option<types::JsonRpcNotification> {
+        self.transport_arc().await.poll_notification().await
+    }
+
+    /// Drain pending `notifications/tools/list_changed` and re-fetch tools.
+    ///
+    /// Returns `Ok(None)` when no list-changed notification was pending.
+    /// Returns `Ok(Some(tools))` after a successful re-fetch when at least
+    /// one list-changed notification was drained.
+    pub async fn refresh_tools_if_list_changed(&self) -> Result<Option<Vec<ToolDefinition>>> {
+        let mut saw_list_changed = false;
+        // Drain the full queue so stale progress notifs do not block us.
+        loop {
+            match self.poll_notification().await {
+                Some(n) if n.method == TOOLS_LIST_CHANGED_METHOD => {
+                    saw_list_changed = true;
+                }
+                Some(n) => {
+                    debug!(method = %n.method, "mcp client: ignoring non-list_changed notification");
+                }
+                None => break,
+            }
+        }
+        if !saw_list_changed {
+            return Ok(None);
+        }
+        let tools = self.list_tools().await?;
+        Ok(Some(tools))
     }
 
     /// Call a tool on the MCP server.
@@ -508,6 +559,25 @@ impl McpSession {
     pub async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
         self.ensure_connected().await?;
         self.client.list_tools().await
+    }
+
+    /// Poll one inbound notification from the transport (WEFT-200).
+    pub async fn poll_notification(&self) -> Option<types::JsonRpcNotification> {
+        self.client.poll_notification().await
+    }
+
+    /// Handle inbound `notifications/tools/list_changed` by re-fetching
+    /// `tools/list` (WEFT-200).
+    ///
+    /// Returns `Ok(None)` if no list-changed notification was pending.
+    pub async fn refresh_tools_if_list_changed(&self) -> Result<Option<Vec<ToolDefinition>>> {
+        self.ensure_connected().await?;
+        self.client.refresh_tools_if_list_changed().await
+    }
+
+    /// Whether the peer advertised `tools.listChanged` at handshake (WEFT-200).
+    pub fn peer_tools_list_changed(&self) -> bool {
+        self.server_capabilities.tools_list_changed()
     }
 
     /// Call a tool on the connected server.
@@ -953,6 +1023,79 @@ mod tests {
         assert_eq!(session.server_info.version, "0.1.0");
         assert_eq!(session.protocol_version, "2025-06-18");
         assert!(session.server_capabilities.tools.is_some());
+    }
+
+    #[test]
+    fn server_capabilities_tools_list_changed() {
+        let caps = ServerCapabilities {
+            tools: Some(serde_json::json!({ "listChanged": true })),
+        };
+        assert!(caps.tools_list_changed());
+        let caps_false = ServerCapabilities {
+            tools: Some(serde_json::json!({ "listChanged": false })),
+        };
+        assert!(!caps_false.tools_list_changed());
+        assert!(!ServerCapabilities::default().tools_list_changed());
+    }
+
+    #[tokio::test]
+    async fn client_refresh_tools_on_list_changed() {
+        // tools/list response after list_changed (id will be 1).
+        let tools_resp = make_success_response(
+            1,
+            serde_json::json!({
+                "tools": [{
+                    "name": "after_change",
+                    "description": "new tool",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+        );
+        let (shared, mock) = MockTransport::new(vec![tools_resp]).shared();
+        mock.inject_notification(
+            crate::mcp::TOOLS_LIST_CHANGED_METHOD,
+            serde_json::json!({}),
+        )
+        .await;
+
+        let client = McpClient::new(Box::new(shared));
+        let refreshed = client.refresh_tools_if_list_changed().await.unwrap();
+        let tools = refreshed.expect("expected refresh");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "after_change");
+
+        // Second call with empty queue → None
+        assert!(client.refresh_tools_if_list_changed().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn session_refresh_tools_if_list_changed() {
+        let init = make_init_response(1);
+        let tools_resp = make_success_response(
+            2,
+            serde_json::json!({
+                "tools": [{
+                    "name": "t1",
+                    "description": "d",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+        );
+        let (shared, mock) = MockTransport::new(vec![init, tools_resp]).shared();
+        let session = McpSession::connect(Box::new(shared)).await.unwrap();
+        assert!(session.peer_tools_list_changed());
+
+        mock.inject_notification(
+            crate::mcp::TOOLS_LIST_CHANGED_METHOD,
+            serde_json::json!({}),
+        )
+        .await;
+        let tools = session
+            .refresh_tools_if_list_changed()
+            .await
+            .unwrap()
+            .expect("tools after list_changed");
+        assert_eq!(tools[0].name, "t1");
     }
 
     #[tokio::test]

@@ -756,5 +756,38 @@ mod tests {
             let task = args.get("task").and_then(|v| v.as_str());
             assert_eq!(task, Some("run a swarm task"));
         }
+
+        /// WEFT-201: corpus cases for pre-LLM short-circuit (see
+        /// `docs/guides/auto-delegation-classifier.md`).
+        #[test]
+        fn auto_delegation_classifier_corpus() {
+            let config = DelegationConfig {
+                claude_enabled: true,
+                rules: vec![
+                    DelegationRule {
+                        pattern: r"(?i)^list\b".into(),
+                        target: DelegationTarget::Local,
+                    },
+                    DelegationRule {
+                        pattern: r"(?i)\b(deploy|swarm|orchestrate)\b".into(),
+                        target: DelegationTarget::Claude,
+                    },
+                ],
+                ..Default::default()
+            };
+            let router = build_auto_delegation(&config);
+
+            // Delegate
+            assert!(router.should_delegate("deploy to prod").is_some());
+            assert!(router.should_delegate("orchestrate a multi-agent review").is_some());
+            // Stay local
+            assert!(router.should_delegate("list all files").is_none());
+            assert!(router.should_delegate("hello").is_none());
+            // Anchoring: mid-sentence list without ^ only hits if Auto is high
+            assert!(
+                router.should_delegate("please list open bugs").is_none(),
+                "short non-keyword message should not auto-delegate"
+            );
+        }
     }
 }

@@ -200,8 +200,14 @@ npx --no-install @claude-flow/cli doctor --fix
 ### Specialized
 `security-architect`, `security-auditor`, `memory-specialist`, `performance-engineer`
 
-### Swarm Coordination
+### Swarm Coordination (claude-flow prompt roles only — WEFT-199)
 `hierarchical-coordinator`, `mesh-coordinator`, `adaptive-coordinator`
+
+These names are **claude-flow / Ruflo swarm prompts**, not separate
+in-tree Rust coordinator types. WeftOS runtime multi-agent fan-out is
+[`SwarmCoordinator`](crates/clawft-core/src/agent_bus/coordinator.rs)
+with **flat** topology only (`SwarmTopology::Flat`). See
+`docs/architecture/swarm-topology.md`.
 
 ### GitHub & Repository
 `pr-manager`, `code-review-swarm`, `issue-tracker`, `release-manager`

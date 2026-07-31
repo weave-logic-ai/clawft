@@ -211,6 +211,115 @@ impl DelegationEngine {
     pub fn config(&self) -> &DelegationConfig {
         &self.config
     }
+
+    /// Explain a routing decision without executing the task (WEFT-196).
+    ///
+    /// Surfaces matched rule, complexity score, availability inputs, and the
+    /// resolved target so operators can debug `weft delegate debug <task>`.
+    pub fn explain(&self, task: &str, claude_available: bool) -> RoutingExplanation {
+        let complexity = Self::complexity_estimate(task);
+        let mut matched_rule: Option<MatchedRuleInfo> = None;
+        let mut rule_target: Option<DelegationTarget> = None;
+
+        for rule in &self.compiled_rules {
+            if rule.regex.is_match(task) {
+                matched_rule = Some(MatchedRuleInfo {
+                    pattern: rule.regex.as_str().to_string(),
+                    configured_target: rule.target,
+                });
+                rule_target = Some(rule.target);
+                break;
+            }
+        }
+
+        let (target, reason) = if let Some(configured) = rule_target {
+            let resolved = self.resolve_availability(configured, claude_available);
+            let reason = if resolved != configured {
+                format!(
+                    "rule matched target={configured:?} but fell back to {resolved:?} \
+                     (claude_available={claude_available}, claude_enabled={})",
+                    self.config.claude_enabled
+                )
+            } else {
+                format!("rule matched target={resolved:?}")
+            };
+            (resolved, reason)
+        } else {
+            let resolved = self.auto_decide(task, claude_available);
+            let reason = format!(
+                "no rule matched; auto heuristic complexity={complexity:.3} → {resolved:?} \
+                 (claude_available={claude_available}, claude_enabled={})",
+                self.config.claude_enabled
+            );
+            (resolved, reason)
+        };
+
+        RoutingExplanation {
+            task: task.to_owned(),
+            target,
+            complexity,
+            matched_rule,
+            claude_available,
+            claude_enabled: self.config.claude_enabled,
+            claude_model: self.config.claude_model.clone(),
+            reason,
+            rule_count: self.compiled_rules.len(),
+        }
+    }
+}
+
+/// Matched rule details from [`DelegationEngine::explain`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedRuleInfo {
+    /// Regex pattern string that matched.
+    pub pattern: String,
+    /// Target configured on the rule (before availability resolution).
+    pub configured_target: DelegationTarget,
+}
+
+/// Full routing explanation for debug / CLI surfaces (WEFT-196).
+#[derive(Debug, Clone)]
+pub struct RoutingExplanation {
+    /// Input task text.
+    pub task: String,
+    /// Resolved target after availability checks.
+    pub target: DelegationTarget,
+    /// Complexity score in 0.0..1.0.
+    pub complexity: f32,
+    /// First matching rule, if any.
+    pub matched_rule: Option<MatchedRuleInfo>,
+    /// Whether Claude was reported available to the engine.
+    pub claude_available: bool,
+    /// Config flag `claude_enabled`.
+    pub claude_enabled: bool,
+    /// Configured Claude model id.
+    pub claude_model: String,
+    /// Human-readable decision rationale.
+    pub reason: String,
+    /// Number of compiled (valid) rules in the engine.
+    pub rule_count: usize,
+}
+
+impl RoutingExplanation {
+    /// Serialize to a JSON value for `--json` CLI output.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "task": self.task,
+            "target": format!("{:?}", self.target).to_lowercase(),
+            "complexity": self.complexity,
+            "matched_rule": self.matched_rule.as_ref().map(|r| {
+                serde_json::json!({
+                    "pattern": r.pattern,
+                    "configured_target": format!("{:?}", r.configured_target).to_lowercase(),
+                })
+            }),
+            "claude_available": self.claude_available,
+            "claude_enabled": self.claude_enabled,
+            "claude_model": self.claude_model,
+            "reason": self.reason,
+            "rule_count": self.rule_count,
+        })
+    }
 }
 
 /// Result of a delegation decision.
@@ -460,6 +569,45 @@ mod tests {
         assert_eq!(result.target, DelegationTarget::Local);
         assert_eq!(result.target_pid, None);
         assert!(!result.is_kernel_local());
+    }
+
+    #[test]
+    fn explain_reports_matched_rule() {
+        let engine = make_engine(vec![DelegationRule {
+            pattern: r"(?i)deploy".into(),
+            target: DelegationTarget::Claude,
+        }]);
+        let exp = engine.explain("deploy to production", true);
+        assert_eq!(exp.target, DelegationTarget::Claude);
+        assert!(exp.matched_rule.is_some());
+        assert_eq!(
+            exp.matched_rule.as_ref().unwrap().configured_target,
+            DelegationTarget::Claude
+        );
+        assert!(exp.reason.contains("rule matched"));
+        let json = exp.to_json();
+        assert_eq!(json["target"], "claude");
+    }
+
+    #[test]
+    fn explain_reports_fallback_when_unavailable() {
+        let engine = make_engine(vec![DelegationRule {
+            pattern: r"(?i)deploy".into(),
+            target: DelegationTarget::Claude,
+        }]);
+        let exp = engine.explain("deploy to production", false);
+        assert_eq!(exp.target, DelegationTarget::Local);
+        assert!(!exp.claude_available);
+        assert!(exp.reason.contains("fell back"));
+    }
+
+    #[test]
+    fn explain_auto_when_no_rule() {
+        let engine = make_engine(vec![]);
+        let exp = engine.explain("hi", true);
+        assert_eq!(exp.target, DelegationTarget::Local);
+        assert!(exp.matched_rule.is_none());
+        assert!(exp.reason.contains("no rule matched"));
     }
 
     #[test]

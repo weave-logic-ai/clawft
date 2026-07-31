@@ -35,6 +35,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_routing::AgentRoutingConfig;
 use crate::delegation::DelegationConfig;
 use crate::routing::RoutingConfig;
 use crate::secret::SecretString;
@@ -78,6 +79,10 @@ pub struct Config {
     /// Tiered routing and permission configuration.
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// Multi-agent / doctor routing table (WEFT-197).
+    #[serde(default)]
+    pub agent_routing: AgentRoutingConfig,
 
     /// Voice pipeline configuration (STT, TTS, VAD, wake word).
     #[serde(default)]

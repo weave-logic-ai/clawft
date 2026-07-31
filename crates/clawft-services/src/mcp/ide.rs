@@ -157,7 +157,7 @@ fn ide_tool_definitions() -> Vec<ToolDefinition> {
 }
 
 // ---------------------------------------------------------------------------
-// IdeDispatcher trait
+// IdeDispatcher callback type
 // ---------------------------------------------------------------------------
 
 /// Callback for IDE tool execution.
@@ -169,21 +169,58 @@ pub type IdeDispatchFn = dyn Fn(&str, Value) -> Pin<Box<dyn Future<Output = Resu
     + Sync;
 
 // ---------------------------------------------------------------------------
-// IdeToolProvider
+// IdeBackend (WEFT-193)
 // ---------------------------------------------------------------------------
 
-/// A [`ToolProvider`] that exposes IDE-specific tools via MCP.
+/// Pluggable IDE execution backend.
 ///
-/// Created by the integration layer when a VS Code extension connects.
-/// The dispatcher is provided by the extension backend and routes
-/// tool calls to the actual IDE.
-pub struct IdeToolProvider {
-    tools: Vec<ToolDefinition>,
+/// Production hosts (VS Code extension, Cursor, JetBrains) implement this
+/// (or attach via [`HotSwapIdeBackend`]) so tool calls reach a live editor.
+/// Listing tools does not require a connected backend; executing them does.
+#[async_trait]
+pub trait IdeBackend: Send + Sync {
+    /// Invoke an IDE tool by name with JSON arguments.
+    async fn invoke(&self, name: &str, args: Value) -> Result<String, String>;
+
+    /// Whether a live IDE is currently attached and reachable.
+    fn is_connected(&self) -> bool;
+
+    /// Short backend identifier for diagnostics (`"disconnected"`,
+    /// `"callback"`, `"hot-swap"`, extension id, …).
+    fn backend_name(&self) -> &str;
+}
+
+/// Honest disconnected backend: tools list is available, execution fails
+/// with an explicit not-connected message (WEFT-193).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DisconnectedIdeBackend;
+
+#[async_trait]
+impl IdeBackend for DisconnectedIdeBackend {
+    async fn invoke(&self, name: &str, _args: Value) -> Result<String, String> {
+        Err(format!(
+            "IDE backend not connected: cannot execute '{name}'. \
+             Attach a live IDE via IdeToolProvider::with_backend or \
+             HotSwapIdeBackend::connect."
+        ))
+    }
+
+    fn is_connected(&self) -> bool {
+        false
+    }
+
+    fn backend_name(&self) -> &str {
+        "disconnected"
+    }
+}
+
+/// Callback-backed IDE backend (connected for the lifetime of the provider).
+pub struct CallbackIdeBackend {
     dispatcher: Arc<IdeDispatchFn>,
 }
 
-impl IdeToolProvider {
-    /// Create a new IDE tool provider with a custom dispatcher.
+impl CallbackIdeBackend {
+    /// Wrap a dispatcher function as a connected backend.
     pub fn new<F>(dispatcher: F) -> Self
     where
         F: Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
@@ -192,18 +229,155 @@ impl IdeToolProvider {
             + 'static,
     {
         Self {
-            tools: ide_tool_definitions(),
             dispatcher: Arc::new(dispatcher),
         }
     }
+}
 
-    /// Create a provider with a no-op dispatcher (useful for listing tools
-    /// without an actual IDE connection).
+#[async_trait]
+impl IdeBackend for CallbackIdeBackend {
+    async fn invoke(&self, name: &str, args: Value) -> Result<String, String> {
+        (self.dispatcher)(name, args).await
+    }
+
+    fn is_connected(&self) -> bool {
+        true
+    }
+
+    fn backend_name(&self) -> &str {
+        "callback"
+    }
+}
+
+/// Hot-pluggable IDE backend: starts disconnected; an extension can attach
+/// and detach a live dispatcher at runtime (WEFT-193 real wire path).
+pub struct HotSwapIdeBackend {
+    dispatcher: tokio::sync::RwLock<Option<Arc<IdeDispatchFn>>>,
+}
+
+impl HotSwapIdeBackend {
+    /// Create a disconnected hot-swap backend.
+    pub fn new() -> Self {
+        Self {
+            dispatcher: tokio::sync::RwLock::new(None),
+        }
+    }
+
+    /// Attach a live IDE dispatcher (extension connected).
+    pub async fn connect<F>(&self, dispatcher: F)
+    where
+        F: Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let mut slot = self.dispatcher.write().await;
+        *slot = Some(Arc::new(dispatcher));
+    }
+
+    /// Detach the live dispatcher (extension disconnected).
+    pub async fn disconnect(&self) {
+        let mut slot = self.dispatcher.write().await;
+        *slot = None;
+    }
+}
+
+impl Default for HotSwapIdeBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl IdeBackend for HotSwapIdeBackend {
+    async fn invoke(&self, name: &str, args: Value) -> Result<String, String> {
+        let guard = self.dispatcher.read().await;
+        match guard.as_ref() {
+            Some(dispatch) => dispatch(name, args).await,
+            None => Err(format!(
+                "IDE backend not connected: cannot execute '{name}'. \
+                 Wait for the IDE extension to attach, or call HotSwapIdeBackend::connect."
+            )),
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        // try_read avoids async in a sync method; if locked, treat as connected
+        // only when we can observe a dispatcher.
+        match self.dispatcher.try_read() {
+            Ok(guard) => guard.is_some(),
+            Err(_) => true, // write lock held → connect/disconnect in flight
+        }
+    }
+
+    fn backend_name(&self) -> &str {
+        "hot-swap"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IdeToolProvider
+// ---------------------------------------------------------------------------
+
+/// A [`ToolProvider`] that exposes IDE-specific tools via MCP.
+///
+/// Created by the integration layer when a VS Code extension connects.
+/// The backend is provided by the extension and routes tool calls to
+/// the actual IDE.
+///
+/// # Connection honesty (WEFT-193)
+///
+/// - [`IdeToolProvider::disconnected`] / [`IdeToolProvider::stub`]: list-only;
+///   execution returns an explicit not-connected error.
+/// - [`IdeToolProvider::new`] / [`IdeToolProvider::with_backend`]: real backends
+///   that can execute tools when connected.
+pub struct IdeToolProvider {
+    tools: Vec<ToolDefinition>,
+    backend: Arc<dyn IdeBackend>,
+}
+
+impl IdeToolProvider {
+    /// Create a new IDE tool provider with a custom (connected) dispatcher.
+    pub fn new<F>(dispatcher: F) -> Self
+    where
+        F: Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::with_backend(Arc::new(CallbackIdeBackend::new(dispatcher)))
+    }
+
+    /// Create a provider backed by an arbitrary [`IdeBackend`].
+    pub fn with_backend(backend: Arc<dyn IdeBackend>) -> Self {
+        Self {
+            tools: ide_tool_definitions(),
+            backend,
+        }
+    }
+
+    /// Honest disconnected provider: tools list is available, execution fails
+    /// with a clear not-connected message (WEFT-193).
+    pub fn disconnected() -> Self {
+        Self::with_backend(Arc::new(DisconnectedIdeBackend))
+    }
+
+    /// Alias for [`disconnected`] — kept for call-site compatibility.
+    ///
+    /// Prefer [`disconnected`] in new code; this is not a pretend-working
+    /// stub. Execution always reports that no IDE is attached.
     pub fn stub() -> Self {
-        Self::new(|name, _args| {
-            let name = name.to_string();
-            Box::pin(async move { Err(format!("IDE not connected: cannot execute '{name}'")) })
-        })
+        Self::disconnected()
+    }
+
+    /// Whether the backend reports a live IDE connection.
+    pub fn is_connected(&self) -> bool {
+        self.backend.is_connected()
+    }
+
+    /// Backend identifier for diagnostics.
+    pub fn backend_name(&self) -> &str {
+        self.backend.backend_name()
     }
 }
 
@@ -211,6 +385,8 @@ impl std::fmt::Debug for IdeToolProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdeToolProvider")
             .field("tool_count", &self.tools.len())
+            .field("backend", &self.backend.backend_name())
+            .field("connected", &self.backend.is_connected())
             .finish_non_exhaustive()
     }
 }
@@ -231,8 +407,7 @@ impl ToolProvider for IdeToolProvider {
             return Err(ToolError::NotFound(name.to_string()));
         }
 
-        let fut = (self.dispatcher)(name, args);
-        match fut.await {
+        match self.backend.invoke(name, args).await {
             Ok(output) => Ok(CallToolResult::text(output)),
             Err(msg) => Ok(CallToolResult::error(msg)),
         }
@@ -349,6 +524,73 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
+        match &result.content[0] {
+            super::super::provider::ContentBlock::Text { text } => {
+                assert!(
+                    text.contains("not connected"),
+                    "honest disconnected error expected, got: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disconnected_is_not_connected() {
+        let provider = IdeToolProvider::disconnected();
+        assert!(!provider.is_connected());
+        assert_eq!(provider.backend_name(), "disconnected");
+    }
+
+    #[test]
+    fn callback_backend_is_connected() {
+        let provider = IdeToolProvider::new(|_name, _args| {
+            Box::pin(async move { Ok("ok".into()) })
+        });
+        assert!(provider.is_connected());
+        assert_eq!(provider.backend_name(), "callback");
+    }
+
+    #[tokio::test]
+    async fn hot_swap_backend_connect_and_disconnect() {
+        let backend = Arc::new(HotSwapIdeBackend::new());
+        assert!(!backend.is_connected());
+
+        let provider = IdeToolProvider::with_backend(backend.clone());
+        assert!(!provider.is_connected());
+
+        let result = provider
+            .call_tool("ide_open_file", serde_json::json!({"path": "/x.rs"}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+
+        backend
+            .connect(|name, args| {
+                let name = name.to_string();
+                Box::pin(async move {
+                    let path = args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    Ok(format!("{name}:{path}"))
+                })
+            })
+            .await;
+        assert!(provider.is_connected());
+
+        let result = provider
+            .call_tool("ide_open_file", serde_json::json!({"path": "/x.rs"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        match &result.content[0] {
+            super::super::provider::ContentBlock::Text { text } => {
+                assert_eq!(text, "ide_open_file:/x.rs");
+            }
+        }
+
+        backend.disconnect().await;
+        assert!(!provider.is_connected());
     }
 
     #[tokio::test]

@@ -893,6 +893,71 @@ Cloud fallback active: sending audio to OpenAI Whisper API
 Filter logs with `RUST_LOG=voice.cloud_fallback=warn` (or include that
 target in a broader filter).
 
+## Wake word service (`weft voice install-service`)
+
+Install a background wake-word listener (`weft voice wake`) that starts with
+your session. The CLI auto-detects the platform service manager:
+
+| Platform | Manager | Artifact / mechanism |
+|----------|---------|----------------------|
+| Linux | `systemd` | User unit from `scripts/clawft-wake.service` |
+| macOS | `launchd` | `~/Library/LaunchAgents/com.clawft.wake.plist` |
+| Windows | **`schtasks`** | Task Scheduler task **`ClawftWake`** (ONLOGON) |
+
+Override detection with `--manager systemd|launchd|schtasks`.
+
+### Windows (WEFT-220) — final supported route
+
+Windows does **not** install a Windows Service (SCM). The supported path is
+a **per-user Task Scheduler logon task** so the process runs in the
+interactive session and can use the microphone.
+
+**Preferred (automated):**
+
+```text
+weft voice install-service
+weft voice install-service --manager schtasks
+```
+
+**Optional companion script** (same schtasks semantics; useful for imaging
+or when the CLI is not yet on PATH):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-clawft-wake-schtasks.ps1
+# optional:
+#   -WeftPath 'C:\Program Files\weft\weft.exe'
+#   -Uninstall
+```
+
+**Manual schtasks** (if automation is unavailable):
+
+```text
+schtasks /Create /TN "ClawftWake" /TR "C:\path\to\weft.exe voice wake" /SC ONLOGON /RL LIMITED /F
+```
+
+Quote the exe path when it contains spaces:
+
+```text
+schtasks /Create /TN "ClawftWake" /TR "\"C:\Program Files\weft\weft.exe\" voice wake" /SC ONLOGON /RL LIMITED /F
+```
+
+**GUI:** Task Scheduler → Create Task → name `ClawftWake` → trigger At log on
+→ action Start a program (`weft.exe`, arguments `voice wake`).
+
+**Manage:**
+
+```text
+schtasks /Run    /TN "ClawftWake"
+schtasks /End    /TN "ClawftWake"
+schtasks /Query  /TN "ClawftWake" /V /FO LIST
+schtasks /Delete /TN "ClawftWake" /F
+```
+
+This is the **final** Windows install-service design (not a temporary
+placeholder). A future Windows Service backend is out of scope unless a
+separate ticket reopens the SCM path with interactive/mic constraints
+addressed.
+
 ---
 
 ## Further Reading

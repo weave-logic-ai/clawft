@@ -3,6 +3,18 @@
 //! [`SwarmCoordinator`] implements the lead-agent pattern: dispatch
 //! subtasks to registered workers, optionally spawn worker loops, and
 //! collect replies correlated by `reply_to`.
+//!
+//! # Topology (WEFT-199)
+//!
+//! Runtime coordination is **flat fan-out / collect**
+//! ([`SwarmTopology::Flat`]). Labels such as `mesh`, `hierarchical`, and
+//! `adaptive` exist as [`SwarmTopology`] variants for documentation and
+//! future axes, but they do **not** change dispatch behaviour today.
+//!
+//! Claude-flow agent names (`mesh-coordinator`, `hierarchical-coordinator`,
+//! `adaptive-coordinator`) are **prompt-only** swarm roles used by the
+//! Ruflo / claude-flow harness — not separate in-tree coordinator
+//! implementations. See `docs/architecture/swarm-topology.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,11 +32,50 @@ use super::worker::{
     DEFAULT_REPLY_TTL,
 };
 
+/// Declared swarm topology axis (WEFT-199).
+///
+/// Only [`Self::Flat`] is implemented by [`SwarmCoordinator`] today:
+/// the lead dispatches to every registered worker and collects replies.
+/// Other variants are **reserved labels** so hosts / docs can name the
+/// intent without implying distinct runtime graphs. Claude-flow prompt
+/// agents (`mesh-coordinator`, etc.) remain external to this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SwarmTopology {
+    /// Lead fan-out to all workers, collect by `reply_to` (implemented).
+    #[default]
+    Flat,
+    /// Reserved: peer-to-peer mesh (claude-flow prompt topology only).
+    Mesh,
+    /// Reserved: tree of coordinators (claude-flow prompt topology only).
+    Hierarchical,
+    /// Reserved: dynamic topology switching (claude-flow prompt only).
+    Adaptive,
+}
+
+impl SwarmTopology {
+    /// Whether this topology changes [`SwarmCoordinator`] dispatch today.
+    pub fn is_runtime_implemented(self) -> bool {
+        matches!(self, Self::Flat)
+    }
+
+    /// Stable string id for logs / CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::Mesh => "mesh",
+            Self::Hierarchical => "hierarchical",
+            Self::Adaptive => "adaptive",
+        }
+    }
+}
+
 /// Coordinator for dispatching subtasks to worker agents and collecting
 /// results via the [`AgentBus`].
 ///
 /// Implements the coordinator pattern: a lead agent dispatches work to
-/// worker agents and waits for their replies.
+/// worker agents and waits for their replies. Topology is always flat
+/// fan-out at runtime (see [`SwarmTopology`]).
 pub struct SwarmCoordinator {
     /// Shared agent bus for message delivery.
     bus: Arc<AgentBus>,
@@ -32,6 +83,8 @@ pub struct SwarmCoordinator {
     coordinator_id: String,
     /// Registered worker agent IDs.
     worker_agents: Vec<String>,
+    /// Declared topology (informational; only Flat is implemented).
+    topology: SwarmTopology,
     /// Coordinator inbox (created when collect / spawn is used).
     inbox: Option<AgentInbox>,
     /// Live worker join handles (populated by [`Self::spawn_workers`]).
@@ -49,6 +102,7 @@ impl SwarmCoordinator {
             bus,
             coordinator_id: coordinator_id.into(),
             worker_agents,
+            topology: SwarmTopology::Flat,
             inbox: None,
             worker_handles: Vec::new(),
         }
@@ -77,6 +131,28 @@ impl SwarmCoordinator {
         worker_agents: Vec<String>,
     ) -> (Self, Arc<AgentBus>) {
         Self::with_capacity(coordinator_id, worker_agents, DEFAULT_INBOX_CAPACITY)
+    }
+
+    /// Record a declared topology label (WEFT-199).
+    ///
+    /// Non-flat values are accepted for telemetry / docs alignment but
+    /// **do not** change fan-out behaviour. Prefer leaving the default
+    /// [`SwarmTopology::Flat`] unless you are intentionally tagging a
+    /// claude-flow prompt topology for observability.
+    pub fn with_topology(mut self, topology: SwarmTopology) -> Self {
+        if !topology.is_runtime_implemented() {
+            debug!(
+                topology = topology.as_str(),
+                "SwarmTopology is prompt/docs-only; runtime remains flat fan-out"
+            );
+        }
+        self.topology = topology;
+        self
+    }
+
+    /// Declared topology (always flat fan-out at runtime today).
+    pub fn topology(&self) -> SwarmTopology {
+        self.topology
     }
 
     /// Shared bus handle.
@@ -335,6 +411,27 @@ pub async fn run_swarm_demo(worker_count: usize) -> serde_json::Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn topology_flat_is_runtime_default() {
+        assert!(SwarmTopology::Flat.is_runtime_implemented());
+        assert!(!SwarmTopology::Mesh.is_runtime_implemented());
+        assert!(!SwarmTopology::Hierarchical.is_runtime_implemented());
+        assert!(!SwarmTopology::Adaptive.is_runtime_implemented());
+        assert_eq!(SwarmTopology::default(), SwarmTopology::Flat);
+        assert_eq!(SwarmTopology::Hierarchical.as_str(), "hierarchical");
+    }
+
+    #[test]
+    fn coordinator_defaults_to_flat_topology() {
+        let bus = Arc::new(AgentBus::new());
+        let coord = SwarmCoordinator::new(bus, "c", vec!["w".into()]);
+        assert_eq!(coord.topology(), SwarmTopology::Flat);
+        let tagged = coord.with_topology(SwarmTopology::Mesh);
+        assert_eq!(tagged.topology(), SwarmTopology::Mesh);
+        // Label only — workers list unchanged.
+        assert_eq!(tagged.workers(), &["w".to_string()]);
+    }
 
     #[tokio::test]
     async fn coordinator_dispatch() {

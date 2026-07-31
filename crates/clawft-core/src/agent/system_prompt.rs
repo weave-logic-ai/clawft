@@ -168,7 +168,7 @@ impl SystemPromptBuilder {
         if status == BindingThreadStatus::Mismatch && self.binding_thread_mode.is_deny() {
             warn!(
                 hash = %identity.hash,
-                source = identity.source,
+                source = %identity.source,
                 reason = BINDING_THREAD_MISMATCH_REASON,
                 "binding-thread mismatch: SOUL.md does not contain the \
                  compile-time BINDING_THREAD_EXCERPT — hard refusing turn \
@@ -178,7 +178,7 @@ impl SystemPromptBuilder {
         }
         Ok(BuiltSystemPrompt {
             body: self.render_with_status(&identity, status),
-            identity_source: identity.source.to_string(),
+            identity_source: identity.source.as_str().to_string(),
             binding_thread_status: status,
         })
     }
@@ -207,14 +207,15 @@ impl SystemPromptBuilder {
         if status == BindingThreadStatus::Mismatch {
             warn!(
                 hash = %identity.hash,
-                source = identity.source,
+                source = %identity.source,
                 "binding-thread mismatch: SOUL.md does not contain the \
                  compile-time BINDING_THREAD_EXCERPT — running in \
                  degraded mode (agents.binding_thread_mode=warn_only)"
             );
         }
 
-        // Reserve roughly: identity bodies + ~512 bytes of scaffolding.
+        // Reserve roughly: identity bodies + ~512 bytes of scaffolding
+        // (+ pending journal summaries when present, WEFT-96).
         let mut s = String::with_capacity(identity.soul.len() + identity.identity.len() + 512);
         s.push_str("[identity]\n");
         s.push_str(&identity.soul);
@@ -241,6 +242,19 @@ impl SystemPromptBuilder {
         }
         s.push('\n');
 
+        // WEFT-96: surface pending journal rows consulted this turn.
+        // Promote still owns merging into SOUL.md — this is advisory.
+        if !identity.pending_journal.is_empty() {
+            s.push_str("[soul-journal-pending]\n");
+            s.push_str(&format!("count: {}\n", identity.pending_journal.len()));
+            for entry in &identity.pending_journal {
+                s.push_str("- ");
+                s.push_str(&entry.summary);
+                s.push('\n');
+            }
+            s.push('\n');
+        }
+
         s.push_str("[workspace]\n");
         s.push_str(&self.workspace.display().to_string());
         s.push('\n');
@@ -258,7 +272,7 @@ impl SystemPromptBuilder {
 mod tests {
     use super::*;
     use crate::agent::identity::{
-        BINDING_THREAD_EXCERPT, FileIdentityProvider, sha256_identity_hash,
+        BINDING_THREAD_EXCERPT, FileIdentityProvider, IdentitySource,
     };
     use async_trait::async_trait;
 
@@ -288,24 +302,13 @@ mod tests {
              {BINDING_THREAD_EXCERPT}.\n"
         );
         let identity = "# IDENTITY.md\n\nI am clawft.".to_string();
-        let hash = sha256_identity_hash(&soul, &identity);
-        Identity {
-            soul,
-            identity,
-            hash,
-            source: "test",
-        }
+        Identity::from_files(soul, identity, IdentitySource::Stub)
     }
 
     fn mismatch_identity() -> Identity {
         let soul = "# SOUL.md\n\nNothing distinctive in here.\n".to_string();
         let identity = "# IDENTITY.md\n\nI am clawft.".to_string();
-        Identity {
-            hash: sha256_identity_hash(&soul, &identity),
-            soul,
-            identity,
-            source: "test",
-        }
+        Identity::from_files(soul, identity, IdentitySource::Stub)
     }
 
     #[tokio::test]
@@ -333,11 +336,11 @@ mod tests {
         // WEFT-328: loop needs the source label for AgentChatResult.
         // WEFT-342: also surfaces binding_thread_status.
         let id = ok_identity();
-        assert_eq!(id.source, "test");
+        assert_eq!(id.source, IdentitySource::Stub);
         let provider = Arc::new(StubProvider(id));
         let builder = SystemPromptBuilder::new(provider, PathBuf::from("/tmp/ws"));
         let built = builder.build_with_meta().await.expect("build ok");
-        assert_eq!(built.identity_source, "test");
+        assert_eq!(built.identity_source, "stub");
         assert!(built.body.contains("[identity]"));
         assert_eq!(built.binding_thread_status, BindingThreadStatus::Ok);
     }
@@ -372,6 +375,29 @@ mod tests {
         let builder = SystemPromptBuilder::new(provider, PathBuf::from("/tmp"));
         let err = builder.build().await.unwrap_err();
         assert!(matches!(err, IdentityError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn build_surfaces_pending_journal_section() {
+        // WEFT-96: every-turn journal consult is visible in the prompt.
+        use crate::agent::soul_journal::PendingJournalEntry;
+        let mut id = ok_identity();
+        id.source = IdentitySource::Journal;
+        id.pending_journal = vec![PendingJournalEntry {
+            entry_id: "01HZ".into(),
+            summary: "prefer terse replies".into(),
+            content: "user wants shorter answers".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            conv_id: "c1".into(),
+            signal: "user_correction".into(),
+        }];
+        let provider = Arc::new(StubProvider(id));
+        let builder = SystemPromptBuilder::new(provider, PathBuf::from("/tmp/ws"));
+        let built = builder.build_with_meta().await.expect("build ok");
+        assert_eq!(built.identity_source, "journal");
+        assert!(built.body.contains("[soul-journal-pending]"));
+        assert!(built.body.contains("count: 1"));
+        assert!(built.body.contains("prefer terse replies"));
     }
 
     #[test]

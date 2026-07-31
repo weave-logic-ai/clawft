@@ -104,6 +104,12 @@ enum Commands {
     /// Multi-agent swarm demo (AgentBus + SwarmCoordinator).
     Swarm(commands::swarm_cmd::SwarmArgs),
 
+    /// Inspect task-delegation routing decisions.
+    Delegate(commands::delegate_cmd::DelegateArgs),
+
+    /// Environment and multi-agent readiness checks.
+    Doctor(commands::doctor::DoctorArgs),
+
     /// Manage workspaces.
     Workspace(commands::workspace_cmd::WorkspaceArgs),
 
@@ -499,6 +505,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tools(args) => commands::tools_cmd::run(args).await?,
         Commands::Agents(args) => commands::agents_cmd::run(args).await?,
         Commands::Swarm(args) => commands::swarm_cmd::run(args).await?,
+        Commands::Delegate(args) => commands::delegate_cmd::run(args).await?,
         Commands::Workspace(args) => commands::workspace_cmd::run(args).await?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
         Commands::Analyze(args) => commands::analyze_cmd::run(args).await?,
@@ -509,6 +516,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ui(args) => commands::ui_cmd::run(args).await?,
         #[cfg(feature = "voice")]
         Commands::Voice(args) => commands::voice::handle_voice(args).await?,
+        Commands::Doctor(args) => commands::doctor::run(args).await?,
         Commands::Help(args) => commands::help_cmd::run(args)?,
         Commands::Update => {
             println!("weft v{BUILD_VERSION}");
@@ -577,6 +585,8 @@ mod tests {
         assert!(sub_names.contains(&"skills"));
         assert!(sub_names.contains(&"tools"));
         assert!(sub_names.contains(&"agents"));
+        assert!(sub_names.contains(&"swarm"));
+        assert!(sub_names.contains(&"delegate"));
         assert!(sub_names.contains(&"workspace"));
         assert!(sub_names.contains(&"assess"));
         assert!(sub_names.contains(&"plugins"));

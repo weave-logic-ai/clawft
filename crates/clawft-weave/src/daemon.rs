@@ -1751,17 +1751,37 @@ pub async fn run(
         // substrate + anchor path as agent.chat turns.
         let _ = DAEMON_TURN_SINK.set(agent_sink.clone());
 
-        // agent-core-v1 Phase D1: wire a FileIdentityProvider so each
-        // turn's leading system message is built from
-        // `.clawft/SOUL.md` + `.clawft/IDENTITY.md` (with the
-        // docs/skills/clawft fallback). The provider caches the most
-        // recent successful load so cross-turn IO is cheap.
-        let identity_provider: Arc<dyn clawft_core::agent::identity::IdentityProvider> = Arc::new(
-            clawft_core::agent::identity::FileIdentityProvider::new(
-                &workspace,
-                Arc::clone(&identity_platform),
-            ),
-        );
+        // agent-core-v1 Phase D1 + WEFT-96: FileIdentityProvider loads
+        // `.clawft/SOUL.md` + `.clawft/IDENTITY.md` every turn; wrap with
+        // JournalAwareIdentityProvider so pending substrate journal rows
+        // are consulted (read-on-every-turn) without auto-promoting into
+        // SOUL.md. Degrade-open on journal read errors so a substrate
+        // blip never blocks chat.
+        let identity_provider: Arc<dyn clawft_core::agent::identity::IdentityProvider> = {
+            let file_base: Arc<dyn clawft_core::agent::identity::IdentityProvider> = Arc::new(
+                clawft_core::agent::identity::FileIdentityProvider::new(
+                    &workspace,
+                    Arc::clone(&identity_platform),
+                ),
+            );
+            let k = kernel.read().await;
+            let journal_client = Arc::new(clawft_service_agent::KernelSubstrateClient::new(
+                k.substrate_service().clone(),
+                k.node_registry().clone(),
+            ));
+            let journal_reader: Arc<dyn clawft_core::agent::soul_journal::SoulJournalReader> =
+                Arc::new(clawft_service_agent::SubstrateSoulJournalReader::new(
+                    journal_client,
+                ));
+            info!(
+                "agent-core: journal-aware identity provider attached \
+                 (substrate soul_journal read-on-every-turn)"
+            );
+            Arc::new(clawft_core::agent::identity::JournalAwareIdentityProvider::new(
+                file_base,
+                journal_reader,
+            ))
+        };
 
         // agent-core-v1 Phase D2: register a single concierge
         // principal in the kernel's AgentRegistry. v1 chat is

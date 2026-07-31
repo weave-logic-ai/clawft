@@ -14,6 +14,7 @@ pub fn general_help() -> String {
     output.push_str("  mcp            Manage MCP servers (add / list / remove)\n");
     output.push_str("  mcp-server     Run as an MCP tool server over stdio\n");
     output.push_str("  status         Show configuration status and diagnostics\n");
+    output.push_str("  doctor         Multi-agent readiness checks (claude PATH, delegation, routes)\n");
     output.push_str("  channels       Inspect channel configuration\n");
     output.push_str("  cron           Manage scheduled (cron) jobs\n");
     output.push_str("  sessions       Manage agent sessions\n");

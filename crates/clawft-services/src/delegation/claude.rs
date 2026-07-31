@@ -17,6 +17,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -96,6 +97,9 @@ pub struct ClaudeDelegator {
     max_tokens: u32,
     excluded_tools: Vec<String>,
     base_url: String,
+    /// Last-known liveness for routing (WEFT-195). Cleared on auth failures;
+    /// restored after a successful API response.
+    healthy: AtomicBool,
 }
 
 impl ClaudeDelegator {
@@ -115,7 +119,31 @@ impl ClaudeDelegator {
             max_tokens: config.max_tokens,
             excluded_tools: config.excluded_tools.clone(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            healthy: AtomicBool::new(true),
         })
+    }
+
+    /// Whether this delegator is currently usable for routing decisions
+    /// (WEFT-195).
+    ///
+    /// Local checks only (no network on the hot path):
+    /// - non-empty API key (enforced at construction)
+    /// - not marked unhealthy by a prior auth/API failure
+    ///
+    /// Auth lapses (HTTP 401/403) clear health so `delegate_task` stops
+    /// force-routing to Claude until a successful call restores it.
+    pub fn is_available(&self) -> bool {
+        !self.api_key.is_empty() && self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// Mark the delegator healthy/unhealthy (used by tests and recovery paths).
+    pub fn set_healthy(&self, healthy: bool) {
+        self.healthy.store(healthy, Ordering::Relaxed);
+    }
+
+    /// Configured Claude model identifier.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// Override the base URL (for testing with mock servers).
@@ -193,12 +221,21 @@ impl ClaudeDelegator {
 
             let status = response.status().as_u16();
             if !(200..300).contains(&status) {
+                // WEFT-195: auth failures mean Claude is not available for
+                // subsequent routing until a successful call restores health.
+                if status == 401 || status == 403 {
+                    self.healthy.store(false, Ordering::Relaxed);
+                    warn!(status, "claude delegator marked unavailable after auth failure");
+                }
                 let body_text = response.text().await.unwrap_or_default();
                 return Err(DelegationError::Api {
                     status,
                     body: body_text,
                 });
             }
+
+            // Successful response restores liveness.
+            self.healthy.store(true, Ordering::Relaxed);
 
             let resp_json: Value = response
                 .json()
@@ -302,6 +339,7 @@ impl std::fmt::Debug for ClaudeDelegator {
             .field("max_turns", &self.max_turns)
             .field("max_tokens", &self.max_tokens)
             .field("api_key", &"***")
+            .field("available", &self.is_available())
             .finish()
     }
 }
@@ -323,6 +361,23 @@ mod tests {
         let config = DelegationConfig::default();
         let delegator = ClaudeDelegator::new(&config, "sk-ant-test".into());
         assert!(delegator.is_some());
+    }
+
+    #[test]
+    fn is_available_true_when_healthy() {
+        let config = DelegationConfig::default();
+        let delegator = ClaudeDelegator::new(&config, "sk-ant-test".into()).unwrap();
+        assert!(delegator.is_available());
+    }
+
+    #[test]
+    fn is_available_false_after_set_healthy_false() {
+        let config = DelegationConfig::default();
+        let delegator = ClaudeDelegator::new(&config, "sk-ant-test".into()).unwrap();
+        delegator.set_healthy(false);
+        assert!(!delegator.is_available());
+        delegator.set_healthy(true);
+        assert!(delegator.is_available());
     }
 
     #[test]

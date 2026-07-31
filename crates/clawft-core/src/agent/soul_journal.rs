@@ -22,6 +22,11 @@
 //! 4. The production substrate writer lives in
 //!    `clawft-service-agent::soul_journal` and publishes under the
 //!    grant-gated `_derived/soul_journal/` topic.
+//! 5. **WEFT-96 / WS-D1 read path:** [`SoulJournalReader`] lists pending
+//!    observations on every identity turn (via
+//!    [`super::identity::JournalAwareIdentityProvider`]). In-core
+//!    [`InMemorySoulJournal`] implements both halves; production
+//!    substrate reader lives next to the writer in service-agent.
 //!
 //! ## Drift detection signal (documented)
 //!
@@ -221,6 +226,113 @@ pub trait SoulJournal: Send + Sync + 'static {
     async fn append(&self, observation: DriftObservation) -> Result<(), String>;
 }
 
+/// Pending journal observation as seen by the every-turn identity
+/// path (WEFT-96 / WS-D1).
+///
+/// Decoded from substrate values under
+/// [`SOUL_JOURNAL_SUBSTRATE_PREFIX`] (or in-memory / file mirrors).
+/// Promote (`weaver soul promote`) still owns merging into `SOUL.md`;
+/// identity loads only *consult* these rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingJournalEntry {
+    /// Stable entry id (ULID on substrate; `obs-…` in-core fallback).
+    pub entry_id: String,
+    /// One-line human-readable summary.
+    pub summary: String,
+    /// Full observation body.
+    pub content: String,
+    /// ISO-8601 timestamp when known (empty otherwise).
+    pub ts: String,
+    /// Conversation id that produced the observation (may be empty).
+    pub conv_id: String,
+    /// Drift-signal label (`user_correction`, `explicit`, …).
+    pub signal: String,
+}
+
+impl PendingJournalEntry {
+    /// Decode a substrate JSON value (same shape as
+    /// [`DriftObservation::to_substrate_value`]).
+    ///
+    /// Missing fields degrade to empty strings / content fallback so a
+    /// partially-written row never fails the every-turn path.
+    pub fn from_substrate_value(entry_id: impl Into<String>, value: &serde_json::Value) -> Self {
+        let entry_id = entry_id.into();
+        let content = value
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let summary = value
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let first = content.lines().next().unwrap_or("").trim();
+                if first.len() > 80 {
+                    format!("{}…", &first[..80])
+                } else if first.is_empty() {
+                    entry_id.clone()
+                } else {
+                    first.to_string()
+                }
+            });
+        Self {
+            entry_id,
+            summary,
+            content,
+            ts: value
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            conv_id: value
+                .get("conv_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            signal: value
+                .get("signal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }
+    }
+
+    /// Convert a finalized [`DriftObservation`] for the read path.
+    pub fn from_observation(obs: &DriftObservation) -> Self {
+        let o = obs.finalized();
+        Self {
+            entry_id: o.entry_id,
+            summary: o.summary,
+            content: o.content,
+            ts: o.ts,
+            conv_id: o.conv_id,
+            signal: o.signal.label().to_string(),
+        }
+    }
+}
+
+/// Read half of the soul journal — consulted on every identity turn
+/// (WEFT-96 / WS-D1).
+///
+/// Complements [`SoulJournal`] (write path / WEFT-330). Production
+/// substrate impl lives in `clawft-service-agent`; in-core tests use
+/// [`InMemorySoulJournal`].
+///
+/// Errors return `String` so [`super::identity::JournalAwareIdentityProvider`]
+/// can map them onto [`super::identity::IdentityError`] variants
+/// (WEFT-97 / WS-D5) under fail-closed mode.
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+pub trait SoulJournalReader: Send + Sync + 'static {
+    /// List pending drift observations (mesh-canonical order preferred).
+    ///
+    /// Called once per turn by the journal-aware identity provider.
+    /// Empty vec is success (no pending rows).
+    async fn list_pending(&self) -> Result<Vec<PendingJournalEntry>, String>;
+}
+
 /// HashMap-backed [`SoulJournal`] for unit tests.
 #[derive(Debug, Default)]
 pub struct InMemorySoulJournal {
@@ -252,6 +364,18 @@ impl SoulJournal for InMemorySoulJournal {
             .map_err(|e| format!("soul journal mutex poisoned: {e}"))?
             .push(finalized);
         Ok(())
+    }
+}
+
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+impl SoulJournalReader for InMemorySoulJournal {
+    async fn list_pending(&self) -> Result<Vec<PendingJournalEntry>, String> {
+        Ok(self
+            .entries()
+            .into_iter()
+            .map(|o| PendingJournalEntry::from_observation(&o))
+            .collect())
     }
 }
 
@@ -570,6 +694,44 @@ mod tests {
         assert!(!entries[0].entry_id.is_empty());
         assert!(!entries[0].ts.is_empty());
         assert_eq!(entries[0].summary, "terse preference");
+    }
+
+    #[tokio::test]
+    async fn in_memory_journal_reader_lists_pending() {
+        let j = InMemorySoulJournal::new();
+        j.append(DriftObservation::synthetic("a", "body-a"))
+            .await
+            .unwrap();
+        j.append(DriftObservation::synthetic("b", "body-b"))
+            .await
+            .unwrap();
+        let pending = SoulJournalReader::list_pending(&j).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].summary, "a");
+        assert_eq!(pending[1].content, "body-b");
+        assert_eq!(pending[0].signal, "synthetic");
+    }
+
+    #[test]
+    fn pending_entry_from_substrate_value_round_trip() {
+        let obs = DriftObservation::synthetic("sum", "full content body");
+        let value = obs.to_substrate_value();
+        let pending = PendingJournalEntry::from_substrate_value("01HZXTEST", &value);
+        assert_eq!(pending.entry_id, "01HZXTEST");
+        assert_eq!(pending.summary, "sum");
+        assert_eq!(pending.content, "full content body");
+        assert_eq!(pending.signal, "synthetic");
+        assert!(!pending.ts.is_empty());
+    }
+
+    #[test]
+    fn pending_entry_from_substrate_value_tolerates_sparse_payload() {
+        let value = serde_json::json!({ "content": "only content present" });
+        let pending = PendingJournalEntry::from_substrate_value("sparse-1", &value);
+        assert_eq!(pending.content, "only content present");
+        assert_eq!(pending.summary, "only content present");
+        assert!(pending.ts.is_empty());
+        assert!(pending.signal.is_empty());
     }
 
     #[tokio::test]

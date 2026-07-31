@@ -99,20 +99,36 @@ impl Tool for DelegateTaskTool {
 
         debug!(task = %task, "delegate_task invoked");
 
-        // Check if delegation engine approves.
-        let claude_available = true; // We have a delegator.
+        // WEFT-195: query the delegator for liveness instead of hardcoding true.
+        // Auth lapses / prior 401-403 mark the delegator unavailable so we
+        // fall back to Local rather than force-routing to a dead Claude path.
+        let claude_available = self.delegator.is_available();
         let decision = self.engine.decide(task, claude_available);
 
         if decision == DelegationTarget::Local {
-            info!(task = %task, "delegation engine decided to handle locally");
+            info!(
+                task = %task,
+                claude_available,
+                "delegation engine decided to handle locally"
+            );
             return Ok(json!({
                 "status": "local",
-                "message": "Task does not require delegation; handle locally.",
+                "message": if claude_available {
+                    "Task does not require delegation; handle locally."
+                } else {
+                    "Claude delegator is not available; handle locally."
+                },
                 "task": task,
+                "claude_available": claude_available,
             }));
         }
 
-        info!(task = %task, target = ?decision, "delegating task");
+        info!(
+            task = %task,
+            target = ?decision,
+            claude_available,
+            "delegating task"
+        );
 
         // Build the tool executor closure using the shared registry.
         let registry = self.registry.clone();
@@ -194,5 +210,36 @@ mod tests {
 
         assert_eq!(tool.name(), "delegate_task");
         assert!(!tool.description().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_delegator_routes_local() {
+        use clawft_types::delegation::{DelegationConfig, DelegationRule, DelegationTarget};
+
+        // Rule would route to Claude, but unhealthy delegator forces Local.
+        let config = DelegationConfig {
+            claude_enabled: true,
+            rules: vec![DelegationRule {
+                pattern: r"(?i)deploy".into(),
+                target: DelegationTarget::Claude,
+            }],
+            ..Default::default()
+        };
+        let delegator = Arc::new(
+            ClaudeDelegator::new(&config, "test-key".into()).expect("delegator with non-empty key"),
+        );
+        delegator.set_healthy(false);
+        assert!(!delegator.is_available());
+
+        let engine = Arc::new(DelegationEngine::new(config));
+        let registry = Arc::new(ToolRegistry::new());
+        let tool = DelegateTaskTool::new(delegator, engine, Vec::new(), registry);
+
+        let result = tool
+            .execute(json!({ "task": "deploy the service" }))
+            .await
+            .expect("execute ok");
+        assert_eq!(result["status"], "local");
+        assert_eq!(result["claude_available"], false);
     }
 }

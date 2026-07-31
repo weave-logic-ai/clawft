@@ -323,6 +323,49 @@ impl McpBridge {
         format!("mcp:{}:{}", self.config.namespace, tool_name)
     }
 
+    /// Handle inbound `notifications/tools/list_changed` (WEFT-200).
+    ///
+    /// Polls the live session for list-changed notifications and re-fetches
+    /// `tools/list`, updating [`Self::inbound_tools`]. Returns the new
+    /// namespaced tool definitions when a refresh occurred, or `Ok(None)`
+    /// if no list-changed notification was pending.
+    pub async fn refresh_inbound_tools_if_list_changed(
+        &mut self,
+    ) -> Result<Option<Vec<ToolDefinition>>> {
+        let session = match self.inbound_session.as_ref() {
+            Some(s) => s,
+            None => {
+                return Err(ServiceError::McpTransport(
+                    "bridge has no inbound session".into(),
+                ));
+            }
+        };
+        let refreshed = {
+            let session = session.lock().await;
+            session.refresh_tools_if_list_changed().await?
+        };
+        let Some(tools) = refreshed else {
+            return Ok(None);
+        };
+
+        let namespaced: Vec<ToolDefinition> = tools
+            .into_iter()
+            .map(|td| ToolDefinition {
+                name: self.namespaced_tool_name(&td.name),
+                description: td.description,
+                input_schema: td.input_schema,
+            })
+            .collect();
+
+        self.inbound_tools = namespaced.iter().map(|t| t.name.clone()).collect();
+        self.update_status();
+        info!(
+            inbound_tool_count = self.inbound_tools.len(),
+            "refreshed inbound tools after notifications/tools/list_changed"
+        );
+        Ok(Some(namespaced))
+    }
+
     /// Update status based on connection state.
     fn update_status(&mut self) {
         let has_inbound = !self.inbound_tools.is_empty();
@@ -604,6 +647,101 @@ mod tests {
         assert_eq!(registered[1].name, "mcp:claude-code:write_file");
         assert_eq!(bridge.inbound_tools().len(), 2);
         assert!(bridge.inbound_session().is_some());
+    }
+
+    /// Factory that keeps a SharedMockTransport handle for list_changed tests.
+    struct SharedMockFactory {
+        transport: std::sync::Mutex<Option<super::super::transport::SharedMockTransport>>,
+    }
+
+    impl SharedMockFactory {
+        fn new(
+            responses: Vec<JsonRpcResponse>,
+        ) -> (Self, std::sync::Arc<super::super::transport::MockTransport>) {
+            let (shared, arc) = super::super::transport::MockTransport::new(responses).shared();
+            (
+                Self {
+                    transport: std::sync::Mutex::new(Some(shared)),
+                },
+                arc,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl McpTransportFactory for SharedMockFactory {
+        fn validate(&self, _spec: &TransportSpec) -> SvcResult<()> {
+            Ok(())
+        }
+
+        async fn create(&self, _spec: TransportSpec) -> SvcResult<Box<dyn McpTransport>> {
+            let t = self
+                .transport
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| ServiceError::McpTransport("factory used twice".into()))?;
+            Ok(Box::new(t))
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_inbound_tools_on_list_changed() {
+        let init = ok_response(
+            1,
+            serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {"listChanged": true}},
+                "serverInfo": {"name": "claude-code", "version": "0.1.0"}
+            }),
+        );
+        let tools_initial = ok_response(
+            2,
+            serde_json::json!({
+                "tools": [{
+                    "name": "old_tool",
+                    "description": "v1",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+        );
+        let tools_after = ok_response(
+            3,
+            serde_json::json!({
+                "tools": [{
+                    "name": "new_tool",
+                    "description": "v2",
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+        );
+        let (factory, mock) =
+            SharedMockFactory::new(vec![init, tools_initial, tools_after]);
+        let mut bridge = McpBridge::with_factory(
+            BridgeConfig {
+                enabled: true,
+                namespace: "claude-code".into(),
+                ..Default::default()
+            },
+            Arc::new(factory),
+        );
+        bridge.connect_inbound().await.unwrap();
+        assert_eq!(bridge.inbound_tools(), &["mcp:claude-code:old_tool".to_string()]);
+
+        mock.inject_notification(
+            super::super::TOOLS_LIST_CHANGED_METHOD,
+            serde_json::json!({}),
+        )
+        .await;
+
+        let refreshed = bridge
+            .refresh_inbound_tools_if_list_changed()
+            .await
+            .unwrap()
+            .expect("should refresh");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].name, "mcp:claude-code:new_tool");
+        assert_eq!(bridge.inbound_tools(), &["mcp:claude-code:new_tool".to_string()]);
     }
 
     #[tokio::test]

@@ -5309,12 +5309,11 @@ mod tests {
             &self,
         ) -> Result<crate::agent::identity::Identity, crate::agent::identity::IdentityError>
         {
-            Ok(crate::agent::identity::Identity {
-                soul: self.soul.clone(),
-                identity: self.identity.clone(),
-                hash: crate::agent::identity::sha256_identity_hash(&self.soul, &self.identity),
-                source: "stub",
-            })
+            Ok(crate::agent::identity::Identity::from_files(
+                self.soul.clone(),
+                self.identity.clone(),
+                crate::agent::identity::IdentitySource::Stub,
+            ))
         }
     }
 

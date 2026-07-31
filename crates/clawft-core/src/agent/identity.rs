@@ -35,24 +35,34 @@
 //!   re-reads on every call (small files; cheap). A `notify`-driven
 //!   watcher arrives when measurement says it earns its keep.
 //!
-//! ## SOUL.journal write path (WEFT-330)
+//! ## SOUL.journal (WEFT-330 write + WEFT-96 read-on-every-turn)
 //!
 //! Agent-side drift observations during chat turns are handled by
 //! [`super::soul_journal`] — hooked from `loop_core` after a
 //! successful turn when the documented drift signal fires. F1 seeds
 //! the empty journal file and stamps the `soul_journal` derived-write
 //! grant; F2's `weaver soul promote` reads substrate entries, diffs,
-//! and applies on confirmation. The journal is still not consulted on
-//! every-turn identity loads (identity = `SOUL.md` + `IDENTITY.md`
-//! only).
+//! and applies on confirmation.
 //!
-//! Plan reference: `docs/plans/agent-core-v1.md` Phase D1, F1.
+//! **WEFT-96 / WS-D1:** every-turn identity loads may consult pending
+//! journal entries via [`JournalAwareIdentityProvider`] +
+//! [`SoulJournalReader`](super::soul_journal::SoulJournalReader). The
+//! base persona remains `SOUL.md` + `IDENTITY.md` (human promote still
+//! owns merges); pending observations surface as
+//! [`Identity::pending_journal`] with
+//! [`IdentitySource::Journal`] when non-empty. Production substrate
+//! reader lives in `clawft-service-agent`.
+//!
+//! Plan reference: `docs/plans/agent-core-v1.md` Phase D1, F1;
+//! WEFT-96 / WEFT-97 (WS-D1 / WS-D4 / WS-D5).
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clawft_platform::Platform;
 
+use crate::agent::soul_journal::{PendingJournalEntry, SoulJournalReader};
 use crate::runtime::RwLock;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -88,6 +98,46 @@ pub const BINDING_THREAD_GATE_ACTION: &str = "soul.binding_thread_intact";
 /// when SOUL.md is missing the binding-thread excerpt (WEFT-342).
 pub const BINDING_THREAD_MISMATCH_REASON: &str = "binding-thread mismatch";
 
+/// Provenance of a loaded [`Identity`] (WEFT-97 / WS-D4).
+///
+/// Wire form is the stable [`Self::as_str`] label so
+/// [`AgentChatResult::identity_source`](clawft_types::agent_chat::AgentChatResult)
+/// stays a free-form string without forcing callers onto the enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IdentitySource {
+    /// `<workspace>/.clawft/{SOUL,IDENTITY}.md` via [`Platform::fs`].
+    Clawft,
+    /// [`FileIdentityProvider`] served a previously cached load after
+    /// the disk re-read failed.
+    Cache,
+    /// Substrate-backed identity load (mesh-canonical path).
+    Substrate,
+    /// Base identity plus pending soul-journal observations consulted
+    /// on this turn (WEFT-96 / WS-D1).
+    Journal,
+    /// In-test / stub provider.
+    Stub,
+}
+
+impl IdentitySource {
+    /// Stable wire / log label (e.g. `"clawft"`, `"journal"`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clawft => "clawft",
+            Self::Cache => "cache",
+            Self::Substrate => "substrate",
+            Self::Journal => "journal",
+            Self::Stub => "stub",
+        }
+    }
+}
+
+impl fmt::Display for IdentitySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Loaded identity content.
 #[derive(Debug, Clone)]
 pub struct Identity {
@@ -98,21 +148,42 @@ pub struct Identity {
     /// SHA-256 (hex, lowercase) of `soul + "\n" + identity`. Surfaced
     /// in logs and as the trailing `[hash]` line of the system prompt.
     /// Phase D1 replaced the spike's `len(soul)+len(identity)`
-    /// placeholder.
+    /// placeholder. Pending journal entries do **not** change the hash
+    /// (human promote still owns SOUL merges).
     pub hash: String,
-    /// Source of the loaded files. Always `"clawft"` after F1 (the
-    /// `docs/skills/clawft/` fallback was removed). The field is
-    /// retained as a `&'static str` so a future substrate-backed
-    /// provider can introduce new variants without touching callers.
-    pub source: &'static str,
+    /// Provenance of this load (WEFT-97 / WS-D4).
+    pub source: IdentitySource,
+    /// Pending soul-journal observations consulted this turn
+    /// (WEFT-96 / WS-D1). Empty when no journal reader is attached or
+    /// the journal has no pending rows. Never auto-applied to `soul`.
+    pub pending_journal: Vec<PendingJournalEntry>,
+}
+
+impl Identity {
+    /// Build a file-backed identity with no pending journal rows.
+    pub fn from_files(
+        soul: impl Into<String>,
+        identity: impl Into<String>,
+        source: IdentitySource,
+    ) -> Self {
+        let soul = soul.into();
+        let identity = identity.into();
+        let hash = sha256_identity_hash(&soul, &identity);
+        Self {
+            soul,
+            identity,
+            hash,
+            source,
+            pending_journal: Vec::new(),
+        }
+    }
 }
 
 /// Errors emitted by the identity load path.
 ///
-/// Distinguishes missing seed files from binding-thread integrity
-/// failures so the chat path can surface distinct RPC messages.
-/// Variants stay shaped for forward compatibility (substrate-backed
-/// loaders may add IO / deserialization variants later).
+/// Distinguishes missing seed files, binding-thread integrity failures,
+/// and substrate / IO / deserialize failures so the chat path can
+/// surface distinct RPC messages (WEFT-97 / WS-D5).
 #[derive(Debug, Error)]
 pub enum IdentityError {
     /// `<workspace>/.clawft/SOUL.md` or `IDENTITY.md` (or both) are
@@ -132,6 +203,20 @@ pub enum IdentityError {
     /// returns `Deny { reason: "binding-thread mismatch" }`.
     #[error("identity load failed: binding-thread mismatch")]
     BindingThreadMismatch,
+
+    /// Platform filesystem or other IO failure while loading identity
+    /// or the journal (WEFT-97 / WS-D5).
+    #[error("identity load failed: IO error: {0}")]
+    Io(String),
+
+    /// Failed to deserialize a substrate journal / identity payload
+    /// (WEFT-97 / WS-D5).
+    #[error("identity load failed: deserialize error: {0}")]
+    Deserialize(String),
+
+    /// Substrate list/read path failed or was denied (WEFT-97 / WS-D5).
+    #[error("identity load failed: substrate error: {0}")]
+    Substrate(String),
 }
 
 /// Return `true` when `soul` contains the compile-time
@@ -146,9 +231,9 @@ pub fn soul_contains_binding_thread(soul: &str) -> bool {
 /// Async interface for retrieving the agent's current identity.
 ///
 /// Decouples `loop_core` and `SystemPromptBuilder` from the on-disk
-/// loader so they can be exercised against in-memory fixtures. The
-/// substrate-backed identity provider (Phase F1) will plug in here
-/// without any caller-site changes.
+/// loader so they can be exercised against in-memory fixtures.
+/// Substrate-backed and journal-aware providers (WEFT-96 / WEFT-97)
+/// plug in here without caller-site changes.
 #[async_trait]
 pub trait IdentityProvider: Send + Sync + 'static {
     /// Return the current identity. Called once per turn; impls
@@ -167,8 +252,9 @@ pub trait IdentityProvider: Send + Sync + 'static {
 /// The cache lets repeated calls within a turn skip the disk hit;
 /// cross-turn changes (the user editing `SOUL.md` between turns) are
 /// picked up on the next call because the loader still tries the disk
-/// first. The cache is only consulted as a fallback when both the
-/// per-instance and fallback paths fail to resolve.
+/// first. The cache is only consulted as a fallback when the disk
+/// path fails to resolve; that fallback is tagged
+/// [`IdentitySource::Cache`].
 pub struct FileIdentityProvider<P: Platform> {
     workspace: PathBuf,
     platform: Arc<P>,
@@ -206,15 +292,96 @@ impl<P: Platform + 'static> IdentityProvider for FileIdentityProvider<P> {
                 // ever loaded one, otherwise propagate the error so
                 // the daemon's chat path returns the "identity load
                 // failed" RPC error.
-                if let Some(cached) = self.cached.read().await.clone() {
+                if let Some(mut cached) = self.cached.read().await.clone() {
                     warn!(
                         "identity provider: disk re-read failed; \
                          serving cached load (hash={})",
                         cached.hash
                     );
+                    cached.source = IdentitySource::Cache;
                     return Ok(cached);
                 }
                 Err(IdentityError::NotFound)
+            }
+        }
+    }
+}
+
+/// Wraps a base [`IdentityProvider`] and consults a
+/// [`SoulJournalReader`] on every `current()` call (WEFT-96 / WS-D1).
+///
+/// Base `SOUL.md` / `IDENTITY.md` content is unchanged; pending
+/// observations are attached to [`Identity::pending_journal`]. When
+/// the journal is non-empty, [`Identity::source`] is
+/// [`IdentitySource::Journal`]. Journal read failures degrade to the
+/// base identity with a `warn!` by default so a transient substrate
+/// outage never blocks chat; set [`Self::fail_closed`] to surface
+/// [`IdentityError::Substrate`] / [`IdentityError::Io`] instead.
+pub struct JournalAwareIdentityProvider {
+    base: Arc<dyn IdentityProvider>,
+    journal: Arc<dyn SoulJournalReader>,
+    /// When `true`, journal read errors abort the turn via
+    /// [`IdentityError`]; when `false` (default) they are logged and
+    /// the base identity is returned unchanged.
+    fail_closed: bool,
+}
+
+impl JournalAwareIdentityProvider {
+    /// Degrade-on-journal-error (default production posture).
+    pub fn new(base: Arc<dyn IdentityProvider>, journal: Arc<dyn SoulJournalReader>) -> Self {
+        Self {
+            base,
+            journal,
+            fail_closed: false,
+        }
+    }
+
+    /// Fail the turn when the journal reader errors (strict mode).
+    pub fn fail_closed(mut self, fail_closed: bool) -> Self {
+        self.fail_closed = fail_closed;
+        self
+    }
+}
+
+#[async_trait]
+impl IdentityProvider for JournalAwareIdentityProvider {
+    async fn current(&self) -> Result<Identity, IdentityError> {
+        let mut id = self.base.current().await?;
+        match self.journal.list_pending().await {
+            Ok(pending) => {
+                if !pending.is_empty() {
+                    debug!(
+                        count = pending.len(),
+                        "identity: journal substrate read-on-every-turn \
+                         attached pending observations"
+                    );
+                    id.pending_journal = pending;
+                    id.source = IdentitySource::Journal;
+                }
+                Ok(id)
+            }
+            Err(e) => {
+                if self.fail_closed {
+                    // Classify common substrate / IO phrases so callers
+                    // can distinguish error kinds (WEFT-97 / WS-D5).
+                    let lower = e.to_ascii_lowercase();
+                    if lower.contains("deserial") || lower.contains("json") {
+                        return Err(IdentityError::Deserialize(e));
+                    }
+                    if lower.contains("substrate")
+                        || lower.contains("grant")
+                        || lower.contains("mesh")
+                    {
+                        return Err(IdentityError::Substrate(e));
+                    }
+                    return Err(IdentityError::Io(e));
+                }
+                warn!(
+                    error = %e,
+                    "identity: journal read-on-every-turn failed; \
+                     serving base identity without pending rows"
+                );
+                Ok(id)
             }
         }
     }
@@ -275,11 +442,11 @@ impl<P: Platform> IdentityLoader<P> {
     /// Reads go through [`Platform::fs`] (WEFT-95 / MW-17) — no
     /// `std::fs` on this path.
     pub async fn current(&self) -> Option<Identity> {
-        self.try_load_from(&self.workspace.join(".clawft"), "clawft")
+        self.try_load_from(&self.workspace.join(".clawft"), IdentitySource::Clawft)
             .await
     }
 
-    async fn try_load_from(&self, dir: &Path, source: &'static str) -> Option<Identity> {
+    async fn try_load_from(&self, dir: &Path, source: IdentitySource) -> Option<Identity> {
         let soul_path = dir.join("SOUL.md");
         let identity_path = dir.join("IDENTITY.md");
         let soul = self.platform.fs().read_to_string(&soul_path).await.ok()?;
@@ -289,14 +456,13 @@ impl<P: Platform> IdentityLoader<P> {
             .read_to_string(&identity_path)
             .await
             .ok()?;
-        debug!(?soul_path, ?identity_path, source, "identity loaded");
-        let hash = sha256_identity_hash(&soul, &identity);
-        Some(Identity {
-            soul,
-            identity,
-            hash,
-            source,
-        })
+        debug!(
+            ?soul_path,
+            ?identity_path,
+            source = source.as_str(),
+            "identity loaded"
+        );
+        Some(Identity::from_files(soul, identity, source))
     }
 }
 
@@ -541,7 +707,8 @@ mod tests {
         let id = loader.current().await.expect("should load via mock fs");
         assert_eq!(id.soul, "soul content");
         assert_eq!(id.identity, "identity content");
-        assert_eq!(id.source, "clawft");
+        assert_eq!(id.source, IdentitySource::Clawft);
+        assert!(id.pending_journal.is_empty());
         assert_eq!(
             id.hash,
             sha256_identity_hash("soul content", "identity content")
@@ -562,7 +729,7 @@ mod tests {
         let id = loader.current().await.expect("should load");
         assert_eq!(id.soul, "soul content");
         assert_eq!(id.identity, "identity content");
-        assert_eq!(id.source, "clawft");
+        assert_eq!(id.source, IdentitySource::Clawft);
         // Hash must be SHA-256 hex of `"soul content" + "\n" + "identity content"`.
         assert_eq!(
             id.hash,
@@ -703,6 +870,11 @@ mod tests {
         let cached = provider.current().await.expect("cache fallback");
         assert_eq!(cached.soul, first.soul);
         assert_eq!(cached.hash, first.hash);
+        assert_eq!(
+            cached.source,
+            IdentitySource::Cache,
+            "cache fallback must tag IdentitySource::Cache (WEFT-97)"
+        );
     }
 
     #[tokio::test]
@@ -710,5 +882,142 @@ mod tests {
         let provider = FileIdentityProvider::new(PathBuf::from("/missing"), mock_platform());
         let err = provider.current().await.unwrap_err();
         assert!(matches!(err, IdentityError::NotFound));
+    }
+
+    // ── WEFT-96 / WEFT-97 ───────────────────────────────────────────
+
+    #[test]
+    fn identity_source_wire_labels_are_stable() {
+        assert_eq!(IdentitySource::Clawft.as_str(), "clawft");
+        assert_eq!(IdentitySource::Cache.as_str(), "cache");
+        assert_eq!(IdentitySource::Substrate.as_str(), "substrate");
+        assert_eq!(IdentitySource::Journal.as_str(), "journal");
+        assert_eq!(IdentitySource::Stub.as_str(), "stub");
+        assert_eq!(IdentitySource::Journal.to_string(), "journal");
+    }
+
+    #[test]
+    fn identity_error_variants_display_distinct_messages() {
+        let msgs = [
+            IdentityError::NotFound.to_string(),
+            IdentityError::BindingThreadMismatch.to_string(),
+            IdentityError::Io("disk full".into()).to_string(),
+            IdentityError::Deserialize("bad json".into()).to_string(),
+            IdentityError::Substrate("grant denied".into()).to_string(),
+        ];
+        for m in &msgs {
+            assert!(m.starts_with("identity load failed:"), "{m}");
+        }
+        assert!(msgs[2].contains("IO error"));
+        assert!(msgs[3].contains("deserialize"));
+        assert!(msgs[4].contains("substrate"));
+    }
+
+    struct StubBaseProvider(Identity);
+
+    #[async_trait]
+    impl IdentityProvider for StubBaseProvider {
+        async fn current(&self) -> Result<Identity, IdentityError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_aware_provider_attaches_pending_on_every_turn() {
+        use crate::agent::soul_journal::{
+            DriftObservation, InMemorySoulJournal, SoulJournal, SoulJournalReader,
+        };
+
+        let base = Arc::new(StubBaseProvider(Identity::from_files(
+            "soul-base",
+            "id-base",
+            IdentitySource::Clawft,
+        )));
+        let journal = Arc::new(InMemorySoulJournal::new());
+        journal
+            .append(DriftObservation::synthetic(
+                "prefer terse replies",
+                "user wants shorter answers going forward",
+            ))
+            .await
+            .unwrap();
+
+        // Reader is the same in-memory journal (write+read path).
+        let reader: Arc<dyn SoulJournalReader> = journal.clone();
+        let provider = JournalAwareIdentityProvider::new(base, reader);
+
+        let id = provider.current().await.expect("load");
+        assert_eq!(id.source, IdentitySource::Journal);
+        assert_eq!(id.soul, "soul-base");
+        assert_eq!(id.pending_journal.len(), 1);
+        assert_eq!(id.pending_journal[0].summary, "prefer terse replies");
+        // Hash stays base-only (journal is not auto-promoted into SOUL).
+        assert_eq!(id.hash, sha256_identity_hash("soul-base", "id-base"));
+
+        // Second turn re-reads journal (read-on-every-turn).
+        journal
+            .append(DriftObservation::synthetic("second", "another note"))
+            .await
+            .unwrap();
+        let id2 = provider.current().await.expect("second turn");
+        assert_eq!(id2.pending_journal.len(), 2);
+        assert_eq!(id2.source, IdentitySource::Journal);
+    }
+
+    #[tokio::test]
+    async fn journal_aware_provider_keeps_base_source_when_empty() {
+        use crate::agent::soul_journal::{InMemorySoulJournal, SoulJournalReader};
+
+        let base = Arc::new(StubBaseProvider(Identity::from_files(
+            "s",
+            "i",
+            IdentitySource::Clawft,
+        )));
+        let reader: Arc<dyn SoulJournalReader> = Arc::new(InMemorySoulJournal::new());
+        let provider = JournalAwareIdentityProvider::new(base, reader);
+        let id = provider.current().await.unwrap();
+        assert_eq!(id.source, IdentitySource::Clawft);
+        assert!(id.pending_journal.is_empty());
+    }
+
+    struct FailingJournalReader;
+
+    #[async_trait]
+    impl crate::agent::soul_journal::SoulJournalReader for FailingJournalReader {
+        async fn list_pending(
+            &self,
+        ) -> Result<Vec<crate::agent::soul_journal::PendingJournalEntry>, String> {
+            Err("substrate grant denied for soul_journal".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_aware_provider_degrades_on_reader_error_by_default() {
+        let base = Arc::new(StubBaseProvider(Identity::from_files(
+            "s",
+            "i",
+            IdentitySource::Clawft,
+        )));
+        let provider =
+            JournalAwareIdentityProvider::new(base, Arc::new(FailingJournalReader));
+        let id = provider.current().await.expect("degrade open");
+        assert_eq!(id.source, IdentitySource::Clawft);
+        assert!(id.pending_journal.is_empty());
+    }
+
+    #[tokio::test]
+    async fn journal_aware_provider_fail_closed_maps_substrate_error() {
+        let base = Arc::new(StubBaseProvider(Identity::from_files(
+            "s",
+            "i",
+            IdentitySource::Clawft,
+        )));
+        let provider = JournalAwareIdentityProvider::new(base, Arc::new(FailingJournalReader))
+            .fail_closed(true);
+        let err = provider.current().await.unwrap_err();
+        assert!(
+            matches!(err, IdentityError::Substrate(_)),
+            "expected Substrate variant, got {err:?}"
+        );
     }
 }

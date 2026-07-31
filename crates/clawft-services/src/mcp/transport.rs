@@ -10,7 +10,7 @@
 //! validators ([`validate_url`], [`validate_command_path`],
 //! [`validate_tempfile_path`]) that gate config before a transport is spawned.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,9 @@ use tracing::{debug, warn};
 
 use super::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use crate::error::{Result, ServiceError};
+
+/// MCP notification method for tool-list invalidation (WEFT-200).
+pub const TOOLS_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 
 /// Transport layer for MCP JSON-RPC communication.
 #[async_trait]
@@ -48,6 +51,14 @@ pub trait McpTransport: Send + Sync {
     /// after emitting `notifications/cancelled`.
     async fn close(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Non-blocking poll for a server→client notification (WEFT-200).
+    ///
+    /// Default returns `None`. [`StdioTransport`] and [`MockTransport`]
+    /// queue inbound notifications demuxed from the reader loop.
+    async fn poll_notification(&self) -> Option<JsonRpcNotification> {
+        None
     }
 }
 
@@ -106,6 +117,8 @@ pub struct StdioTransport {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     pending: PendingMap,
+    /// Inbound server→client notifications (WEFT-200).
+    inbound_notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
     #[allow(dead_code)]
     reader_handle: Arc<tokio::task::JoinHandle<()>>,
     /// Command used to spawn the child (for reconnect diagnostics / re-spawn).
@@ -147,10 +160,14 @@ impl StdioTransport {
             .ok_or_else(|| ServiceError::McpTransport("failed to capture stdout".into()))?;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let inbound_notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
 
         // Spawn background reader task that reads lines from stdout and
         // dispatches responses to the matching pending oneshot sender.
+        // Non-response lines are demuxed as inbound notifications (WEFT-200).
         let reader_pending = Arc::clone(&pending);
+        let reader_notifs = Arc::clone(&inbound_notifications);
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
@@ -166,22 +183,33 @@ impl StdioTransport {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        match serde_json::from_str::<JsonRpcResponse>(trimmed) {
-                            Ok(response) => {
-                                let id = response.id;
-                                let mut map = reader_pending.lock().await;
-                                if let Some(tx) = map.remove(&id) {
-                                    let _ = tx.send(response);
-                                } else {
-                                    warn!(
-                                        id,
-                                        "stdio reader: received response with no pending request"
-                                    );
-                                }
+                        // Prefer response (has id) when both could parse.
+                        if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                            // Responses always have an id field; bare
+                            // notifications fail response deserialize when
+                            // `id` is missing (serde required field).
+                            let id = response.id;
+                            let mut map = reader_pending.lock().await;
+                            if let Some(tx) = map.remove(&id) {
+                                let _ = tx.send(response);
+                            } else {
+                                warn!(
+                                    id,
+                                    "stdio reader: received response with no pending request"
+                                );
+                            }
+                            continue;
+                        }
+                        match serde_json::from_str::<JsonRpcNotification>(trimmed) {
+                            Ok(notif) => {
+                                debug!(
+                                    method = %notif.method,
+                                    "stdio reader: queued inbound notification"
+                                );
+                                reader_notifs.lock().await.push_back(notif);
                             }
                             Err(e) => {
-                                // Could be a notification or malformed line; skip
-                                debug!(error = %e, "stdio reader: ignoring non-response line");
+                                debug!(error = %e, "stdio reader: ignoring non-jsonrpc line");
                             }
                         }
                     }
@@ -201,6 +229,7 @@ impl StdioTransport {
             child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
+            inbound_notifications,
             reader_handle: Arc::new(reader_handle),
             command: command.to_string(),
             args: args.to_vec(),
@@ -330,6 +359,10 @@ impl McpTransport for StdioTransport {
         }
     }
 
+    async fn poll_notification(&self) -> Option<JsonRpcNotification> {
+        self.inbound_notifications.lock().await.pop_front()
+    }
+
     async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::SeqCst);
         // Drop all pending waiters so in-flight send_request unblocks.
@@ -451,6 +484,8 @@ pub struct MockTransport {
     responses: Arc<Mutex<Vec<JsonRpcResponse>>>,
     requests: Arc<Mutex<Vec<JsonRpcRequest>>>,
     notifications: Arc<Mutex<Vec<JsonRpcNotification>>>,
+    /// Inbound server→client notifications (WEFT-200).
+    inbound_notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
     /// Liveness flag (WEFT-191). When false, `send_*` fails and `is_alive` is false.
     alive: AtomicBool,
     /// Whether [`McpTransport::close`] has been called.
@@ -465,6 +500,7 @@ impl MockTransport {
             responses: Arc::new(Mutex::new(responses)),
             requests: Arc::new(Mutex::new(Vec::new())),
             notifications: Arc::new(Mutex::new(Vec::new())),
+            inbound_notifications: Arc::new(Mutex::new(VecDeque::new())),
             alive: AtomicBool::new(true),
             closed: AtomicBool::new(false),
         }
@@ -493,6 +529,12 @@ impl MockTransport {
     /// Push additional mock responses (e.g. after reconnect handshake setup).
     pub async fn push_responses(&self, extra: Vec<JsonRpcResponse>) {
         self.responses.lock().await.extend(extra);
+    }
+
+    /// Queue a server→client notification for [`McpTransport::poll_notification`] (WEFT-200).
+    pub async fn inject_notification(&self, method: impl Into<String>, params: serde_json::Value) {
+        let notif = JsonRpcNotification::new(method, params);
+        self.inbound_notifications.lock().await.push_back(notif);
     }
 
     /// Wrap in a [`SharedMockTransport`] so callers can retain an `Arc`
@@ -547,6 +589,10 @@ impl McpTransport for MockTransport {
         self.alive.store(false, Ordering::SeqCst);
         Ok(())
     }
+
+    async fn poll_notification(&self) -> Option<JsonRpcNotification> {
+        self.inbound_notifications.lock().await.pop_front()
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -566,6 +612,10 @@ impl McpTransport for SharedMockTransport {
 
     async fn close(&self) -> Result<()> {
         self.0.close().await
+    }
+
+    async fn poll_notification(&self) -> Option<JsonRpcNotification> {
+        self.0.poll_notification().await
     }
 }
 

@@ -70,7 +70,7 @@ pub enum VoiceCommand {
     /// Install the wake word daemon as a system service.
     InstallService {
         /// Service manager to use (auto-detected if not specified).
-        /// Supported values: "systemd", "launchd".
+        /// Supported values: "systemd", "launchd", "schtasks".
         #[arg(long)]
         manager: Option<String>,
     },
@@ -657,8 +657,14 @@ async fn handle_wake() -> anyhow::Result<()> {
 /// Install the wake word daemon as a platform service.
 ///
 /// Auto-detects the platform (Linux/macOS/Windows) and installs the
-/// appropriate service definition. On Linux this is a systemd user unit;
-/// on macOS it is a launchd plist in ~/Library/LaunchAgents.
+/// appropriate service definition:
+/// - Linux: systemd user unit (`scripts/clawft-wake.service`)
+/// - macOS: launchd plist (`scripts/com.clawft.wake.plist`)
+/// - Windows: Task Scheduler via `schtasks` (WEFT-220 — final route)
+///
+/// Windows does not use a Windows Service (SCM). The supported path is a
+/// per-user logon task so the wake daemon can access the microphone in the
+/// interactive session. See `docs/guides/voice.md` § Wake word service.
 #[cfg(not(target_arch = "wasm32"))]
 async fn handle_install_service(manager: Option<String>) -> anyhow::Result<()> {
     let detected = manager.unwrap_or_else(detect_service_manager);
@@ -666,14 +672,12 @@ async fn handle_install_service(manager: Option<String>) -> anyhow::Result<()> {
     match detected.as_str() {
         "systemd" => install_systemd_service().await,
         "launchd" => install_launchd_service().await,
+        "schtasks" => install_schtasks_service().await,
         other => {
             println!("Unsupported service manager: {}", other);
-            println!("Manual installation required.");
+            println!("Supported managers: systemd (Linux), launchd (macOS), schtasks (Windows).");
             println!();
-            println!("On Windows:");
-            println!("  1. Open Task Scheduler");
-            println!("  2. Create a new task that runs: weft voice wake --daemon");
-            println!("  3. Set it to run at startup");
+            print_windows_manual_route(&resolve_weft_binary());
             Ok(())
         }
     }
@@ -685,15 +689,78 @@ async fn handle_install_service(_manager: Option<String>) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Task Scheduler task name for the wake word daemon (Windows, WEFT-220).
+const SCHTASKS_TASK_NAME: &str = "ClawftWake";
+
 /// Detect the service manager for the current platform.
 fn detect_service_manager() -> String {
     if cfg!(target_os = "macos") {
         "launchd".to_string()
     } else if cfg!(target_os = "linux") {
         "systemd".to_string()
+    } else if cfg!(target_os = "windows") {
+        "schtasks".to_string()
     } else {
         "unsupported".to_string()
     }
+}
+
+/// Resolve the `weft` binary path for service install (prefer this process).
+fn resolve_weft_binary() -> std::path::PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("weft"))
+}
+
+/// Build the Task Scheduler `/TR` string: `"path\to\weft.exe" voice wake`.
+///
+/// Paths with spaces are double-quoted; `voice wake` are separate program args.
+fn schtasks_task_run_string(exe: &std::path::Path) -> String {
+    let exe_s = exe.display().to_string();
+    if exe_s.contains(' ') {
+        format!("\"{exe_s}\" voice wake")
+    } else {
+        format!("{exe_s} voice wake")
+    }
+}
+
+/// Final documented Windows install route (manual Task Scheduler / schtasks).
+///
+/// Printed when automation fails or the platform is unsupported so operators
+/// always have a complete, non-provisional procedure (WEFT-220).
+fn print_windows_manual_route(exe: &std::path::Path) {
+    let tr = schtasks_task_run_string(exe);
+    println!("Windows wake service — final supported route (Task Scheduler / schtasks):");
+    println!();
+    println!("Automated (preferred):");
+    println!("  weft voice install-service");
+    println!("  weft voice install-service --manager schtasks");
+    println!("  # or from a repo checkout:");
+    println!("  powershell -ExecutionPolicy Bypass -File scripts/install-clawft-wake-schtasks.ps1");
+    println!();
+    println!("Manual schtasks (ONLOGON, current user, limited rights):");
+    println!(
+        "  schtasks /Create /TN \"{SCHTASKS_TASK_NAME}\" /TR \"{tr}\" /SC ONLOGON /RL LIMITED /F"
+    );
+    println!();
+    println!("GUI (Task Scheduler):");
+    println!("  1. Open Task Scheduler → Create Task…");
+    println!("  2. Name: {SCHTASKS_TASK_NAME}");
+    println!("  3. Trigger: At log on (your user)");
+    println!("  4. Action: Start a program → {exe}", exe = exe.display());
+    println!("     Arguments: voice wake");
+    println!("  5. Conditions: allow start on AC or battery as you prefer");
+    println!("  6. Settings: restart on failure optional");
+    println!();
+    println!("Manage:");
+    println!("  schtasks /Run    /TN \"{SCHTASKS_TASK_NAME}\"   # start now");
+    println!("  schtasks /End    /TN \"{SCHTASKS_TASK_NAME}\"   # stop");
+    println!("  schtasks /Query  /TN \"{SCHTASKS_TASK_NAME}\" /V /FO LIST");
+    println!("  schtasks /Delete /TN \"{SCHTASKS_TASK_NAME}\" /F");
+    println!();
+    println!("Notes:");
+    println!("  - ONLOGON (user session) is intentional: wake needs the mic in an");
+    println!("    interactive session. A Windows Service (SCM) is not supported.");
+    println!("  - Ensure `weft` is on PATH or use the absolute path from this binary.");
+    println!("  - Mic privacy: grant microphone access to the terminal / weft host.");
 }
 
 /// Install a systemd user service for the wake word daemon.
@@ -785,4 +852,110 @@ async fn install_launchd_service() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Install a Windows Task Scheduler logon task for the wake word daemon.
+///
+/// Final Windows route for WEFT-220: `schtasks` ONLOGON as the current user
+/// (not a Windows Service). Falls back to printing the full manual procedure
+/// if `schtasks` is missing or rejects the create.
+#[cfg(not(target_arch = "wasm32"))]
+async fn install_schtasks_service() -> anyhow::Result<()> {
+    let exe = resolve_weft_binary();
+    let tr = schtasks_task_run_string(&exe);
+
+    println!("Installing Windows Task Scheduler task: {SCHTASKS_TASK_NAME}");
+    println!("  Program: {}", exe.display());
+    println!("  Arguments: voice wake");
+    println!("  Trigger: ONLOGON (current user, LIMITED)");
+    println!();
+
+    // /F overwrites an existing task with the same name (idempotent reinstall).
+    let create_result = tokio::process::Command::new("schtasks")
+        .args([
+            "/Create",
+            "/TN",
+            SCHTASKS_TASK_NAME,
+            "/TR",
+            &tr,
+            "/SC",
+            "ONLOGON",
+            "/RL",
+            "LIMITED",
+            "/F",
+        ])
+        .output()
+        .await;
+
+    match create_result {
+        Ok(output) if output.status.success() => {
+            println!("Task '{SCHTASKS_TASK_NAME}' created successfully.");
+            println!();
+            println!("Commands:");
+            println!("  schtasks /Run    /TN \"{SCHTASKS_TASK_NAME}\"   # Start now");
+            println!("  schtasks /End    /TN \"{SCHTASKS_TASK_NAME}\"   # Stop");
+            println!("  schtasks /Query  /TN \"{SCHTASKS_TASK_NAME}\" /V /FO LIST");
+            println!("  schtasks /Delete /TN \"{SCHTASKS_TASK_NAME}\" /F");
+            println!();
+            println!("Optional: scripts/install-clawft-wake-schtasks.ps1 (same schtasks path).");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("schtasks /Create failed (exit {}).", output.status);
+            if !stdout.trim().is_empty() {
+                println!("{stdout}");
+            }
+            if !stderr.trim().is_empty() {
+                println!("{stderr}");
+            }
+            println!();
+            print_windows_manual_route(&exe);
+        }
+        Err(err) => {
+            println!("Could not run schtasks ({err}).");
+            println!("Is this a Windows host with Task Scheduler available?");
+            println!();
+            print_windows_manual_route(&exe);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod install_service_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn detect_service_manager_matches_host_os() {
+        let m = detect_service_manager();
+        #[cfg(target_os = "macos")]
+        assert_eq!(m, "launchd");
+        #[cfg(target_os = "linux")]
+        assert_eq!(m, "systemd");
+        #[cfg(target_os = "windows")]
+        assert_eq!(m, "schtasks");
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        assert_eq!(m, "unsupported");
+    }
+
+    #[test]
+    fn schtasks_tr_quotes_paths_with_spaces() {
+        let p = Path::new(r"C:\Program Files\weft\weft.exe");
+        let tr = schtasks_task_run_string(p);
+        assert_eq!(tr, r#""C:\Program Files\weft\weft.exe" voice wake"#);
+    }
+
+    #[test]
+    fn schtasks_tr_unquoted_when_no_spaces() {
+        let p = Path::new(r"C:\weft\weft.exe");
+        assert_eq!(schtasks_task_run_string(p), r"C:\weft\weft.exe voice wake");
+    }
+
+    #[test]
+    fn schtasks_task_name_is_stable() {
+        assert_eq!(SCHTASKS_TASK_NAME, "ClawftWake");
+    }
 }
