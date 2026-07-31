@@ -12,6 +12,13 @@
 //! All file and directory operations enforce workspace path containment
 //! to prevent directory traversal attacks.
 
+// WEFT-397: native ⊥ browser — fail loud if both feature flags are enabled.
+#[cfg(all(feature = "native", feature = "browser"))]
+compile_error!(
+    "features `native` and `browser` are mutually exclusive; \
+     use --no-default-features --features browser for browser/WASM builds"
+);
+
 #[cfg(feature = "voice")]
 pub mod audio_codec;
 #[cfg(feature = "voice")]

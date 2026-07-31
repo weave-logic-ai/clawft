@@ -22,6 +22,13 @@
 //!
 //! Source: <https://github.com/weave-logic-ai/weftos>
 
+// WEFT-397: native ⊥ browser — fail loud if both feature flags are enabled.
+#[cfg(all(feature = "native", feature = "browser"))]
+compile_error!(
+    "features `native` and `browser` are mutually exclusive; \
+     use --no-default-features --features browser for browser/WASM builds"
+);
+
 pub mod agent;
 #[cfg(feature = "native")]
 pub mod agent_bus;

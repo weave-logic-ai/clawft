@@ -71,6 +71,30 @@ else
 fi
 echo ""
 
+# Gate 6: WEFT-397 — native ⊥ browser feature mutex
+# Enabling both must fail with compile_error! in each portable crate.
+# Default features include `native`, so `--features browser` enables both.
+echo "--- Gate 6: native ⊥ browser mutex (WEFT-397) ---"
+MUTEX_CRATES=(clawft-types clawft-platform clawft-llm clawft-core clawft-tools)
+for pkg in "${MUTEX_CRATES[@]}"; do
+    log="/tmp/weft397-${pkg}.log"
+    set +e
+    cargo check -p "$pkg" --features browser >"$log" 2>&1
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        fail "$pkg: cargo check succeeded with native+browser — mutex missing"
+    fi
+    if grep -Eq 'mutually exclusive' "$log"; then
+        pass "$pkg: both features produce compile_error!"
+    else
+        echo "---- cargo output (truncated) ----"
+        tail -40 "$log" || true
+        fail "$pkg: expected compile_error! naming mutual exclusion of native and browser"
+    fi
+done
+echo ""
+
 echo "========================================="
 echo "  Feature validation complete"
 echo "========================================="
