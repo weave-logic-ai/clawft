@@ -599,6 +599,14 @@ impl ChannelAdapter for VoiceChannelAdapter {
             self.config.min_utterance_ms,
             self.config.max_utterance_ms,
         );
+        // WEFT-230: attach per-session adaptive silence estimator when enabled.
+        if self.config.adaptive_silence.enabled {
+            let est = clawft_types::config::AdaptiveSilenceTimeout::new(
+                self.config.silence_ms,
+                self.config.adaptive_silence.clone(),
+            );
+            vad = vad.with_adaptive(est);
+        }
         // We accumulate raw PCM and slice on SpeechEnd. Bound the
         // buffer by max_utterance_ms × sample_rate so a buggy VAD
         // can't OOM us.

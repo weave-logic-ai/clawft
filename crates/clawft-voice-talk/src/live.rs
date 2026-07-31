@@ -132,13 +132,18 @@ pub async fn run_live_observed_with_llm(
         session.forest().impulses().clone(),
         [0u8; 32],
     ));
+    // WEFT-230: coarse energy VAD learns silence timeout per session;
+    // semantic endpointer remains authoritative EOU (emit_eou=false).
     let vad = EnergyVad::new(
         config.sample_rate,
         config.vad_threshold_dbfs,
         config.max_silence_ms,
         100,
         10_000,
-    );
+    )
+    .with_adaptive(clawft_channels::voice::AdaptiveSilenceTimeout::from_baseline(
+        config.max_silence_ms,
+    ));
     let processor = CaptureProcessor::new(vad, impulse_sink, frames_tx)
         .with_emit_eou(false)
         .with_metrics(session.capture_metrics());

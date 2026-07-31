@@ -9,6 +9,7 @@
 //! - [`channels`] -- Chat channel configurations (Telegram, Slack, Discord, etc.)
 //! - [`policies`] -- Security policy configurations (command execution, URL safety)
 
+pub mod adaptive_silence;
 pub mod channels;
 pub mod kernel;
 pub mod local_llm;
@@ -20,6 +21,7 @@ pub mod voice;
 pub mod voice_metrics;
 
 // Re-export channel types at the config level for backward compatibility.
+pub use adaptive_silence::{AdaptiveSilenceConfig, AdaptiveSilenceTimeout};
 pub use channels::*;
 pub use kernel::*;
 pub use local_llm::*;
@@ -1261,6 +1263,11 @@ mod tests {
         assert!((cfg.vad.threshold - 0.5).abs() < f32::EPSILON);
         assert_eq!(cfg.vad.silence_timeout_ms, 1500);
         assert_eq!(cfg.vad.min_speech_ms, 250);
+        // WEFT-230: adaptive silence defaults
+        assert!(cfg.vad.adaptive.enabled);
+        assert_eq!(cfg.vad.adaptive.min_ms, 500);
+        assert_eq!(cfg.vad.adaptive.max_ms, 3_000);
+        assert_eq!(cfg.vad.adaptive.window_size, 8);
         assert!(!cfg.wake.enabled);
         assert_eq!(cfg.wake.phrase, "hey weft");
         assert!((cfg.wake.sensitivity - 0.5).abs() < f32::EPSILON);

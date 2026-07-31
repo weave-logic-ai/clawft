@@ -103,6 +103,8 @@ pub use tts::{
 pub use turn::{EndpointModel, HeuristicEndpoint, SemanticEndpointer, TurnDecision};
 pub use types::{VoiceAdapterConfig, VoiceError};
 pub use vad::{EnergyVad, VadEvent};
+// WEFT-230: adaptive silence-timeout types (config + estimator).
+pub use clawft_types::config::{AdaptiveSilenceConfig, AdaptiveSilenceTimeout};
 pub use voiceness::{SpectralVoiceness, Voiceness};
 
 #[cfg(feature = "voice-xai")]

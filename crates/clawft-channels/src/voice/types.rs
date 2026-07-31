@@ -57,9 +57,17 @@ pub struct VoiceAdapterConfig {
     #[serde(default = "default_vad_threshold_dbfs", alias = "vadThresholdDbfs")]
     pub vad_threshold_dbfs: f32,
 
-    /// Silence duration (ms) that ends an utterance.
+    /// Silence duration (ms) that ends an utterance (baseline for
+    /// adaptive learning when [`Self::adaptive_silence`] is enabled).
     #[serde(default = "default_silence_ms", alias = "silenceMs")]
     pub silence_ms: u32,
+
+    /// Per-session adaptive silence-timeout learning (WEFT-230).
+    ///
+    /// When enabled, [`super::EnergyVad`] learns toward the user's
+    /// mid-phrase pause pattern within `min_ms`–`max_ms`.
+    #[serde(default, alias = "adaptiveSilence")]
+    pub adaptive_silence: clawft_types::config::AdaptiveSilenceConfig,
 
     /// Minimum utterance length (ms). Shorter segments are dropped.
     #[serde(default = "default_min_utterance_ms", alias = "minUtteranceMs")]
@@ -140,6 +148,7 @@ impl Default for VoiceAdapterConfig {
             allowed_senders: Vec::new(),
             vad_threshold_dbfs: default_vad_threshold_dbfs(),
             silence_ms: default_silence_ms(),
+            adaptive_silence: clawft_types::config::AdaptiveSilenceConfig::default(),
             min_utterance_ms: default_min_utterance_ms(),
             max_utterance_ms: default_max_utterance_ms(),
             request_timeout_s: default_request_timeout_s(),

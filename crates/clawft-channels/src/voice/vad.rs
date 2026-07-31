@@ -34,10 +34,20 @@ pub enum VadEvent {
 ///
 /// Hold one of these per capture stream. Push frames via [`Self::feed`];
 /// it returns zero or more `VadEvent`s. State is fully internal.
+///
+/// # Adaptive silence (WEFT-230)
+///
+/// Attach a [`clawft_types::config::AdaptiveSilenceTimeout`] with
+/// [`Self::with_adaptive`]; the VAD then tracks the longest *intra-utterance*
+/// pause, feeds it to the estimator on each emitted `SpeechEnd`, and updates
+/// the silence tail for the next utterance. Disabled by default so existing
+/// fixed-timeout call sites keep their behaviour.
 #[derive(Debug)]
 pub struct EnergyVad {
     sample_rate: u32,
     threshold_dbfs: f32,
+    /// Baseline silence tail from construction (ms); adaptive rebaselines here.
+    baseline_silence_ms: u32,
     silence_tail_samples: u64,
     min_utterance_samples: u64,
     max_utterance_samples: u64,
@@ -50,6 +60,11 @@ pub struct EnergyVad {
     /// `min_utterance_samples` is checked against, so a brief blip
     /// followed by a long silence tail does not count as an utterance.
     speech_samples: u64,
+    /// Longest silence run (samples) *inside* the current utterance that
+    /// was broken by resumed speech — natural mid-phrase pause signal.
+    max_intra_pause_samples: u64,
+    /// Optional per-session adaptive silence-timeout estimator (WEFT-230).
+    adaptive: Option<clawft_types::config::AdaptiveSilenceTimeout>,
 }
 
 impl EnergyVad {
@@ -69,6 +84,7 @@ impl EnergyVad {
         Self {
             sample_rate,
             threshold_dbfs,
+            baseline_silence_ms: silence_ms,
             silence_tail_samples: s * u64::from(silence_ms) / 1_000,
             min_utterance_samples: s * u64::from(min_utterance_ms) / 1_000,
             max_utterance_samples: s * u64::from(max_utterance_ms) / 1_000,
@@ -77,12 +93,59 @@ impl EnergyVad {
             speech_start: 0,
             silence_run: 0,
             speech_samples: 0,
+            max_intra_pause_samples: 0,
+            adaptive: None,
         }
+    }
+
+    /// Attach a per-session adaptive silence-timeout estimator (WEFT-230).
+    ///
+    /// Immediately applies the estimator's current timeout to the silence
+    /// tail. Call before feeding frames.
+    pub fn with_adaptive(
+        mut self,
+        adaptive: clawft_types::config::AdaptiveSilenceTimeout,
+    ) -> Self {
+        let ms = adaptive.current_ms();
+        self.adaptive = Some(adaptive);
+        self.set_silence_ms(ms);
+        self
     }
 
     /// Sample rate the VAD was constructed with.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Current silence-tail length in milliseconds (learned or baseline).
+    pub fn silence_ms(&self) -> u32 {
+        if self.sample_rate == 0 {
+            return self.baseline_silence_ms;
+        }
+        ((self.silence_tail_samples * 1_000) / u64::from(self.sample_rate)) as u32
+    }
+
+    /// Baseline silence timeout from construction (ms).
+    pub fn baseline_silence_ms(&self) -> u32 {
+        self.baseline_silence_ms
+    }
+
+    /// Update the silence-tail length used to end an utterance.
+    pub fn set_silence_ms(&mut self, silence_ms: u32) {
+        let s = u64::from(self.sample_rate);
+        self.silence_tail_samples = s * u64::from(silence_ms) / 1_000;
+    }
+
+    /// Borrow the adaptive estimator, if attached.
+    pub fn adaptive(&self) -> Option<&clawft_types::config::AdaptiveSilenceTimeout> {
+        self.adaptive.as_ref()
+    }
+
+    /// Mutable access to the adaptive estimator, if attached.
+    pub fn adaptive_mut(
+        &mut self,
+    ) -> Option<&mut clawft_types::config::AdaptiveSilenceTimeout> {
+        self.adaptive.as_mut()
     }
 
     /// Compute the RMS energy of `frame` in dBFS, clamped to [-100, 0].
@@ -127,12 +190,19 @@ impl EnergyVad {
                 self.speech_start = self.cumulative;
                 self.silence_run = 0;
                 self.speech_samples = frame_len;
+                self.max_intra_pause_samples = 0;
                 events.push(VadEvent::SpeechStart {
                     at_sample: self.speech_start,
                 });
             }
         } else {
             if is_speech {
+                // Resumed speech after a mid-utterance pause: record the
+                // pause length for adaptive learning (WEFT-230).
+                if self.silence_run > 0 {
+                    self.max_intra_pause_samples =
+                        self.max_intra_pause_samples.max(self.silence_run);
+                }
                 self.silence_run = 0;
                 self.speech_samples = self.speech_samples.saturating_add(frame_len);
             } else {
@@ -152,15 +222,32 @@ impl EnergyVad {
                         start_sample: self.speech_start,
                         at_sample: end_at,
                     });
+                    self.learn_from_completed_utterance();
                 }
                 self.in_speech = false;
                 self.silence_run = 0;
                 self.speech_samples = 0;
+                self.max_intra_pause_samples = 0;
             }
         }
 
         self.cumulative = self.cumulative.saturating_add(frame_len);
         events
+    }
+
+    /// Feed speech/pause stats into the adaptive estimator and refresh
+    /// the silence tail for the next utterance (no-op when adaptive is off).
+    fn learn_from_completed_utterance(&mut self) {
+        let Some(adaptive) = self.adaptive.as_mut() else {
+            return;
+        };
+        let sr = u64::from(self.sample_rate).max(1);
+        let speech_ms = ((self.speech_samples * 1_000) / sr) as u32;
+        let max_pause_ms = ((self.max_intra_pause_samples * 1_000) / sr) as u32;
+        adaptive.record_utterance(speech_ms, max_pause_ms);
+        let next = adaptive.current_ms();
+        let s = u64::from(self.sample_rate);
+        self.silence_tail_samples = s * u64::from(next) / 1_000;
     }
 }
 
@@ -650,6 +737,74 @@ mod tests {
         let events = vad.feed(&silence);
         assert!(events.is_empty());
         assert!(!vad.in_speech());
+    }
+
+    #[test]
+    fn set_silence_ms_updates_tail() {
+        let mut vad = EnergyVad::new(16_000, -45.0, 300, 100, 10_000);
+        assert_eq!(vad.silence_ms(), 300);
+        vad.set_silence_ms(1_500);
+        assert_eq!(vad.silence_ms(), 1_500);
+        assert_eq!(vad.baseline_silence_ms(), 300);
+    }
+
+    #[test]
+    fn adaptive_learns_from_intra_pauses() {
+        use clawft_types::config::{AdaptiveSilenceConfig, AdaptiveSilenceTimeout};
+
+        // Baseline 1500 ms silence tail. Utterance with mid-pause ~400 ms
+        // should pull the learned timeout down over repeated utterances.
+        let adaptive = AdaptiveSilenceTimeout::new(
+            1_500,
+            AdaptiveSilenceConfig {
+                enabled: true,
+                learning_rate: 0.5,
+                pause_margin_ms: 250,
+                min_ms: 500,
+                max_ms: 3_000,
+                window_size: 8,
+            },
+        );
+        let mut vad = EnergyVad::new(16_000, -45.0, 1_500, 50, 30_000).with_adaptive(adaptive);
+        assert_eq!(vad.silence_ms(), 1_500);
+
+        let frame = 1_600; // 100 ms
+        let speech = tone(frame, 3_000);
+        let silence = vec![0i16; frame];
+
+        for _ in 0..6 {
+            // 200 ms speech
+            let _ = vad.feed(&speech);
+            let _ = vad.feed(&speech);
+            // 400 ms mid-phrase pause (under 1500 tail)
+            let _ = vad.feed(&silence);
+            let _ = vad.feed(&silence);
+            let _ = vad.feed(&silence);
+            let _ = vad.feed(&silence);
+            // 200 ms speech resume
+            let _ = vad.feed(&speech);
+            let _ = vad.feed(&speech);
+            // 1500+ ms trailing silence → SpeechEnd
+            let mut ended = false;
+            for _ in 0..20 {
+                let ev = vad.feed(&silence);
+                if ev.iter().any(|e| matches!(e, VadEvent::SpeechEnd { .. })) {
+                    ended = true;
+                    break;
+                }
+            }
+            assert!(ended, "expected SpeechEnd after silence tail");
+        }
+
+        let learned = vad.silence_ms();
+        assert!(
+            learned < 1_500 && learned >= 500,
+            "expected adaptive pull-down from 1500, got {learned}"
+        );
+        assert!(
+            vad.adaptive().map(|a| a.observation_count()).unwrap_or(0) >= 1,
+            "expected observations recorded"
+        );
     }
 
     const F100: u64 = 1_600; // 100 ms @ 16 kHz

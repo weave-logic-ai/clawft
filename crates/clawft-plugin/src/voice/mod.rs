@@ -57,6 +57,10 @@ pub mod privacy_indicator;
 #[cfg(feature = "voice-vad")]
 pub mod vad;
 
+// WEFT-230: re-export adaptive silence types at the voice surface so
+// callers do not need to dig into clawft-types directly.
+pub use clawft_types::config::{AdaptiveSilenceConfig, AdaptiveSilenceTimeout};
+
 #[cfg(feature = "voice-stt")]
 pub mod stt;
 
@@ -127,3 +131,6 @@ pub use wake::{
 };
 #[cfg(feature = "voice-wake")]
 pub use wake_daemon::WakeDaemon;
+
+#[cfg(feature = "voice-vad")]
+pub use vad::{VadEvent, VoiceActivityDetector};

@@ -914,13 +914,21 @@ pub struct VadConfig {
     #[serde(default = "default_vad_threshold")]
     pub threshold: f32,
 
-    /// Silence duration in ms before speech end.
+    /// Silence duration in ms before speech end (baseline for adaptive
+    /// learning; see [`Self::adaptive`] / WEFT-230).
     #[serde(default = "default_silence_timeout_ms", alias = "silenceTimeoutMs")]
     pub silence_timeout_ms: u32,
 
     /// Minimum speech duration in ms to trigger processing.
     #[serde(default = "default_min_speech_ms", alias = "minSpeechMs")]
     pub min_speech_ms: u32,
+
+    /// Per-session adaptive silence-timeout learning (WEFT-230).
+    ///
+    /// Starts from [`Self::silence_timeout_ms`] and learns toward the
+    /// user's pause/speech patterns within the configured min/max.
+    #[serde(default, alias = "adaptiveSilence")]
+    pub adaptive: super::AdaptiveSilenceConfig,
 }
 
 fn default_vad_threshold() -> f32 {
@@ -939,7 +947,16 @@ impl Default for VadConfig {
             threshold: default_vad_threshold(),
             silence_timeout_ms: default_silence_timeout_ms(),
             min_speech_ms: default_min_speech_ms(),
+            adaptive: super::AdaptiveSilenceConfig::default(),
         }
+    }
+}
+
+impl VadConfig {
+    /// Build a per-session [`super::AdaptiveSilenceTimeout`] from this
+    /// config (baseline = [`Self::silence_timeout_ms`]).
+    pub fn silence_estimator(&self) -> super::AdaptiveSilenceTimeout {
+        super::AdaptiveSilenceTimeout::new(self.silence_timeout_ms, self.adaptive.clone())
     }
 }
 
