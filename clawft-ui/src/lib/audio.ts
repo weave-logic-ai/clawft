@@ -7,6 +7,15 @@
  */
 
 import { api } from "./api-client";
+import {
+  tokenizeWords,
+  wordIndexAtChar,
+  wordIndexAtElapsed,
+  type WordBoundaryInfo,
+  type WordTiming,
+} from "./voice-highlight";
+
+export type { WordBoundaryInfo, WordTiming };
 
 // ---------------------------------------------------------------------------
 // Microphone access & level metering
@@ -237,8 +246,19 @@ export function stripMarkdownForSpeech(md: string): string {
 /** Currently playing audio source (for cancellation). */
 let _currentAudioSource: AudioBufferSourceNode | null = null;
 
+/** rAF id for word-timing clock during cloud playback. */
+let _wordClockRaf = 0;
+
+function stopWordClock(): void {
+  if (_wordClockRaf) {
+    cancelAnimationFrame(_wordClockRaf);
+    _wordClockRaf = 0;
+  }
+}
+
 /** Cancel any in-progress speech — both cloud audio and browser TTS. */
 export function cancelSpeech(): void {
+  stopWordClock();
   // Stop cloud audio playback
   if (_currentAudioSource) {
     try {
@@ -254,13 +274,35 @@ export function cancelSpeech(): void {
   }
 }
 
+export interface SpeakOptions {
+  lang?: string;
+  rate?: number;
+  /**
+   * Optional absolute word timings (ms from audio start).
+   * Used for cloud/blob playback highlight. Absent → graceful no-op
+   * (no word callbacks from the audio clock).
+   */
+  wordTimings?: WordTiming[];
+  /**
+   * Fired on each spoken-word boundary when available
+   * (Web Speech `boundary` events, or word-timing clock).
+   */
+  onWord?: (info: WordBoundaryInfo) => void;
+}
+
 /**
  * Play an audio blob (MP3) through the Web Audio API.
  *
  * Returns a promise that resolves when playback completes.
  * The playing source is stored so `cancelSpeech()` can stop it.
+ *
+ * When `wordTimings` + `onWord` are provided, drives highlight via elapsed time.
+ * Without timings the surface is a graceful no-op (audio still plays).
  */
-async function playAudioBlob(blob: Blob): Promise<void> {
+async function playAudioBlob(
+  blob: Blob,
+  opts?: { wordTimings?: WordTiming[]; onWord?: (info: WordBoundaryInfo) => void },
+): Promise<void> {
   const ctx = getAudioContext();
   if (ctx.state === "suspended") await ctx.resume();
 
@@ -272,7 +314,38 @@ async function playAudioBlob(blob: Blob): Promise<void> {
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
     _currentAudioSource = source;
+
+    const timings = opts?.wordTimings;
+    const onWord = opts?.onWord;
+    let lastIndex = -2;
+    const startAt = performance.now();
+
+    const tick = () => {
+      if (!_currentAudioSource) return;
+      if (timings && timings.length && onWord) {
+        const elapsed = performance.now() - startAt;
+        const idx = wordIndexAtElapsed(timings, elapsed);
+        if (idx !== null && idx !== lastIndex && idx >= 0) {
+          lastIndex = idx;
+          const t = timings[idx];
+          onWord({
+            wordIndex: idx,
+            charIndex: -1,
+            name: "word",
+            word: t?.word ?? "",
+          });
+        }
+      }
+      _wordClockRaf = requestAnimationFrame(tick);
+    };
+
+    // Only start the clock when timings are available — graceful no-op otherwise.
+    if (timings && timings.length && onWord) {
+      _wordClockRaf = requestAnimationFrame(tick);
+    }
+
     source.onended = () => {
+      stopWordClock();
       _currentAudioSource = null;
       resolve();
     };
@@ -315,10 +388,16 @@ export function resetTtsProviderCache(): void {
  * Cloud providers (`openai`, `elevenlabs`) go through `/api/voice/tts`.
  * Default `local` / `local-stub` / `browser` use the browser Web Speech
  * API (WEFT-238 — no server browser dispatch; UI path is intentional).
+ *
+ * ## Word highlighting (WEFT-231)
+ *
+ * - Browser TTS: fires `onWord` from SpeechSynthesis `boundary` events.
+ * - Cloud blob + `wordTimings`: fires `onWord` from an elapsed-time clock.
+ * - Cloud blob without timings: graceful no-op (audio plays; no highlight events).
  */
 export async function speak(
   text: string,
-  opts?: { lang?: string; rate?: number },
+  opts?: SpeakOptions,
 ): Promise<void> {
   const clean = stripMarkdownForSpeech(text);
   if (!clean) return;
@@ -329,7 +408,10 @@ export async function speak(
   if (CLOUD_TTS_PROVIDERS.has(provider)) {
     try {
       const blob = await api.voice.tts(clean, { speed: opts?.rate });
-      await playAudioBlob(blob);
+      await playAudioBlob(blob, {
+        wordTimings: opts?.wordTimings,
+        onWord: opts?.onWord,
+      });
       return;
     } catch {
       // Cloud TTS failed — fall through to browser Web Speech
@@ -343,7 +425,7 @@ export async function speak(
 /** Speak text using the browser's built-in speech synthesis. */
 function speakBrowser(
   cleanText: string,
-  opts?: { lang?: string; rate?: number },
+  opts?: SpeakOptions,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!window.speechSynthesis) {
@@ -353,6 +435,34 @@ function speakBrowser(
     const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.lang = opts?.lang || "en-US";
     utterance.rate = opts?.rate || 1.0;
+
+    // WEFT-231: word boundary → highlight. No-op when onWord is omitted.
+    if (opts?.onWord) {
+      const spans = tokenizeWords(cleanText);
+      // Prefer absolute timings if the caller supplied them even for browser path.
+      const timings = opts.wordTimings;
+      utterance.onboundary = (ev: SpeechSynthesisEvent) => {
+        if (ev.name && ev.name !== "word" && ev.name !== "sentence") return;
+        if (ev.name === "sentence") return;
+        let wordIndex = wordIndexAtChar(spans, ev.charIndex);
+        // If timings provided, prefer elapsed (charIndex can be unreliable on some engines).
+        if (timings && timings.length && typeof ev.elapsedTime === "number") {
+          const fromTime = wordIndexAtElapsed(timings, ev.elapsedTime);
+          if (fromTime !== null && fromTime >= 0) wordIndex = fromTime;
+        }
+        const word =
+          wordIndex >= 0 && wordIndex < spans.length
+            ? spans[wordIndex].word
+            : "";
+        opts.onWord?.({
+          wordIndex,
+          charIndex: ev.charIndex,
+          name: ev.name || "word",
+          word,
+        });
+      };
+    }
+
     utterance.onend = () => resolve();
     utterance.onerror = (e) => reject(e);
     window.speechSynthesis.speak(utterance);

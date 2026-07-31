@@ -12,8 +12,16 @@ import {
   type SpeechRecognition,
   type SpeechRecognitionEvent,
 } from "../../lib/audio";
+import {
+  mergeTranscriptDisplay,
+  parsePartialTranscriptPayload,
+  VOICE_PARTIAL_TOPIC,
+} from "../../lib/voice-highlight";
+import { wsClient } from "../../lib/ws-client";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+import { PartialTranscriptView } from "./partial-transcript";
+import { HighlightedSpeech } from "./highlighted-speech";
 
 /** Best-effort push of talk-mode pipeline state to the daemon (WEFT-218). */
 function pushPipeline(update: {
@@ -79,18 +87,25 @@ export function TalkModeOverlay() {
   const {
     state,
     transcript,
+    partialTranscript,
     response,
+    speakingWordIndex,
     talkModeActive,
     setTalkMode,
     setState,
     setTranscript,
+    setPartialTranscript,
     setResponse,
+    setSpeakingWordIndex,
+    clearTranscripts,
     settings,
   } = useVoiceStore();
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const activeRef = useRef(false);
   const speakingRef = useRef(false);
+  /** Throttle partial pipeline pushes so we don't spam the daemon. */
+  const lastPartialPushRef = useRef(0);
 
   /** Stop recognition, speak, then restart recognition. */
   const processTranscript = useCallback(
@@ -107,11 +122,17 @@ export function TalkModeOverlay() {
         recognitionRef.current = null;
       }
 
+      setPartialTranscript("");
       setState("processing");
-      pushPipeline({ state: "processing", talkModeActive: true, transcript: text.trim() });
+      pushPipeline({
+        state: "processing",
+        talkModeActive: true,
+        transcript: text.trim(),
+      });
       try {
         const responseText = await sendVoiceMessage(text.trim());
         setResponse(responseText);
+        setSpeakingWordIndex(null);
         setState("speaking");
         pushPipeline({
           state: "speaking",
@@ -119,21 +140,31 @@ export function TalkModeOverlay() {
           response: responseText,
         });
 
-        // Speak the response (mic is off, no feedback loop)
+        // Speak the response (mic is off, no feedback loop).
+        // WEFT-231: wire word boundary events → highlight surface.
         try {
-          await speak(responseText, { lang: settings.language || "en-US" });
+          await speak(responseText, {
+            lang: settings.language || "en-US",
+            onWord: (info) => {
+              if (info.wordIndex >= 0) {
+                setSpeakingWordIndex(info.wordIndex);
+              }
+            },
+          });
         } catch {
-          // TTS not available
+          // TTS not available — highlight stays a no-op
         }
       } catch {
         setResponse("");
+      } finally {
+        setSpeakingWordIndex(null);
       }
 
       // ── Resume recognition if still in talk mode ──
       speakingRef.current = false;
       if (activeRef.current) {
         setState("listening");
-        setTranscript("");
+        clearTranscripts();
         pushPipeline({
           state: "listening",
           talkModeActive: true,
@@ -155,7 +186,14 @@ export function TalkModeOverlay() {
         pushPipeline({ state: "idle", talkModeActive: false });
       }
     },
-    [setState, setResponse, setTranscript, settings.language],
+    [
+      setState,
+      setResponse,
+      setPartialTranscript,
+      setSpeakingWordIndex,
+      clearTranscripts,
+      settings.language,
+    ],
   );
 
   /** Wire event handlers on a SpeechRecognition instance. */
@@ -171,6 +209,8 @@ export function TalkModeOverlay() {
             finalTranscript += result[0].transcript;
             const text = finalTranscript;
             finalTranscript = "";
+            setTranscript(text);
+            setPartialTranscript("");
             setTimeout(() => {
               if (activeRef.current && !speakingRef.current) {
                 processTranscript(text);
@@ -180,7 +220,23 @@ export function TalkModeOverlay() {
             interim += result[0].transcript;
           }
         }
-        setTranscript(finalTranscript + interim);
+        // WEFT-231: stream interim hypothesis into the partial surface.
+        setTranscript(finalTranscript);
+        setPartialTranscript(interim);
+
+        // Throttled pipeline push so remote dashboards see partials (~4 Hz).
+        if (interim) {
+          const now = Date.now();
+          if (now - lastPartialPushRef.current > 250) {
+            lastPartialPushRef.current = now;
+            const merged = mergeTranscriptDisplay(finalTranscript, interim);
+            pushPipeline({
+              state: "listening",
+              talkModeActive: true,
+              transcript: merged,
+            });
+          }
+        }
       };
 
       recognition.onerror = (event) => {
@@ -200,7 +256,12 @@ export function TalkModeOverlay() {
         }
       };
     },
-    [setTranscript, setTalkMode, processTranscript],
+    [
+      setTranscript,
+      setPartialTranscript,
+      setTalkMode,
+      processTranscript,
+    ],
   );
 
   /** Interrupt TTS and resume listening immediately. */
@@ -209,9 +270,10 @@ export function TalkModeOverlay() {
     cancelSpeech();
     speakingRef.current = false;
     setResponse("");
+    setSpeakingWordIndex(null);
     if (activeRef.current) {
       setState("listening");
-      setTranscript("");
+      clearTranscripts();
       const rec = createSpeechRecognition({
         lang: settings.language || "en-US",
         continuous: true,
@@ -223,7 +285,15 @@ export function TalkModeOverlay() {
         recognitionRef.current = rec;
       }
     }
-  }, [state, setState, setResponse, setTranscript, settings.language, wireRecognition]);
+  }, [
+    state,
+    setState,
+    setResponse,
+    setSpeakingWordIndex,
+    clearTranscripts,
+    settings.language,
+    wireRecognition,
+  ]);
 
   // Start/stop recognition when talk mode toggles
   useEffect(() => {
@@ -234,6 +304,7 @@ export function TalkModeOverlay() {
         recognitionRef.current = null;
       }
       setState("idle");
+      setSpeakingWordIndex(null);
       return;
     }
 
@@ -245,7 +316,7 @@ export function TalkModeOverlay() {
     activeRef.current = true;
     speakingRef.current = false;
     setState("listening");
-    setTranscript("");
+    clearTranscripts();
     setResponse("");
 
     const recognition = createSpeechRecognition({
@@ -273,17 +344,45 @@ export function TalkModeOverlay() {
   }, [
     talkModeActive,
     setState,
-    setTranscript,
     setResponse,
-    setTalkMode,
+    setSpeakingWordIndex,
+    clearTranscripts,
     settings.language,
     wireRecognition,
   ]);
+
+  // WEFT-231: subscribe to dedicated partial-transcript WS topic (remote STT).
+  useEffect(() => {
+    if (!talkModeActive) return;
+
+    wsClient.subscribe(VOICE_PARTIAL_TOPIC);
+    const off = wsClient.on("event", (raw: unknown) => {
+      const msg = raw as { topic?: string; data?: unknown };
+      if (msg.topic !== VOICE_PARTIAL_TOPIC || !msg.data) return;
+      // Local mic is authoritative while recognition is running; only apply
+      // remote partials when we are not the STT source (no active recognition).
+      if (recognitionRef.current) return;
+      const parsed = parsePartialTranscriptPayload(msg.data);
+      if (!parsed) return;
+      if (parsed.isFinal) {
+        setTranscript(parsed.text);
+        setPartialTranscript("");
+      } else {
+        setPartialTranscript(parsed.text);
+      }
+    });
+
+    return () => {
+      wsClient.unsubscribe(VOICE_PARTIAL_TOPIC);
+      off();
+    };
+  }, [talkModeActive, setTranscript, setPartialTranscript]);
 
   if (!talkModeActive) return null;
 
   const Icon = overlayIcons[state];
   const isActive = state === "listening" || state === "speaking";
+  const cleanResponse = response ? stripMarkdownForSpeech(response) : "";
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
@@ -341,24 +440,18 @@ export function TalkModeOverlay() {
         <WaveformBars active={isActive} />
       </div>
 
-      {/* Transcript */}
-      {transcript && (
-        <div className="mb-4 max-w-lg rounded-lg bg-white/10 px-6 py-3">
-          <p className="text-xs font-medium text-gray-400 uppercase mb-1">
-            You said
-          </p>
-          <p className="text-sm text-white">{transcript}</p>
-        </div>
-      )}
+      {/* Partial / final transcript stream (WEFT-231) */}
+      <PartialTranscriptView
+        finalText={transcript}
+        interimText={partialTranscript}
+      />
 
-      {/* Response (cleaned for readability in voice mode) */}
-      {response && (
-        <div className="mb-8 max-w-lg rounded-lg bg-blue-500/10 px-6 py-3">
-          <p className="text-xs font-medium text-blue-300 uppercase mb-1">
-            Assistant
-          </p>
-          <p className="text-sm text-white">{stripMarkdownForSpeech(response)}</p>
-        </div>
+      {/* Response with TTS word highlight surface (WEFT-231) */}
+      {cleanResponse && (
+        <HighlightedSpeech
+          text={cleanResponse}
+          activeWordIndex={state === "speaking" ? speakingWordIndex : null}
+        />
       )}
 
       {/* End button */}

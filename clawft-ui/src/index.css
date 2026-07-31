@@ -13,3 +13,27 @@
 .animate-waveform {
   animation: waveform 0.8s ease-in-out infinite;
 }
+
+/* WEFT-231: TTS word highlighting surface (graceful no-op without active class) */
+.tts-word {
+  border-radius: 0.15rem;
+  transition:
+    background-color 80ms ease,
+    color 80ms ease,
+    box-shadow 80ms ease;
+}
+
+.tts-word--spoken {
+  color: rgb(191 219 254); /* blue-200 */
+  opacity: 0.85;
+}
+
+.tts-word--active {
+  background-color: rgb(59 130 246 / 0.35); /* blue-500/35 */
+  color: #fff;
+  box-shadow: 0 0 0 1px rgb(147 197 253 / 0.5);
+}
+
+.partial-transcript-interim {
+  border-bottom: 1px dotted rgb(255 255 255 / 0.35);
+}

@@ -3,6 +3,9 @@ import { useVoiceStore } from "../stores/voice-store";
 import { api } from "../lib/api-client";
 import { VoiceSettings } from "../components/voice/settings";
 import { PushToTalk } from "../components/voice/push-to-talk";
+import { PartialTranscriptView } from "../components/voice/partial-transcript";
+import { HighlightedSpeech } from "../components/voice/highlighted-speech";
+import { stripMarkdownForSpeech } from "../lib/audio";
 import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
 
@@ -17,7 +20,14 @@ const stateVariant: Record<
 };
 
 export function VoicePage() {
-  const { state, settings } = useVoiceStore();
+  const {
+    state,
+    settings,
+    transcript,
+    partialTranscript,
+    response,
+    speakingWordIndex,
+  } = useVoiceStore();
 
   useEffect(() => {
     api.voice.status().then((data) => {
@@ -29,6 +39,8 @@ export function VoicePage() {
       // MSW or network error; keep defaults
     });
   }, []);
+
+  const cleanResponse = response ? stripMarkdownForSpeech(response) : "";
 
   return (
     <div className="flex-1 overflow-auto p-6 space-y-6">
@@ -65,6 +77,30 @@ export function VoicePage() {
               <div className="flex justify-center py-4">
                 <PushToTalk />
               </div>
+              {/* WEFT-231: live partial STT + TTS word highlight on the voice page */}
+              {(transcript || partialTranscript) && (
+                <div className="mt-4 rounded-lg border border-gray-200 dark:border-gray-700 p-3 bg-gray-50 dark:bg-gray-900/40">
+                  <PartialTranscriptView
+                    finalText={transcript}
+                    interimText={partialTranscript}
+                    variant="panel"
+                    className="mb-0 max-w-none px-0 py-0"
+                    label="Transcript"
+                  />
+                </div>
+              )}
+              {cleanResponse && (
+                <div className="mt-3 rounded-lg border border-blue-200 dark:border-blue-800 p-3">
+                  <HighlightedSpeech
+                    text={cleanResponse}
+                    activeWordIndex={
+                      state === "speaking" ? speakingWordIndex : null
+                    }
+                    variant="panel"
+                    className="mb-0 max-w-none px-0 py-0"
+                  />
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

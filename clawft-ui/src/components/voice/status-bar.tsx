@@ -21,25 +21,45 @@ type VoiceStatusPayload = {
   transcript?: string | null;
   response?: string | null;
   talkModeActive?: boolean;
+  /** WEFT-231: when true, transcript is a non-final partial. */
+  isPartial?: boolean;
+  is_partial?: boolean;
 };
 
 function applyVoiceStatusPayload(
   payload: VoiceStatusPayload,
   setState: (s: VoiceState) => void,
   setTranscript: (t: string) => void,
+  setPartialTranscript: (t: string) => void,
   setResponse: (t: string) => void,
   setTalkMode: (a: boolean) => void,
 ) {
   const next = payload.state ?? payload.status;
   if (next) setState(next);
-  if (payload.transcript !== undefined) setTranscript(payload.transcript ?? "");
+  if (payload.transcript !== undefined) {
+    const text = payload.transcript ?? "";
+    const isPartial = payload.isPartial === true || payload.is_partial === true;
+    if (isPartial) {
+      setPartialTranscript(text);
+    } else {
+      setTranscript(text);
+      setPartialTranscript("");
+    }
+  }
   if (payload.response !== undefined) setResponse(payload.response ?? "");
   if (payload.talkModeActive !== undefined) setTalkMode(payload.talkModeActive);
 }
 
 export function VoiceStatusBar() {
-  const { state, talkModeActive, setTalkMode, setState, setTranscript, setResponse } =
-    useVoiceStore();
+  const {
+    state,
+    talkModeActive,
+    setTalkMode,
+    setState,
+    setTranscript,
+    setPartialTranscript,
+    setResponse,
+  } = useVoiceStore();
 
   useEffect(() => {
     // Real backend path: TopicBroadcaster topic "voice:status" is enveloped
@@ -56,6 +76,7 @@ export function VoiceStatusBar() {
         msg.data,
         setState,
         setTranscript,
+        setPartialTranscript,
         setResponse,
         setTalkMode,
       );
@@ -65,7 +86,7 @@ export function VoiceStatusBar() {
       wsClient.unsubscribe("voice:status");
       off();
     };
-  }, [setState, setTranscript, setResponse, setTalkMode]);
+  }, [setState, setTranscript, setPartialTranscript, setResponse, setTalkMode]);
 
   const config = stateConfig[state];
   const Icon = config.icon;

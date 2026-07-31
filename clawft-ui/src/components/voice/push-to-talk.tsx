@@ -12,8 +12,16 @@ import {
 import { cn } from "../../lib/utils";
 
 export function PushToTalk() {
-  const { state, setState, settings, setTranscript, setResponse } =
-    useVoiceStore();
+  const {
+    state,
+    setState,
+    settings,
+    setTranscript,
+    setPartialTranscript,
+    setResponse,
+    setSpeakingWordIndex,
+    clearTranscripts,
+  } = useVoiceStore();
   const [active, setActive] = useState(false);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -33,7 +41,7 @@ export function PushToTalk() {
     setError(null);
     setActive(true);
     setState("listening");
-    setTranscript("");
+    clearTranscripts();
     transcriptRef.current = "";
     startTimeRef.current = Date.now();
     setDuration(0);
@@ -69,7 +77,9 @@ export function PushToTalk() {
       if (final) {
         transcriptRef.current += final;
       }
-      setTranscript(transcriptRef.current + interim);
+      // WEFT-231: stream final vs interim separately for the partial surface.
+      setTranscript(transcriptRef.current);
+      setPartialTranscript(interim);
     };
 
     recognition.onerror = (event) => {
@@ -92,11 +102,20 @@ export function PushToTalk() {
 
     recognition.start();
     recognitionRef.current = recognition;
-  }, [supported, setState, setTranscript, settings.language, active]);
+  }, [
+    supported,
+    setState,
+    setTranscript,
+    setPartialTranscript,
+    clearTranscripts,
+    settings.language,
+    active,
+  ]);
 
   const stopRecording = useCallback(async () => {
     setActive(false);
     setState("processing");
+    setPartialTranscript("");
 
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -120,19 +139,33 @@ export function PushToTalk() {
     try {
       const text = await sendVoiceMessage(transcript);
       setResponse(text);
+      setSpeakingWordIndex(null);
       setState("speaking");
 
-      // Use browser TTS to speak the response
+      // Use browser TTS to speak the response; wire word highlight (WEFT-231).
       try {
-        await speak(text, { lang: settings.language || "en-US" });
+        await speak(text, {
+          lang: settings.language || "en-US",
+          onWord: (info) => {
+            if (info.wordIndex >= 0) setSpeakingWordIndex(info.wordIndex);
+          },
+        });
       } catch {
         // TTS not available or failed, that's ok
       }
     } catch {
       setResponse("");
+    } finally {
+      setSpeakingWordIndex(null);
     }
     setState("idle");
-  }, [setState, setResponse, settings.language]);
+  }, [
+    setState,
+    setResponse,
+    setPartialTranscript,
+    setSpeakingWordIndex,
+    settings.language,
+  ]);
 
   // Clean up on unmount
   useEffect(() => {
