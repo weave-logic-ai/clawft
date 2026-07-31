@@ -213,3 +213,8 @@ Full threat model (WASM memory readability, XSS, production checklist):
   allow WASM execution while blocking inline scripts.
 - **Audit binary size.** Large WASM binaries may indicate unintended
   native dependencies being compiled in.
+- **Verify release provenance before shipping to production.** Tag
+  releases ship `VERSION.json`, detached SHA-256 checksums, and
+  GitHub Attestations (sigstore). See
+  [verification.md](verification.md) for `sha256sum` / `gh attestation verify`
+  recipes (WEFT-405).

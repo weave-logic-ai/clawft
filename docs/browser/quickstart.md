@@ -127,6 +127,7 @@ the key fields are:
 | [config-schema.md](./config-schema.md) | Full annotated browser-mode `config.json` schema (every root key, provider fields, dashboard quirks) |
 | [deployment.md](./deployment.md) | Static hosting headers + sample CORS Worker |
 | [security.md](./security.md) | Threat model: API keys in JS-readable WASM memory (WEFT-406) |
+| [verification.md](./verification.md) | Release VERSION.json, SHA-256, and sigstore attestation (WEFT-405) |
 
 ## Using the test harness
 

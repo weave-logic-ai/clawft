@@ -122,15 +122,37 @@ cargo-dist v0.31 doesn't yet support `wasm32-wasip2` in its target
 matrix (tracked as HP-16; see also [ADR-044](/adr/adr-044) on the
 wasip1 -> wasip2 migration). This workflow runs in parallel and adds:
 
-| Asset                 | Target           | Notes                                |
-|-----------------------|------------------|--------------------------------------|
-| `clawft_wasm.wasm`    | `wasm32-wasip2`  | Server-side WASM via wasmtime        |
+| Asset | Target | Notes |
+|-------|--------|-------|
+| `clawft-wasm-wasip2-<tag>.wasm` | `wasm32-wasip2` | Server-side WASM via wasmtime |
+| `clawft-wasm-wasip2-<tag>.VERSION.json` | — | Tag, git SHA, workspace version (WEFT-405) |
+| `clawft-wasm-wasip2-<tag>.wasm.sha256` | — | Detached SHA-256 |
+| `clawft-wasm-wasip2-<tag>.VERSION.json.sha256` | — | Detached SHA-256 |
 
-The build runs `wasm-opt -Oz` for size, asserts the gzipped size budget,
-and uploads the artifact to the existing GitHub Release created by
-`Release`.
+Packaging uses `scripts/release/package-wasm-artifact.sh package-wasi`.
+On upload the workflow also attaches GitHub Attestations (sigstore
+provenance via `actions/attest-build-provenance`), matching native
+cargo-dist archives.
 
-### 3. `Release (Knowledge Base)` -- `release-kb.yml`
+### 3. `Browser WASM` -- `wasm-browser.yml`
+
+Builds `clawft-wasm` for `wasm32-unknown-unknown` with the `browser`
+feature, runs `wasm-bindgen`, and on version tags attaches the same
+version + checksum + attestation pipeline as WASI (WEFT-405):
+
+| Asset | Notes |
+|-------|-------|
+| `clawft-browser-wasm-<tag>.tar.gz` | wasm-bindgen package (`browser-pkg/`, includes embedded `VERSION.json`) |
+| `clawft-browser-wasm-<tag>.VERSION.json` | Standalone version manifest |
+| `clawft-browser-wasm-<tag>.tar.gz.sha256` | Detached SHA-256 of the tarball |
+| `clawft-browser-wasm-<tag>.VERSION.json.sha256` | Detached SHA-256 of the manifest |
+
+Consumer verification steps live in
+[docs/browser/verification.md](/docs/browser/verification.md).
+PR / master pushes still upload the unbound `browser-wasm-pkg` Actions
+artifact for docs playground consumption.
+
+### 4. `Release (Knowledge Base)` -- `release-kb.yml`
 
 Builds the RVF knowledge base bundle that powers the docs-site
 playground tour guide:
@@ -142,7 +164,7 @@ playground tour guide:
 Uses `tools/build-kb` to walk `docs/src/content/docs/` and emit a single
 RVF file. Attached to the same Release.
 
-### 4. `Publish Crates` -- `publish-crates.yml`
+### 5. `Publish Crates` -- `publish-crates.yml`
 
 Publishes every `publish = true` workspace crate to crates.io, in
 dependency-topological order, via `cargo-workspaces`. The job:
@@ -156,7 +178,7 @@ Once all crates land on crates.io, the published rustdoc on docs.rs gets
 the WeftOS ecosystem cross-link table because every distributable crate
 sets `[package.metadata.docs.rs]` with `all-features = true`.
 
-### 5. `Release (Docker)` -- `release-docker.yml`
+### 6. `Release (Docker)` -- `release-docker.yml`
 
 Triggered by the `Release` workflow's `workflow_run` event (orchestration
 gate: only publish Docker after a successful tag Release). The image
@@ -183,7 +205,7 @@ Post-publish smoke: `GET /api/health` (WEFT-550). See
 [`docker.md`](docker.md) for image internals, local builds, and macOS
 runtimes (Docker Desktop / OrbStack / Apple container CLI).
 
-### 6. `Release Gate` -- `release-gate.yml`
+### 7. `Release Gate` -- `release-gate.yml`
 
 The supervisor. Triggers on `workflow_run` from `Publish Crates` and
 `Release (Docker)`. If either of those failed, the gate:

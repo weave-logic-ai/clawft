@@ -2,11 +2,19 @@
 #
 # cargo-dist v0.31.0 does not support wasip2 in its target matrix (HP-16),
 # so this workflow runs independently alongside release.yml.
+#
+# WEFT-405 supply-chain parity (shared with wasm-browser.yml):
+#   - VERSION.json (tag, git sha, workspace version, target)
+#   - SHA256SUMS + per-file .sha256 detached checksums
+#   - GitHub Attestations / sigstore provenance (actions/attest-build-provenance)
+# Packaging helper: scripts/release/package-wasm-artifact.sh
 
 name: Release WASI
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 on:
   push:
@@ -78,20 +86,53 @@ jobs:
           echo "| Raw | ${SIZE_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Gzipped | ${GZIP_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Rename for release
-        id: rename
+      - name: Package, version, and checksum
+        id: package
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          DEST="clawft-wasm-wasip2-${TAG}.wasm"
-          cp "${{ steps.wasm.outputs.wasm_path }}" "$DEST"
-          echo "asset=$DEST" >> "$GITHUB_OUTPUT"
+          OUT="dist-wasi"
+          mkdir -p "$OUT"
+          # shellcheck disable=SC1091
+          eval "$(scripts/release/package-wasm-artifact.sh package-wasi \
+            --wasm "${{ steps.wasm.outputs.wasm_path }}" \
+            --tag "$TAG" \
+            --out-dir "$OUT" \
+            --git-sha "${GITHUB_SHA}")"
+          {
+            echo "asset=${asset}"
+            echo "version_json=${version_json}"
+            echo "sha256sums=${sha256sums}"
+            echo "workspace_version=${workspace_version}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Version" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat "$version_json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$sha256sums" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest build provenance (sigstore)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.version_json }}
 
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          ASSET="${{ steps.rename.outputs.asset }}"
+          OUT="dist-wasi"
+          ASSET="${{ steps.package.outputs.asset }}"
+          VER_JSON="${{ steps.package.outputs.version_json }}"
 
           # Wait for the release to exist (created by release.yml, takes ~15 min)
           for i in $(seq 1 90); do
@@ -108,5 +149,13 @@ jobs:
             exit 1
           fi
 
-          gh release upload "$TAG" "$ASSET" --clobber
-          echo "Uploaded $ASSET to release $TAG"
+          # Upload binary + version manifest + detached checksums
+          SUMS="${{ steps.package.outputs.sha256sums }}"
+          gh release upload "$TAG" \
+            "$ASSET" \
+            "$VER_JSON" \
+            "${ASSET}.sha256" \
+            "${VER_JSON}.sha256" \
+            "$SUMS" \
+            --clobber
+          echo "Uploaded WASI artefact + VERSION.json + SHA256SUMS to release $TAG"

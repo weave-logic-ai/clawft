@@ -183,7 +183,7 @@ cargo-dist’s native matrix and of the WASI workflow:
 | **PR / gate** | `wasm-browser-check` in `pr-gates.yml`; `scripts/build.sh gate` checks the six portable crates on the browser triple |
 | **Artifact** | Upload `browser-pkg/` (and tarball `clawft-browser-wasm-<tag>.tar.gz` on version tags) via GitHub Actions artifacts / `gh release upload` |
 | **Size budget** | `scripts/build.sh bundle-size` / WEFT-389 gate on post-bindgen `_bg.wasm` (raw + gzip thresholds documented in [wasm-bundle-size.md](../architecture/wasm-bundle-size.md)); original &lt;300 KB raw aspirational target superseded by realistic agent-loop budget |
-| **Signing** | Same as other GitHub Release assets for the tag (release pipeline identity). No separate browser-only code-signing root; integrity is release attachment + CI provenance. Skill / panel capability signing (ADR-071) is a different surface. |
+| **Signing / versioning (WEFT-405)** | Same root of trust as cargo-dist natives and WASI: `VERSION.json` (tag + git SHA + workspace version) embedded in and beside the tarball; detached `*.sha256` + `SHA256SUMS`; GitHub Attestations via `actions/attest-build-provenance` (sigstore; `gh attestation verify`). Shared helper: `scripts/release/package-wasm-artifact.sh`. No separate browser-only code-signing root. Skill / panel capability signing (ADR-071) is a different surface. Verify: [docs/browser/verification.md](../browser/verification.md). |
 | **Local** | `scripts/build.sh browser`, optional `scripts/build.sh serve`, wasm-pack workflow in [docs/browser/building.md](../browser/building.md) |
 
 Dashboard integration reuses the same bindgen package through
