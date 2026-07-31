@@ -115,7 +115,9 @@ the key fields are:
   browser CORS (e.g., Anthropic). For other providers, configure a CORS
   proxy via `corsProxy`.
 - **`apiKey`**: Your provider API key. In production, inject this at
-  runtime rather than hardcoding it in source.
+  runtime rather than hardcoding it in source. Keys in the tab are
+  JS/WASM-readable — see [security.md](./security.md); prefer a backend
+  proxy and short-lived tokens for real deployments.
 
 ### Deeper references
 
@@ -124,6 +126,7 @@ the key fields are:
 | [cors-provider-setup.md](./cors-provider-setup.md) | Per-provider CORS recipes (OpenRouter, OpenAI, Anthropic, Groq, DeepSeek, Gemini, xAI), proxy URL rewrite rules, security checklist |
 | [config-schema.md](./config-schema.md) | Full annotated browser-mode `config.json` schema (every root key, provider fields, dashboard quirks) |
 | [deployment.md](./deployment.md) | Static hosting headers + sample CORS Worker |
+| [security.md](./security.md) | Threat model: API keys in JS-readable WASM memory (WEFT-406) |
 
 ## Using the test harness
 

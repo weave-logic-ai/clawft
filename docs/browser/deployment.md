@@ -200,8 +200,13 @@ location ~ \.wasm$ {
 
 ## Security Considerations
 
+Full threat model (WASM memory readability, XSS, production checklist):
+**[security.md](./security.md)** (WEFT-406).
+
 - **Never embed API keys in the WASM binary or static HTML.** Inject keys
-  at runtime via `set_env()` or a server-side token exchange.
+  at runtime via `set_env()` or a server-side token exchange. Prefer a
+  backend proxy so durable provider secrets never enter the tab.
+- **Prefer short-lived / scoped tokens** when a secret must touch the browser.
 - **Use a CORS proxy with allowlisting.** Do not deploy an open CORS proxy.
   Restrict the `target` parameter to known LLM API domains.
 - **Enable CSP headers.** Add `script-src 'self' 'wasm-unsafe-eval'` to

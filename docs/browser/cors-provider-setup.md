@@ -426,8 +426,11 @@ dev Worker tunnel. Production must use `https://`.
 
 ## Security notes
 
-- **Keys are visible to page JS.** Prefer scoped / browser-restricted keys;
-  never bake secrets into the WASM binary or static HTML.
+Full threat model: **[security.md](./security.md)** (WEFT-406).
+
+- **Keys are visible to page JS** (and WASM linear memory). Prefer scoped /
+  browser-restricted / short-lived keys; never bake secrets into the WASM
+  binary or static HTML. Production: hold durable keys on a backend proxy.
 - **Dashboard storage** encrypts keys with Web Crypto AES-GCM before
   IndexedDB (see `browser-config.tsx`); the live `init` config still needs
   the plaintext key in memory for `Authorization`.
@@ -457,6 +460,7 @@ dev Worker tunnel. Production must use `https://`.
 - [config-schema.md](./config-schema.md) — full browser-mode config reference
 - [quickstart.md](./quickstart.md) — five-minute WASM harness
 - [deployment.md](./deployment.md) — hosting, headers, sample Worker
+- [security.md](./security.md) — API-key / WASM-memory threat model (WEFT-406)
 - [api-reference.md](./api-reference.md) — `init` / `send_message` / `set_env`
 - [architecture.md](./architecture.md) — browser vs native platform split
 - [ADR-083](../adr/adr-083-browser-wasm-support.md) — browser WASM decision record

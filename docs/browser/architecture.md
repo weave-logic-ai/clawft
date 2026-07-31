@@ -202,3 +202,11 @@ pub trait Tool: Send + Sync { ... }
 
 This same pattern is applied to the `Platform` trait and all `impl Tool for ...`
 blocks in `clawft-tools`.
+
+## Security: API keys in JS-readable memory
+
+Provider keys injected via `init(config_json)` live in WASM linear memory that
+is readable from same-origin JavaScript. `SecretString` redacts logs only; it
+does not isolate secrets from XSS. For the full threat model, mitigations
+(backend proxy, short-lived tokens, CSP, never embed secrets), and a production
+checklist, see **[security.md](./security.md)** (WEFT-406).
