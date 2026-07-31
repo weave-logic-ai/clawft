@@ -66,21 +66,11 @@ pub struct WhisperServiceConfig {
     /// stable across leader handoff. Must sit under
     /// `substrate/_derived/transcript/...` and the publishing node
     /// must hold a grant for the `transcript` topic.
+    ///
+    /// WEFT-236: the Phase-4 dual-publish legacy node-private path
+    /// (`substrate/<node>/derived/transcript/...`) has been removed.
+    /// Only this canonical path is written.
     pub output_path_derived: String,
-    /// Legacy node-private transcript path. Kept alive for one
-    /// migration window so existing in-tree subscribers (today:
-    /// the Explorer's substrate-walk discovery) continue to find
-    /// transcripts at the old path while consumers migrate to
-    /// `output_path_derived`. Each publish to `output_path_derived`
-    /// also writes here; failures are logged but do not block the
-    /// canonical publish.
-    ///
-    /// `None` disables the legacy publish. `Some(path)` must sit
-    /// under `substrate/<node_id>/...` for the legacy gate to
-    /// accept it.
-    ///
-    // REMOVE AFTER PHASE 4: dual-publish for migration
-    pub output_path_legacy: Option<String>,
     /// Service-level enable flag. When `false`, the inference loop
     /// drops incoming chunks before windowing — no work is done.
     /// Defaults to a fresh `Arc<AtomicBool>(true)` if you don't
@@ -163,7 +153,6 @@ impl Default for WhisperServiceConfig {
             // WEFT-438: node-scoped PCM path (not the legacy flat constant).
             input_path: pcm_chunk_input_path("n-test00"),
             output_path_derived: "substrate/_derived/transcript/n-test00/mic".to_string(),
-            output_path_legacy: Some("substrate/n-test00/derived/transcript/mic".to_string()),
             service_enabled: Arc::new(AtomicBool::new(true)),
             source_enabled: Arc::new(AtomicBool::new(true)),
             node_registry,
@@ -192,8 +181,8 @@ impl WhisperService {
     ///    [`Windower`].
     /// 3. When a window emits, wraps PCM in WAV, POSTs to whisper.
     /// 4. On success, publishes transcript to `output_path_derived`
-    ///    (mesh-canonical) and, while dual-publish is on, also to
-    ///    `output_path_legacy`.
+    ///    (mesh-canonical only; WEFT-236 dropped the Phase-4 legacy
+    ///    dual-publish path).
     ///
     /// # Lifecycle
     ///
@@ -555,7 +544,7 @@ async fn handle_inference_result(
             match substrate.publish_gated_with_grants(
                 Some(&config.node_id),
                 &config.output_path_derived,
-                payload.clone(),
+                payload,
                 &config.node_registry,
             ) {
                 Ok(tick) => {
@@ -587,31 +576,6 @@ async fn handle_inference_result(
                     node_id = %config.node_id,
                     "whisper service: gate denied transcript publish (mesh-canonical)"
                 ),
-            }
-
-            // REMOVE AFTER PHASE 4: dual-publish for migration
-            //
-            // Legacy publish: keep emitting at the old node-private
-            // path so existing in-tree subscribers (Explorer's
-            // `substrate/<daemon>/derived/transcript/...` walk) keep
-            // working through the migration window. Logged with a
-            // "deprecated" tag so anyone tailing the daemon log
-            // notices the dual-publish happening.
-            if let Some(ref legacy_path) = config.output_path_legacy {
-                match substrate.publish_gated(Some(&config.node_id), legacy_path, payload) {
-                    Ok(_) => warn!(
-                        target: "deprecated",
-                        output_path = %legacy_path,
-                        canonical_path = %config.output_path_derived,
-                        "whisper service: dual-published transcript at legacy node-private path \
-                         (REMOVE AFTER PHASE 4)"
-                    ),
-                    Err(e) => warn!(
-                        err = %e,
-                        output_path = %legacy_path,
-                        "whisper service: legacy transcript publish failed (canonical succeeded)"
-                    ),
-                }
             }
         }
         Err(e) => {
@@ -953,15 +917,11 @@ mod tests {
         };
         let input_path = cfg.input_path.clone();
         let output_path = cfg.output_path_derived.clone();
-        let legacy_path = cfg.output_path_legacy.clone().unwrap();
         let actor = cfg.node_id.clone();
 
-        // Pre-subscribe to BOTH outputs to catch the transcript.
-        // Mesh-canonical is the load-bearing path (R3.2); the legacy
-        // dual-publish is REMOVE-AFTER-PHASE-4 and is exercised via
-        // a parallel subscription to keep the migration honest.
+        // Pre-subscribe to the mesh-canonical path (R3.2 / WEFT-236).
+        // Legacy dual-publish was removed post Phase-4 migration.
         let (_out_id, mut out_rx) = substrate.subscribe(Some(&actor), &output_path).unwrap();
-        let (_legacy_id, mut legacy_rx) = substrate.subscribe(Some(&actor), &legacy_path).unwrap();
 
         let svc = WhisperService::spawn(substrate.clone(), client, cfg).unwrap();
 
@@ -971,8 +931,7 @@ mod tests {
         publish_pcm_chunk(&substrate, &actor, &input_path, &half, 250, 1);
         publish_pcm_chunk(&substrate, &actor, &input_path, &half, 250, 2);
 
-        // Wait up to 3s for a transcript to show up on the canonical
-        // output path.
+        // Wait up to 3s for a transcript on the canonical output path.
         let got = tokio::time::timeout(Duration::from_secs(3), out_rx.recv()).await;
         let line = got
             .expect("transcript not published within 3s")
@@ -987,18 +946,6 @@ mod tests {
         assert_eq!(body["seq"], 2);
         assert_eq!(body["lang"], "en");
         assert!(body["confidence"].is_null());
-
-        // Legacy dual-publish must also have fired with the same
-        // payload. REMOVE AFTER PHASE 4: when dual-publish is dropped,
-        // delete this assertion + the legacy_rx subscription above.
-        let legacy_got = tokio::time::timeout(Duration::from_secs(1), legacy_rx.recv()).await;
-        let legacy_line = legacy_got
-            .expect("legacy transcript not published within 1s")
-            .expect("substrate closed");
-        let legacy_update: Value =
-            serde_json::from_slice(&legacy_line[..legacy_line.len() - 1]).unwrap();
-        assert_eq!(legacy_update["path"], legacy_path);
-        assert_eq!(legacy_update["value"]["text"], "unit test speaks");
 
         svc.shutdown().await;
     }

@@ -972,17 +972,10 @@ pub async fn run(
         // leader handoff. The daemon issued itself a `transcript`
         // grant above; the gate consults the registry handed to the
         // service via config.
+        // Mesh-canonical only (WEFT-236): Phase-4 dual-publish to the
+        // legacy node-private path is gone. Consumers must read
+        // `substrate/_derived/transcript/<source>/mic`.
         let output_path_derived = format!("substrate/_derived/transcript/{source_node_id}/mic",);
-        // REMOVE AFTER PHASE 4: dual-publish for migration.
-        // Old node-private path stays alive for one release so
-        // existing in-tree subscribers (the Explorer's substrate
-        // walk) keep working while consumers migrate to the
-        // canonical path.
-        let output_path_legacy = format!(
-            "substrate/{daemon}/derived/transcript/{source}/mic",
-            daemon = daemon_identity.node_id,
-            source = source_node_id,
-        );
         let node_registry = {
             let k = kernel.read().await;
             k.node_registry().clone()
@@ -993,7 +986,6 @@ pub async fn run(
             node_id: daemon_identity.node_id.clone(),
             input_path: input_path.clone(),
             output_path_derived: output_path_derived.clone(),
-            output_path_legacy: Some(output_path_legacy.clone()),
             service_enabled: Arc::clone(&whisper_service_flag),
             source_enabled: Arc::clone(&whisper_source_flag),
             node_registry,
@@ -1035,9 +1027,8 @@ pub async fn run(
                 info!(
                     input = %input_path,
                     output = %output_path_derived,
-                    legacy_output = %output_path_legacy,
                     whisper_url = %whisper_url,
-                    "whisper service spawned (dual-publish: canonical + legacy)"
+                    "whisper service spawned (mesh-canonical transcript path)"
                 );
                 Some(svc)
             }
