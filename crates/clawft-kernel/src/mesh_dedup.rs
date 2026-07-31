@@ -19,28 +19,42 @@
 //! (60s TTL, 10k entries).
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::mesh_clock::{Clock, MonoTime, RealClock};
 
 /// Time-bounded deduplication filter.
 ///
 /// Tracks recently seen IDs and automatically expires entries
-/// older than the configured TTL.
+/// older than the configured TTL. Uses an injectable [`Clock`]
+/// (WEFT-113) so tests can advance TTL without sleeping.
 pub struct DedupFilter {
     /// Seen IDs with their insertion time.
-    seen: HashMap<String, Instant>,
+    seen: HashMap<String, MonoTime>,
     /// How long to remember IDs.
     ttl: Duration,
     /// Maximum number of entries before forced eviction.
     max_entries: usize,
+    /// Injectable clock.
+    clock: Arc<dyn Clock>,
 }
 
 impl DedupFilter {
     /// Create a new dedup filter with the given TTL and max capacity.
+    ///
+    /// Binds the production [`RealClock`].
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self::with_clock(ttl, max_entries, RealClock::shared())
+    }
+
+    /// Create a dedup filter with an injectable [`Clock`].
+    pub fn with_clock(ttl: Duration, max_entries: usize, clock: Arc<dyn Clock>) -> Self {
         Self {
             seen: HashMap::new(),
             ttl,
             max_entries,
+            clock,
         }
     }
 
@@ -63,14 +77,14 @@ impl DedupFilter {
             self.evict_oldest();
         }
 
-        self.seen.insert(id.to_string(), Instant::now());
+        self.seen.insert(id.to_string(), self.clock.now());
         true // new message
     }
 
     /// Check if an ID has been seen (without inserting).
     pub fn is_duplicate(&self, id: &str) -> bool {
         if let Some(inserted) = self.seen.get(id) {
-            inserted.elapsed() < self.ttl
+            self.clock.now().elapsed_since(*inserted) < self.ttl
         } else {
             false
         }
@@ -88,8 +102,10 @@ impl DedupFilter {
 
     /// Remove expired entries.
     fn evict_expired(&mut self) {
+        let now = self.clock.now();
+        let ttl = self.ttl;
         self.seen
-            .retain(|_, inserted| inserted.elapsed() < self.ttl);
+            .retain(|_, inserted| now.elapsed_since(*inserted) < ttl);
     }
 
     /// Remove the oldest entry to make room for new ones.
@@ -108,6 +124,7 @@ impl DedupFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh_clock::MockClock;
 
     #[test]
     fn new_message_returns_true() {
@@ -140,21 +157,27 @@ mod tests {
 
     #[test]
     fn expired_entries_evicted() {
-        // Use a zero TTL so entries expire immediately.
-        let mut f = DedupFilter::new(Duration::from_nanos(0), 100);
-        f.seen
-            .insert("old".to_string(), Instant::now() - Duration::from_secs(1));
-        // check_and_insert evicts expired, so "old" should be gone
+        let clock = MockClock::new();
+        let mut f = DedupFilter::with_clock(
+            Duration::from_secs(1),
+            100,
+            Arc::new(clock.clone()),
+        );
+        assert!(f.check_and_insert("old"));
+        clock.advance(Duration::from_secs(2));
+        // TTL elapsed → treated as new again.
         assert!(f.check_and_insert("old"));
     }
 
     #[test]
     fn max_capacity_evicts_oldest() {
-        let mut f = DedupFilter::new(Duration::from_secs(60), 2);
+        let clock = MockClock::new();
+        let mut f =
+            DedupFilter::with_clock(Duration::from_secs(60), 2, Arc::new(clock.clone()));
         f.check_and_insert("a");
-        // Backdate "a" so it is oldest
-        *f.seen.get_mut("a").unwrap() = Instant::now() - Duration::from_secs(30);
+        clock.advance(Duration::from_secs(1));
         f.check_and_insert("b");
+        clock.advance(Duration::from_secs(1));
         // At capacity (2), inserting "c" should evict "a"
         f.check_and_insert("c");
         assert_eq!(f.len(), 2);

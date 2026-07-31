@@ -90,26 +90,81 @@ After Noise XX handshake, ML-KEM-768 key encapsulation upgrade runs inside the e
 
 Format: `[4-byte BE length][1-byte type][payload]`. Max: 16 MiB.
 
+`FrameType` is the exhaustive wire **`msg_type`** enum (`MsgType` is a type alias).
+`MeshFrame` / `Frame` is the framed message container.
+
 ```rust
-pub enum FrameType {
-    Handshake = 0x01, Message = 0x02, Heartbeat = 0x03,
-    Discovery = 0x04, ChainSync = 0x05, TreeSync = 0x06,
-    ServiceResolve = 0x07, ProcessGossip = 0x08,
-    ServiceGossip = 0x09, SyncDigest = 0x0A,
+// WEFT-115 — shipped discriminants (see mesh_framing::FrameType::ALL)
+pub enum FrameType { // aka MsgType
+    Handshake = 0x01,
+    IpcMessage = 0x02,
+    ChainSync = 0x03,
+    TreeSync = 0x04,
+    ServiceAdvert = 0x05,
+    ProcessAdvert = 0x06,
+    Heartbeat = 0x07,
+    JoinRequest = 0x08,
+    JoinResponse = 0x09,
+    SyncDigest = 0x0A,
+    ArtifactRequest = 0x0B,
+    ArtifactResponse = 0x0C,
+    LogAggregation = 0x0D,
+    AssessmentSync = 0x0E,
+}
+
+pub struct MeshFrame { // aka Frame
+    pub frame_type: FrameType,
+    pub payload: Vec<u8>,
 }
 ```
+
+## Protocol structs (WEFT-115)
+
+Concrete serde types used on the wire / in pools:
+
+| Type | Module | Notes |
+|------|--------|--------|
+| `MeshStream` / `TransportListener` / `MeshTransport` | `mesh` | Transport traits |
+| `WeftHandshake` | `mesh` | Post-Noise capability exchange |
+| `EncryptedPeer` | `mesh_noise` | Session metadata after Noise |
+| `JoinRequest` / `JoinResponse` / `PeerInfo` | `mesh_listener` | Cluster join |
+| `TreeSyncRequest` / `TreeSyncResponse` | `mesh_tree` | Merkle tree sync |
+| `ServiceEndpoint` (= `RemoteServiceEndpoint`) | `mesh_service` | Resolved remote service |
+| `ProcessAdvertisement` | `mesh_process` | CRDT process gossip |
+| `ServiceAdvertisement` | `mesh_service_adv` | Cluster service gossip |
+| `Frame` / `MsgType` | `mesh_framing` | Aliases for `MeshFrame` / `FrameType` |
+
+## Clock injection (WEFT-113)
+
+Time-dependent mesh components take an injectable `Clock`:
+
+- `RealClock` — production (`std::time`)
+- `MockClock` — deterministic tests (`advance(Duration)`)
+
+Bound into `HeartbeatTracker`, `DedupFilter`, and `ServiceResolutionCache`
+via `with_clock(...)`. Production constructors still default to `RealClock`.
+
+## Test fixtures (WEFT-112)
+
+`clawft_kernel::mesh_test_support` provides:
+
+- `InMemoryTransport` — `mem://` multi-node fabric (tokio channels)
+- `FaultyTransport` — drop / fail-next-connect / latency injection
+- `MockPeer` — lightweight peer with inbox + handshake
+- `MockClock` — re-export of `mesh_clock::MockClock`
+- Helpers: `connected_pair()`, `two_node_streams(genesis)`
 
 ## WeftHandshake
 
 ```rust
 pub struct WeftHandshake {
     pub node_id: String,
-    pub governance_genesis_hash: String,
+    pub governance_genesis_hash: [u8; 32],
     pub governance_version: String,
-    pub capabilities: u64,
+    pub capabilities: u32,
     pub kem_supported: bool,
     pub chain_seq: u64,
-    pub supported_sync_streams: Vec<String>,
+    pub supported_sync_streams: Vec<u8>,
 }
 ```
 

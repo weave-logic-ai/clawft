@@ -5,9 +5,12 @@
 //! if no response, indirect probes are sent via other peers.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::mesh_clock::{Clock, MonoTime, RealClock};
 
 /// Heartbeat configuration.
 #[derive(Debug, Clone)]
@@ -128,8 +131,16 @@ impl MeshClockSync {
     }
 
     /// Get the current mesh-synchronized time in microseconds since epoch.
+    ///
+    /// Uses [`RealClock`]. Prefer [`Self::mesh_time_us_with`] when a
+    /// [`Clock`] is available (tests / DI).
     pub fn mesh_time_us(&self) -> u64 {
-        let local = system_time_us();
+        self.mesh_time_us_with(&RealClock)
+    }
+
+    /// Mesh-synchronized time using an injectable [`Clock`].
+    pub fn mesh_time_us_with(&self, clock: &dyn Clock) -> u64 {
+        let local = clock.unix_time_us();
         (local as i64 + self.offset_us) as u64
     }
 
@@ -192,11 +203,11 @@ impl MeshClockSync {
 }
 
 /// Get current system time in microseconds since Unix epoch.
+///
+/// Thin wrapper over [`RealClock`] for call sites that do not yet hold a
+/// [`Clock`] handle. Prefer injecting `Clock` in new code (WEFT-113).
 pub fn system_time_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
+    RealClock.unix_time_us()
 }
 
 /// Node health state from heartbeat monitoring.
@@ -216,10 +227,10 @@ pub enum HeartbeatState {
 pub struct PeerHeartbeat {
     /// Current health state.
     pub state: HeartbeatState,
-    /// Last successful heartbeat time.
-    pub last_seen: Instant,
+    /// Last successful heartbeat time (monotonic).
+    pub last_seen: MonoTime,
     /// When suspect state was entered (if applicable).
-    pub suspect_since: Option<Instant>,
+    pub suspect_since: Option<MonoTime>,
     /// Consecutive missed pings.
     pub missed_count: u32,
     /// Last ping sequence number sent.
@@ -227,10 +238,11 @@ pub struct PeerHeartbeat {
 }
 
 impl PeerHeartbeat {
-    pub fn new() -> Self {
+    /// Create a peer heartbeat snapshot at `clock.now()`.
+    pub fn new(clock: &dyn Clock) -> Self {
         Self {
             state: HeartbeatState::Alive,
-            last_seen: Instant::now(),
+            last_seen: clock.now(),
             suspect_since: None,
             missed_count: 0,
             last_ping_seq: 0,
@@ -238,36 +250,32 @@ impl PeerHeartbeat {
     }
 
     /// Record a successful heartbeat.
-    pub fn record_alive(&mut self) {
+    pub fn record_alive(&mut self, clock: &dyn Clock) {
         self.state = HeartbeatState::Alive;
-        self.last_seen = Instant::now();
+        self.last_seen = clock.now();
         self.suspect_since = None;
         self.missed_count = 0;
     }
 
     /// Record a missed heartbeat.
-    pub fn record_miss(&mut self, config: &HeartbeatConfig) {
+    pub fn record_miss(&mut self, clock: &dyn Clock, config: &HeartbeatConfig) {
         self.missed_count += 1;
         match self.state {
             HeartbeatState::Alive => {
                 self.state = HeartbeatState::Suspect;
-                self.suspect_since = Some(Instant::now());
+                self.suspect_since = Some(clock.now());
             }
             HeartbeatState::Suspect => {
                 // `>=`, not `>`: a peer that has been suspect for *at least*
-                // `suspect_timeout` is dead. `Instant::elapsed()` is always
-                // non-negative, so with a zero `suspect_timeout` (used in tests
-                // to mean "transition immediately") `>` would require a strictly
-                // positive elapsed — which fails whenever two back-to-back
-                // `Instant` reads collapse into the same clock tick
-                // (`elapsed() == 0`). That made the Suspect→Dead assertions a
-                // rare load-sensitive flake. `>=` makes the zero-timeout
-                // transition deterministic and is a no-op at the nanosecond
-                // boundary for the non-zero production default.
-                if let Some(since) = self.suspect_since
-                    && since.elapsed() >= config.suspect_timeout
-                {
-                    self.state = HeartbeatState::Dead;
+                // `suspect_timeout` is dead. With a zero `suspect_timeout`
+                // (tests: "transition immediately") `>` would require a
+                // strictly positive elapsed, which fails when two reads
+                // share the same mono tick. `>=` is deterministic.
+                if let Some(since) = self.suspect_since {
+                    let elapsed = clock.now().elapsed_since(since);
+                    if elapsed >= config.suspect_timeout {
+                        self.state = HeartbeatState::Dead;
+                    }
                 }
             }
             HeartbeatState::Dead => {} // already dead
@@ -275,14 +283,15 @@ impl PeerHeartbeat {
     }
 
     /// Check if this peer should be considered unreachable.
-    pub fn is_unreachable(&self, config: &HeartbeatConfig) -> bool {
-        self.state == HeartbeatState::Dead || self.last_seen.elapsed() > config.suspect_timeout * 3
+    pub fn is_unreachable(&self, clock: &dyn Clock, config: &HeartbeatConfig) -> bool {
+        self.state == HeartbeatState::Dead
+            || clock.now().elapsed_since(self.last_seen) > config.suspect_timeout * 3
     }
 }
 
 impl Default for PeerHeartbeat {
     fn default() -> Self {
-        Self::new()
+        Self::new(&RealClock)
     }
 }
 
@@ -291,20 +300,36 @@ pub struct HeartbeatTracker {
     config: HeartbeatConfig,
     peers: HashMap<String, PeerHeartbeat>,
     next_sequence: u64,
+    /// Injectable clock (production: [`RealClock`]).
+    clock: Arc<dyn Clock>,
 }
 
 impl HeartbeatTracker {
+    /// Create a tracker bound to the production [`RealClock`].
     pub fn new(config: HeartbeatConfig) -> Self {
+        Self::with_clock(config, RealClock::shared())
+    }
+
+    /// Create a tracker with an injectable [`Clock`] (WEFT-113).
+    pub fn with_clock(config: HeartbeatConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             config,
             peers: HashMap::new(),
             next_sequence: 1,
+            clock,
         }
+    }
+
+    /// Shared clock handle used by this tracker.
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
     }
 
     /// Start tracking a new peer.
     pub fn add_peer(&mut self, node_id: String) {
-        self.peers.entry(node_id).or_default();
+        self.peers
+            .entry(node_id)
+            .or_insert_with(|| PeerHeartbeat::new(self.clock.as_ref()));
     }
 
     /// Remove a peer from tracking.
@@ -315,14 +340,14 @@ impl HeartbeatTracker {
     /// Record a successful ping response.
     pub fn record_alive(&mut self, node_id: &str) {
         if let Some(peer) = self.peers.get_mut(node_id) {
-            peer.record_alive();
+            peer.record_alive(self.clock.as_ref());
         }
     }
 
     /// Record a missed ping.
     pub fn record_miss(&mut self, node_id: &str) {
         if let Some(peer) = self.peers.get_mut(node_id) {
-            peer.record_miss(&self.config);
+            peer.record_miss(self.clock.as_ref(), &self.config);
         }
     }
 
@@ -434,6 +459,7 @@ impl PeerMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh_clock::MockClock;
 
     #[test]
     fn ping_request_serde_roundtrip() {
@@ -483,11 +509,12 @@ mod tests {
 
     #[test]
     fn peer_heartbeat_alive_to_suspect() {
+        let clock = MockClock::new();
         let config = HeartbeatConfig::default();
-        let mut peer = PeerHeartbeat::new();
+        let mut peer = PeerHeartbeat::new(&clock);
         assert_eq!(peer.state, HeartbeatState::Alive);
 
-        peer.record_miss(&config);
+        peer.record_miss(&clock, &config);
         assert_eq!(peer.state, HeartbeatState::Suspect);
         assert_eq!(peer.missed_count, 1);
         assert!(peer.suspect_since.is_some());
@@ -496,33 +523,67 @@ mod tests {
     #[test]
     fn peer_heartbeat_suspect_to_dead() {
         // Use a zero-duration suspect timeout so the transition is immediate.
+        let clock = MockClock::new();
         let config = HeartbeatConfig {
             suspect_timeout: Duration::from_secs(0),
             ..HeartbeatConfig::default()
         };
-        let mut peer = PeerHeartbeat::new();
+        let mut peer = PeerHeartbeat::new(&clock);
 
         // First miss: Alive -> Suspect
-        peer.record_miss(&config);
+        peer.record_miss(&clock, &config);
         assert_eq!(peer.state, HeartbeatState::Suspect);
 
         // Second miss with zero timeout: Suspect -> Dead
-        peer.record_miss(&config);
+        peer.record_miss(&clock, &config);
         assert_eq!(peer.state, HeartbeatState::Dead);
     }
 
     #[test]
     fn record_alive_resets_state() {
+        let clock = MockClock::new();
         let config = HeartbeatConfig::default();
-        let mut peer = PeerHeartbeat::new();
+        let mut peer = PeerHeartbeat::new(&clock);
 
-        peer.record_miss(&config);
+        peer.record_miss(&clock, &config);
         assert_eq!(peer.state, HeartbeatState::Suspect);
 
-        peer.record_alive();
+        peer.record_alive(&clock);
         assert_eq!(peer.state, HeartbeatState::Alive);
         assert_eq!(peer.missed_count, 0);
         assert!(peer.suspect_since.is_none());
+    }
+
+    #[test]
+    fn mock_clock_deterministically_advances_heartbeat_ticks() {
+        // WEFT-113 AC: MockClock drives suspect → dead without real sleeps.
+        let clock = MockClock::new();
+        let config = HeartbeatConfig {
+            suspect_timeout: Duration::from_secs(5),
+            ..HeartbeatConfig::default()
+        };
+        let mut tracker = HeartbeatTracker::with_clock(config, Arc::new(clock.clone()));
+        tracker.add_peer("peer-a".into());
+
+        tracker.record_miss("peer-a");
+        assert_eq!(
+            tracker.peer_state("peer-a"),
+            Some(HeartbeatState::Suspect)
+        );
+
+        // Still within suspect window.
+        clock.advance(Duration::from_secs(4));
+        tracker.record_miss("peer-a");
+        assert_eq!(
+            tracker.peer_state("peer-a"),
+            Some(HeartbeatState::Suspect)
+        );
+
+        // Advance past suspect_timeout; next miss → Dead.
+        clock.advance(Duration::from_secs(2));
+        tracker.record_miss("peer-a");
+        assert_eq!(tracker.peer_state("peer-a"), Some(HeartbeatState::Dead));
+        assert!(tracker.dead_peers().contains(&"peer-a"));
     }
 
     #[test]

@@ -48,6 +48,47 @@ pub enum NoisePattern {
     IK,
 }
 
+/// Established encrypted peer session metadata (WEFT-115).
+///
+/// Holds the identity and crypto session facts after Noise completes.
+/// The live byte channel is [`EncryptedChannel`] / [`NoiseChannel`];
+/// this struct is the serialisable session descriptor used by pools,
+/// diagnostics, and protocol documentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedPeer {
+    /// Remote node identity.
+    pub node_id: String,
+    /// Remote static public key (Noise), hex or raw-length bytes as vec.
+    pub remote_static_key: Vec<u8>,
+    /// Handshake pattern used to establish the session.
+    pub pattern: NoisePattern,
+    /// Whether a post-quantum KEM upgrade was negotiated.
+    pub kem_upgraded: bool,
+    /// Wall-clock microseconds when the session was established.
+    pub established_at_unix_us: u64,
+    /// Peer socket address string (if known).
+    pub address: Option<String>,
+}
+
+impl EncryptedPeer {
+    /// Build session metadata from a completed channel + identity.
+    pub fn new(
+        node_id: impl Into<String>,
+        remote_static_key: Vec<u8>,
+        pattern: NoisePattern,
+        established_at_unix_us: u64,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            remote_static_key,
+            pattern,
+            kem_upgraded: false,
+            established_at_unix_us,
+            address: None,
+        }
+    }
+}
+
 /// Configuration for a Noise handshake.
 #[derive(Debug, Clone)]
 pub struct NoiseConfig {
@@ -558,6 +599,26 @@ mod tests {
             let restored: NoisePattern = serde_json::from_str(&json).unwrap();
             assert_eq!(restored, pattern);
         }
+    }
+
+    #[test]
+    fn encrypted_peer_serde_roundtrip() {
+        let peer = EncryptedPeer {
+            node_id: "node-a".into(),
+            remote_static_key: vec![1, 2, 3, 4],
+            pattern: NoisePattern::XX,
+            kem_upgraded: true,
+            established_at_unix_us: 1_700_000_000_000_000,
+            address: Some("127.0.0.1:9470".into()),
+        };
+        let json = serde_json::to_string(&peer).unwrap();
+        let restored: EncryptedPeer = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.node_id, "node-a");
+        assert_eq!(restored.remote_static_key, vec![1, 2, 3, 4]);
+        assert_eq!(restored.pattern, NoisePattern::XX);
+        assert!(restored.kem_upgraded);
+        assert_eq!(restored.established_at_unix_us, 1_700_000_000_000_000);
+        assert_eq!(restored.address.as_deref(), Some("127.0.0.1:9470"));
     }
 
     #[test]

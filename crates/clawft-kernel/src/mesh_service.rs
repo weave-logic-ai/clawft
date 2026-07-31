@@ -5,8 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-#[cfg(feature = "exochain")]
 use std::sync::Arc;
+use std::time::Duration;
+
+use crate::mesh_clock::{Clock, MonoTime, RealClock};
 
 /// Request to resolve a service on a remote node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,21 +49,27 @@ pub struct RemoteServiceEndpoint {
     pub metadata: HashMap<String, String>,
 }
 
+/// Wire / API alias for a remote service endpoint (WEFT-115).
+///
+/// Historical audit name was `ServiceEndpoint`; production code uses
+/// [`RemoteServiceEndpoint`]. Both names refer to the same type.
+pub type ServiceEndpoint = RemoteServiceEndpoint;
+
 /// Cached resolution of a remote service.
 #[derive(Debug, Clone)]
 pub struct ResolvedService {
     /// Resolved endpoint.
     pub endpoint: RemoteServiceEndpoint,
-    /// When this resolution was cached.
-    pub resolved_at: std::time::Instant,
+    /// When this resolution was cached (monotonic).
+    pub resolved_at: MonoTime,
     /// Cache TTL.
-    pub ttl: std::time::Duration,
+    pub ttl: Duration,
 }
 
 impl ResolvedService {
-    /// Check if this cached resolution has expired.
-    pub fn is_expired(&self) -> bool {
-        self.resolved_at.elapsed() > self.ttl
+    /// Check if this cached resolution has expired under `clock`.
+    pub fn is_expired(&self, clock: &dyn Clock) -> bool {
+        clock.now().elapsed_since(self.resolved_at) > self.ttl
     }
 }
 
@@ -70,9 +78,11 @@ pub struct ServiceResolutionCache {
     /// Cached resolutions keyed by service name.
     cache: HashMap<String, ResolvedService>,
     /// Negative cache for known-missing services.
-    negative_cache: HashMap<String, std::time::Instant>,
+    negative_cache: HashMap<String, MonoTime>,
     /// TTL for negative cache entries.
-    negative_ttl: std::time::Duration,
+    negative_ttl: Duration,
+    /// Injectable clock (WEFT-113).
+    clock: Arc<dyn Clock>,
     /// Optional chain manager for exochain audit logging.
     #[cfg(feature = "exochain")]
     chain_manager: Option<Arc<crate::chain::ChainManager>>,
@@ -80,11 +90,19 @@ pub struct ServiceResolutionCache {
 
 impl ServiceResolutionCache {
     /// Create a new empty cache with a 30-second negative TTL.
+    ///
+    /// Binds the production [`RealClock`].
     pub fn new() -> Self {
+        Self::with_clock(RealClock::shared())
+    }
+
+    /// Create a cache with an injectable [`Clock`].
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             cache: HashMap::new(),
             negative_cache: HashMap::new(),
-            negative_ttl: std::time::Duration::from_secs(30),
+            negative_ttl: Duration::from_secs(30),
+            clock,
             #[cfg(feature = "exochain")]
             chain_manager: None,
         }
@@ -98,14 +116,16 @@ impl ServiceResolutionCache {
 
     /// Look up a cached service resolution (returns `None` if expired).
     pub fn get(&self, service_name: &str) -> Option<&ResolvedService> {
-        self.cache.get(service_name).filter(|r| !r.is_expired())
+        self.cache
+            .get(service_name)
+            .filter(|r| !r.is_expired(self.clock.as_ref()))
     }
 
     /// Check if a service is known-missing (negative cached).
     pub fn is_known_missing(&self, service_name: &str) -> bool {
-        self.negative_cache
-            .get(service_name)
-            .is_some_and(|t| t.elapsed() < self.negative_ttl)
+        self.negative_cache.get(service_name).is_some_and(|t| {
+            self.clock.now().elapsed_since(*t) < self.negative_ttl
+        })
     }
 
     /// Cache a positive resolution.
@@ -140,14 +160,17 @@ impl ServiceResolutionCache {
             );
         }
         self.negative_cache
-            .insert(service_name, std::time::Instant::now());
+            .insert(service_name, self.clock.now());
     }
 
     /// Evict all expired entries from both positive and negative caches.
     pub fn evict_expired(&mut self) {
-        self.cache.retain(|_, r| !r.is_expired());
+        let clock = self.clock.as_ref();
+        self.cache.retain(|_, r| !r.is_expired(clock));
+        let now = clock.now();
+        let neg_ttl = self.negative_ttl;
         self.negative_cache
-            .retain(|_, t| t.elapsed() < self.negative_ttl);
+            .retain(|_, t| now.elapsed_since(*t) < neg_ttl);
     }
 
     /// Number of cached positive resolutions (including expired).
@@ -234,8 +257,8 @@ pub enum CircuitState {
     Closed { error_count: u32, threshold: u32 },
     /// Too many failures -- requests blocked for cooldown.
     Open {
-        opened_at: std::time::Instant,
-        cooldown: std::time::Duration,
+        opened_at: MonoTime,
+        cooldown: Duration,
         threshold: u32,
     },
     /// Testing if service has recovered (one probe allowed).
@@ -261,7 +284,15 @@ impl CircuitState {
     }
 
     /// Record a failed call. Returns `true` if the circuit just opened.
+    ///
+    /// Uses the production [`RealClock`]. Prefer
+    /// [`Self::record_failure_at`] when a [`Clock`] is available.
     pub fn record_failure(&mut self) -> bool {
+        self.record_failure_at(&RealClock)
+    }
+
+    /// Record a failure at `clock.now()`.
+    pub fn record_failure_at(&mut self, clock: &dyn Clock) -> bool {
         match self {
             Self::Closed {
                 error_count,
@@ -271,8 +302,8 @@ impl CircuitState {
                 if *error_count >= *threshold {
                     let t = *threshold;
                     *self = Self::Open {
-                        opened_at: std::time::Instant::now(),
-                        cooldown: std::time::Duration::from_secs(30),
+                        opened_at: clock.now(),
+                        cooldown: Duration::from_secs(30),
                         threshold: t,
                     };
                     return true;
@@ -282,8 +313,8 @@ impl CircuitState {
             Self::HalfOpen { threshold } => {
                 let t = *threshold;
                 *self = Self::Open {
-                    opened_at: std::time::Instant::now(),
-                    cooldown: std::time::Duration::from_secs(30),
+                    opened_at: clock.now(),
+                    cooldown: Duration::from_secs(30),
                     threshold: t,
                 };
                 true
@@ -294,10 +325,18 @@ impl CircuitState {
 
     /// Check if requests should be allowed through.
     ///
+    /// Uses the production [`RealClock`]. Prefer
+    /// [`Self::is_allowed_at`] when a [`Clock`] is available.
+    pub fn is_allowed(&mut self) -> bool {
+        self.is_allowed_at(&RealClock)
+    }
+
+    /// Check allowance using an injectable [`Clock`].
+    ///
     /// - **Closed**: always allowed.
     /// - **Open**: allowed only after cooldown expires (transitions to half-open).
     /// - **HalfOpen**: allowed (probe request).
-    pub fn is_allowed(&mut self) -> bool {
+    pub fn is_allowed_at(&mut self, clock: &dyn Clock) -> bool {
         match self {
             Self::Closed { .. } => true,
             Self::Open {
@@ -305,7 +344,7 @@ impl CircuitState {
                 cooldown,
                 threshold,
             } => {
-                if opened_at.elapsed() > *cooldown {
+                if clock.now().elapsed_since(*opened_at) > *cooldown {
                     let t = *threshold;
                     *self = Self::HalfOpen { threshold: t };
                     true
@@ -330,7 +369,7 @@ impl CircuitState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use crate::mesh_clock::MockClock;
 
     fn make_endpoint(name: &str) -> RemoteServiceEndpoint {
         RemoteServiceEndpoint {
@@ -344,10 +383,10 @@ mod tests {
         }
     }
 
-    fn make_resolved(name: &str, ttl_secs: u64) -> ResolvedService {
+    fn make_resolved(name: &str, ttl_secs: u64, clock: &dyn Clock) -> ResolvedService {
         ResolvedService {
             endpoint: make_endpoint(name),
-            resolved_at: Instant::now(),
+            resolved_at: clock.now(),
             ttl: Duration::from_secs(ttl_secs),
         }
     }
@@ -355,17 +394,17 @@ mod tests {
     #[test]
     fn cache_insert_and_get() {
         let mut cache = ServiceResolutionCache::new();
-        cache.insert("auth".to_string(), make_resolved("auth", 60));
+        cache.insert("auth".to_string(), make_resolved("auth", 60, &RealClock));
         assert!(cache.get("auth").is_some());
         assert_eq!(cache.get("auth").unwrap().endpoint.name, "auth");
     }
 
     #[test]
     fn cache_expired_returns_none() {
-        let mut cache = ServiceResolutionCache::new();
-        let mut resolved = make_resolved("old", 0);
-        resolved.resolved_at = Instant::now() - Duration::from_secs(1);
-        cache.insert("old".to_string(), resolved);
+        let clock = MockClock::new();
+        let mut cache = ServiceResolutionCache::with_clock(Arc::new(clock.clone()));
+        cache.insert("old".to_string(), make_resolved("old", 1, &clock));
+        clock.advance(Duration::from_secs(2));
         assert!(cache.get("old").is_none());
     }
 
@@ -388,18 +427,18 @@ mod tests {
         let mut cache = ServiceResolutionCache::new();
         cache.insert_negative("svc".to_string());
         assert!(cache.is_known_missing("svc"));
-        cache.insert("svc".to_string(), make_resolved("svc", 60));
+        cache.insert("svc".to_string(), make_resolved("svc", 60, &RealClock));
         assert!(!cache.is_known_missing("svc"));
         assert!(cache.get("svc").is_some());
     }
 
     #[test]
     fn evict_expired_removes_stale() {
-        let mut cache = ServiceResolutionCache::new();
-        let mut stale = make_resolved("stale", 0);
-        stale.resolved_at = Instant::now() - Duration::from_secs(1);
-        cache.insert("stale".to_string(), stale);
-        cache.insert("fresh".to_string(), make_resolved("fresh", 300));
+        let clock = MockClock::new();
+        let mut cache = ServiceResolutionCache::with_clock(Arc::new(clock.clone()));
+        cache.insert("stale".to_string(), make_resolved("stale", 1, &clock));
+        clock.advance(Duration::from_secs(2));
+        cache.insert("fresh".to_string(), make_resolved("fresh", 300, &clock));
         cache.evict_expired();
         assert_eq!(cache.len(), 1);
         assert!(cache.get("fresh").is_some());
@@ -446,12 +485,13 @@ mod tests {
 
     #[test]
     fn resolved_service_expiry() {
-        let fresh = make_resolved("x", 60);
-        assert!(!fresh.is_expired());
+        let clock = MockClock::new();
+        let fresh = make_resolved("x", 60, &clock);
+        assert!(!fresh.is_expired(&clock));
 
-        let mut stale = make_resolved("y", 0);
-        stale.resolved_at = Instant::now() - Duration::from_secs(1);
-        assert!(stale.is_expired());
+        let stale = make_resolved("y", 1, &clock);
+        clock.advance(Duration::from_secs(2));
+        assert!(stale.is_expired(&clock));
     }
 
     #[test]
@@ -557,13 +597,17 @@ mod tests {
 
     #[test]
     fn circuit_open_transitions_to_half_open_after_cooldown() {
+        let clock = MockClock::new();
         let mut cb = CircuitState::Open {
-            opened_at: Instant::now() - Duration::from_secs(60),
+            opened_at: clock.now(),
             cooldown: Duration::from_secs(30),
             threshold: 3,
         };
+        // Cooldown not elapsed yet.
+        assert!(!cb.is_allowed_at(&clock));
+        clock.advance(Duration::from_secs(31));
         // Cooldown has elapsed, should transition to half-open
-        assert!(cb.is_allowed());
+        assert!(cb.is_allowed_at(&clock));
         assert!(matches!(cb, CircuitState::HalfOpen { .. }));
     }
 

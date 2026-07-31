@@ -10,15 +10,23 @@
 //! [`crate::mesh_ipc::MeshIpcEncoding`] (JSON shipped; RVF deferred behind
 //! `mesh-rvf`). See ADR-031 for the clarified layering.
 
+use serde::{Deserialize, Serialize};
+
 use crate::mesh::{MAX_MESSAGE_SIZE, MeshError, MeshStream};
 
 /// Mesh message types for framing dispatch.
 ///
 /// Type bytes identify *what* the payload is, not *how* it is encoded.
 /// IPC payload encoding is [`crate::mesh_ipc::MeshIpcEncoding`].
+///
+/// # Wire `msg_type` (WEFT-115)
+///
+/// This enum **is** the exhaustive wire `msg_type` set. Prefer the
+/// [`MsgType`] alias in documentation and external protocol maps.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
+#[serde(rename_all = "snake_case")]
 pub enum FrameType {
     /// WeftOS handshake payload.
     Handshake = 0x01,
@@ -50,7 +58,31 @@ pub enum FrameType {
     AssessmentSync = 0x0E,
 }
 
+/// Wire protocol name for [`FrameType`] (WEFT-115).
+pub type MsgType = FrameType;
+
+/// Historical / protocol-doc name for a framed message (WEFT-115).
+pub type Frame = MeshFrame;
+
 impl FrameType {
+    /// All known frame types in discriminant order (exhaustive for tests).
+    pub const ALL: &'static [FrameType] = &[
+        Self::Handshake,
+        Self::IpcMessage,
+        Self::ChainSync,
+        Self::TreeSync,
+        Self::ServiceAdvert,
+        Self::ProcessAdvert,
+        Self::Heartbeat,
+        Self::JoinRequest,
+        Self::JoinResponse,
+        Self::SyncDigest,
+        Self::ArtifactRequest,
+        Self::ArtifactResponse,
+        Self::LogAggregation,
+        Self::AssessmentSync,
+    ];
+
     /// Parse a byte into a known frame type, returning `None` for
     /// unrecognised discriminants.
     pub fn from_byte(b: u8) -> Option<Self> {
@@ -72,10 +104,15 @@ impl FrameType {
             _ => None,
         }
     }
+
+    /// Wire discriminant byte.
+    pub const fn as_byte(self) -> u8 {
+        self as u8
+    }
 }
 
 /// A framed mesh message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshFrame {
     /// Discriminant identifying the payload contents.
     pub frame_type: FrameType,
@@ -241,31 +278,46 @@ mod tests {
 
     #[test]
     fn all_frame_types_encode_decode() {
-        let types = [
-            FrameType::Handshake,
-            FrameType::IpcMessage,
-            FrameType::ChainSync,
-            FrameType::TreeSync,
-            FrameType::ServiceAdvert,
-            FrameType::ProcessAdvert,
-            FrameType::Heartbeat,
-            FrameType::JoinRequest,
-            FrameType::JoinResponse,
-            FrameType::SyncDigest,
-            FrameType::ArtifactRequest,
-            FrameType::ArtifactResponse,
-            FrameType::LogAggregation,
-            FrameType::AssessmentSync,
-        ];
-        for ft in types {
+        for ft in FrameType::ALL {
             let frame = MeshFrame {
-                frame_type: ft,
+                frame_type: *ft,
                 payload: vec![0xCA, 0xFE],
             };
             let encoded = frame.encode().unwrap();
             let decoded = MeshFrame::decode(&encoded[4..]).unwrap();
-            assert_eq!(decoded.frame_type, ft);
+            assert_eq!(decoded.frame_type, *ft);
             assert_eq!(decoded.payload, vec![0xCA, 0xFE]);
+        }
+    }
+
+    #[test]
+    fn frame_type_msg_type_alias_and_serde() {
+        // MsgType is the protocol name for FrameType (WEFT-115).
+        let t: MsgType = FrameType::ChainSync;
+        assert_eq!(t.as_byte(), 0x03);
+        let json = serde_json::to_string(&t).unwrap();
+        let restored: FrameType = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, FrameType::ChainSync);
+    }
+
+    #[test]
+    fn mesh_frame_serde_roundtrip() {
+        let frame = MeshFrame {
+            frame_type: FrameType::IpcMessage,
+            payload: vec![1, 2, 3],
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        let restored: Frame = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.frame_type, FrameType::IpcMessage);
+        assert_eq!(restored.payload, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn msg_type_all_variants_serde_roundtrip() {
+        for ft in FrameType::ALL {
+            let json = serde_json::to_string(ft).unwrap();
+            let restored: MsgType = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, *ft);
         }
     }
 }

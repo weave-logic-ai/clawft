@@ -248,6 +248,8 @@ pub mod tree_view;
 #[cfg(feature = "mesh")]
 pub mod mesh;
 #[cfg(feature = "mesh")]
+pub mod mesh_clock;
+#[cfg(feature = "mesh")]
 pub mod mesh_artifact;
 #[cfg(feature = "mesh")]
 pub mod mesh_assess;
@@ -287,6 +289,10 @@ pub mod mesh_service_adv;
 pub mod mesh_system_service;
 #[cfg(feature = "mesh")]
 pub mod mesh_tcp;
+/// Multi-node mesh test fixtures (WEFT-112). Available outside `cfg(test)` so
+/// downstream crates and integration tests can construct in-memory meshes.
+#[cfg(feature = "mesh")]
+pub mod mesh_test_support;
 #[cfg(feature = "mesh")]
 pub mod mesh_tree;
 #[cfg(feature = "mesh")]
@@ -458,6 +464,8 @@ pub use mesh::{
     WeftHandshake,
 };
 #[cfg(feature = "mesh")]
+pub use mesh_clock::{Clock, MockClock, MonoTime, RealClock};
+#[cfg(feature = "mesh")]
 pub use mesh_artifact::{
     ArtifactAnnouncement, ArtifactExchange, ArtifactRequest, ArtifactResponse,
 };
@@ -477,7 +485,7 @@ pub use mesh_discovery::{
     MeshPeerEvent, MeshPeerEventBus,
 };
 #[cfg(feature = "mesh")]
-pub use mesh_framing::{FrameType, MeshFrame};
+pub use mesh_framing::{Frame, FrameType, MeshFrame, MsgType};
 #[cfg(feature = "mesh")]
 pub use mesh_heartbeat::{
     HeartbeatConfig, HeartbeatState, HeartbeatTracker, PeerHeartbeat, PingRequest, PingResponse,
@@ -496,7 +504,7 @@ pub use mesh_log::{LogAggregator, LogQuery as MeshLogQuery, RemoteLogEntry};
 #[cfg(feature = "mesh")]
 pub use mesh_mdns::{MdnsAnnouncement, MdnsDiscovery, WEFTOS_SERVICE_NAME};
 #[cfg(feature = "mesh")]
-pub use mesh_noise::{EncryptedChannel, NoiseConfig, NoisePattern};
+pub use mesh_noise::{EncryptedChannel, EncryptedPeer, NoiseConfig, NoisePattern};
 #[cfg(feature = "mesh")]
 pub use mesh_process::{
     ConsensusEntry, ConsensusOp, ConsensusRole, ConsistentHashRing, CrdtGossipState,
@@ -507,6 +515,8 @@ pub use mesh_process::{
 pub use mesh_runtime::{DiscoveryState, MeshRuntime, PeerConnection};
 #[cfg(feature = "mesh")]
 pub use mesh_service::{
+    // Note: `ServiceEndpoint` alias lives on `mesh_service` only — crate root
+    // already exports `service::ServiceEndpoint` (local kernel service API).
     RemoteServiceEndpoint, ServiceResolutionCache, ServiceResolveRequest, ServiceResolveResponse,
 };
 #[cfg(feature = "mesh")]
