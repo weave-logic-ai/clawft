@@ -9,10 +9,11 @@
 //   .planning/symposiums/compositional-ui/session-7-dev-panel-embedding.md
 //   .planning/symposiums/compositional-ui/adrs/adr-011-dev-panel-embedding-hybrid.md
 //
-// Out of scope for M1: WSP-0.1 verbs (raw kernel.* RPC only),
-// voice/capture sidecar (M2), workspace editor topics (M2).
+// WSP-0.1 verbs: WEFT-285 (`./wsp.ts`) maps protocol verbs onto existing
+// daemon RPC while keeping raw `rpc-request` backward compatible.
 // WEFT-283: typed active-radar return schema + variant-id echo is in;
 // full ux/returns substrate publish remains M2 loop wiring.
+// Still out of scope: voice/capture sidecar (M2), workspace editor topics (M2).
 
 import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
@@ -38,6 +39,14 @@ import {
     renderChipA11yHtml,
     type ChipStripSnapshot,
 } from "./chipA11y";
+import {
+    WSP_WIRE_VERSION,
+    extractSession,
+    publicWspResult,
+    translateWsp,
+    wrapWspRpcResult,
+    type WspSession,
+} from "./wsp";
 import {
     RADAR_RETURN_TYPE,
     buildRadarReturnAck,
@@ -183,6 +192,15 @@ interface WasmRpcRequest {
     "variant-id"?: VariantId;
 }
 
+/** WSP-0.1 verb request from the webview (WEFT-285). */
+interface WasmWspRequest {
+    type: "wsp-request";
+    id: number | string;
+    /** WSP verb name, e.g. `session.initialize`, `subscribe`. */
+    method: string;
+    params?: unknown;
+}
+
 interface WebviewReadyMessage {
     type: "ready";
 }
@@ -194,6 +212,7 @@ interface WebviewRadarReturnMessage {
 
 type WebviewInbound =
     | WasmRpcRequest
+    | WasmWspRequest
     | WebviewReadyMessage
     | WebviewRadarReturnMessage;
 
@@ -315,6 +334,11 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
     // at dispatch time.
     void refreshAllowlist(socketPath);
 
+    // WEFT-285: per-panel WSP session. Opened on ready (auto
+    // session.initialize) and/or explicit wsp-request. Raw rpc-request
+    // continues to work without a WSP session (backward compat).
+    let wspSession: WspSession | undefined;
+
     panel.webview.onDidReceiveMessage(
         async (raw: unknown) => {
             const msg = raw as WebviewInbound | null;
@@ -330,15 +354,31 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
                     multiUser,
                     panelId: panelSession?.panelId,
                 });
+                // WEFT-285: migrate the connect surface onto WSP —
+                // auto session.initialize + seed kernel status via
+                // subscribe → kernel.status. Raw RPC remains available.
+                wspSession = await bootstrapWspSession(
+                    panel,
+                    socketPath,
+                    panelSession,
+                    multiUser,
+                );
                 return;
             }
             if (msg.type === RADAR_RETURN_TYPE) {
                 // WEFT-283 / ADR-007: typed active-radar observation.
-                // Host validates the envelope, echoes variant-id on the
-                // ack. Substrate publish to ux/returns is deferred to
-                // the full M2 radar loop; ack is enough for the channel
-                // contract + renderer-side correlation tests.
                 handleRadarReturn(panel, raw);
+                return;
+            }
+            if (msg.type === "wsp-request") {
+                wspSession = await handleWsp(
+                    panel,
+                    socketPath,
+                    msg,
+                    wspSession,
+                    panelSession,
+                    multiUser,
+                );
                 return;
             }
             if (msg.type === "rpc-request") {
@@ -452,11 +492,175 @@ function timeoutForMethod(method: string): number | undefined {
 }
 
 /**
- * WEFT-283: validate a radar-return observation and post an ack that
- * always echoes `variant-id`. Malformed shapes (missing variant-id,
- * bad return-type) get a failure ack only when a variant-id can still
- * be extracted; otherwise the message is dropped (same as non-object
- * webview traffic).
+ * Shared UDS hop used by raw RPC and by WSP-mapped verbs.
+ * Returns the response payload shape the webview already knows, or
+ * a synthetic failure object when allowlist / multi-user / transport
+ * rejects the call.
+ */
+async function proxyDaemonRpc(
+    socketPath: string,
+    method: string,
+    params: unknown,
+    panelSession: PanelSession | undefined,
+    multiUser: boolean,
+): Promise<{
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+    error_kind?: string;
+}> {
+    // WEFT-496: denylist wins over allowlist (and over WEFT-250 union).
+    if (!isMethodAllowed(method, ALLOWED_METHODS, WEBVIEW_DENIED_METHODS)) {
+        return {
+            ok: false,
+            error: WEBVIEW_DENIED_METHODS.has(method)
+                ? `method denied for webview: ${method}`
+                : `method not allowed: ${method}`,
+        };
+    }
+
+    // WEFT-495 / ADR-071: multi-user → per-panel scope gate before UDS.
+    let auth: string | undefined;
+    if (multiUser) {
+        const decision = authorizePanelRpc(panelSession, method);
+        if (!decision.ok) {
+            return { ok: false, error: decision.error };
+        }
+        auth = decision.auth;
+    }
+
+    try {
+        const resp = await rpcCall(
+            socketPath,
+            {
+                method,
+                params: params ?? null,
+                id: randomUUID(),
+                auth,
+            },
+            timeoutForMethod(method),
+        );
+        return {
+            ok: resp.ok,
+            result: resp.result ?? null,
+            error: resp.error,
+            error_kind: resp.error_kind,
+        };
+    } catch (err) {
+        const message = err instanceof RpcError ? err.message : String(err);
+        return { ok: false, error: message };
+    }
+}
+
+async function handleRpc(
+    panel: vscode.WebviewPanel,
+    socketPath: string,
+    req: WasmRpcRequest,
+    panelSession?: PanelSession,
+    multiUser = false,
+): Promise<void> {
+    // WEFT-283: optional pulse id — echoed on every response path.
+    const variantId = extractVariantId(req);
+    const resp = await proxyDaemonRpc(
+        socketPath,
+        req.method,
+        req.params ?? null,
+        panelSession,
+        multiUser,
+    );
+    void panel.webview.postMessage(
+        buildRpcResponse({
+            id: req.id,
+            ok: resp.ok,
+            result: resp.result ?? null,
+            error: resp.error,
+            // WEFT-334: structured error_kind for panel branching.
+            error_kind: resp.error_kind,
+            variantId,
+        }),
+    );
+}
+
+/**
+ * WEFT-285: handle a WSP-0.1 verb from the webview.
+ *
+ * Translates the verb via `./wsp.ts`, optionally proxies a mapped
+ * daemon RPC through the same allowlist + multi-user gates as raw RPC,
+ * and posts a `wsp-response` envelope. Returns the (possibly updated)
+ * session for the caller to stash.
+ */
+async function handleWsp(
+    panel: vscode.WebviewPanel,
+    socketPath: string,
+    req: WasmWspRequest,
+    session: WspSession | undefined,
+    panelSession: PanelSession | undefined,
+    multiUser: boolean,
+): Promise<WspSession | undefined> {
+    let active = session;
+    const action = translateWsp(active, req.method, req.params ?? null);
+
+    if (action.kind === "error") {
+        void panel.webview.postMessage({
+            type: "wsp-response",
+            id: req.id,
+            method: req.method,
+            ok: false,
+            error: action.message,
+            error_code: action.code,
+            error_data: action.data,
+        });
+        return active;
+    }
+
+    if (action.kind === "local") {
+        // session.initialize returns __session for the host to stash.
+        if (req.method === "session.initialize") {
+            const next = extractSession(action.result);
+            if (next) active = next;
+        }
+        if (req.method === "session.shutdown") {
+            active = undefined;
+        }
+        void panel.webview.postMessage({
+            type: "wsp-response",
+            id: req.id,
+            method: req.method,
+            ok: true,
+            result: publicWspResult(action.result),
+        });
+        return active;
+    }
+
+    // action.kind === "rpc" — same gates as raw rpc-request.
+    const resp = await proxyDaemonRpc(
+        socketPath,
+        action.method,
+        action.params,
+        panelSession,
+        multiUser,
+    );
+    const result = resp.ok
+        ? wrapWspRpcResult(action.wrapResult, resp.result, true)
+        : null;
+    void panel.webview.postMessage({
+        type: "wsp-response",
+        id: req.id,
+        method: req.method,
+        ok: resp.ok,
+        result,
+        error: resp.error,
+        error_kind: resp.error_kind,
+        // Mapped RPC method is diagnostic for the panel / tests.
+        rpc_method: action.method,
+    });
+    return active;
+}
+
+/**
+ * WEFT-285: on webview `ready`, open a WSP session and migrate the
+ * kernel-status surface onto `subscribe` → `kernel.status`. Failures
+ * are non-fatal — raw RPC still drives the Live loop.
  */
 function handleRadarReturn(panel: vscode.WebviewPanel, raw: unknown): void {
     const parsed = parseRadarReturn(raw);
@@ -474,87 +678,69 @@ function handleRadarReturn(panel: vscode.WebviewPanel, raw: unknown): void {
     }
 }
 
-async function handleRpc(
+
+async function bootstrapWspSession(
     panel: vscode.WebviewPanel,
     socketPath: string,
-    req: WasmRpcRequest,
-    panelSession?: PanelSession,
-    multiUser = false,
-): Promise<void> {
-    // WEFT-283: optional pulse id from the webview — echoed on every
-    // response path (allow/deny/error/success) so invoke-under-pulse
-    // stays correlatable. Absent → plain rpc-response (backward compat).
-    const variantId = extractVariantId(req);
-
-    // WEFT-496: denylist wins over allowlist (and over WEFT-250 union).
-    if (!isMethodAllowed(req.method, ALLOWED_METHODS, WEBVIEW_DENIED_METHODS)) {
-        void panel.webview.postMessage(
-            buildRpcResponse({
-                id: req.id,
-                ok: false,
-                error: WEBVIEW_DENIED_METHODS.has(req.method)
-                    ? `method denied for webview: ${req.method}`
-                    : `method not allowed: ${req.method}`,
-                variantId,
-            }),
-        );
-        return;
+    panelSession: PanelSession | undefined,
+    multiUser: boolean,
+): Promise<WspSession | undefined> {
+    const init = translateWsp(undefined, "session.initialize", {
+        "wsp-version": WSP_WIRE_VERSION,
+        persona: "persona://dev-panel",
+        locale: "en-US",
+        "supported-encodings": ["json"],
+        "supported-primitives": [],
+        "supported-wrappers": [],
+        "supported-topics": ["resource://", "substrate://"],
+        "a11y-hints": {},
+    });
+    if (init.kind !== "local") {
+        console.warn("weft: WSP session.initialize failed at bootstrap", init);
+        return undefined;
     }
+    const session = extractSession(init.result);
+    if (!session) return undefined;
 
-    // WEFT-495 / ADR-071: multi-user → per-panel scope gate before UDS.
-    // Denied-by-identity returns here without opening a socket.
-    let auth: string | undefined;
-    if (multiUser) {
-        const decision = authorizePanelRpc(panelSession, req.method);
-        if (!decision.ok) {
-            void panel.webview.postMessage(
-                buildRpcResponse({
-                    id: req.id,
-                    ok: false,
-                    error: decision.error,
-                    variantId,
-                }),
-            );
-            return;
-        }
-        auth = decision.auth;
-    }
+    void panel.webview.postMessage({
+        type: "wsp-hello",
+        result: publicWspResult(init.result),
+    });
 
-    try {
-        const resp = await rpcCall(
+    // Migrated surface: kernel status via WSP subscribe (not raw RPC).
+    const sub = translateWsp(session, "subscribe", {
+        resource_uri: "resource://kernel/status",
+    });
+    if (sub.kind === "rpc") {
+        const resp = await proxyDaemonRpc(
             socketPath,
-            {
-                method: req.method,
-                params: req.params ?? null,
-                id: randomUUID(),
-                auth,
-            },
-            timeoutForMethod(req.method),
+            sub.method,
+            sub.params,
+            panelSession,
+            multiUser,
         );
-        void panel.webview.postMessage(
-            buildRpcResponse({
-                id: req.id,
+        void panel.webview.postMessage({
+            type: "wsp-notification",
+            method: "substrate.update",
+            params: {
+                resource_uri: "resource://kernel/status",
+                subscription_id:
+                    sub.wrapResult?.type === "subscription"
+                        ? sub.wrapResult.subscription_id
+                        : undefined,
+                snapshot: resp.ok ? resp.result ?? null : null,
                 ok: resp.ok,
-                result: resp.result ?? null,
                 error: resp.error,
-                // WEFT-334: forward structured error_kind so the webview can
-                // branch on timeout / gate_deny / llm_error without parsing
-                // the legacy string field.
-                error_kind: resp.error_kind,
-                variantId,
-            }),
-        );
-    } catch (err) {
-        const message = err instanceof RpcError ? err.message : String(err);
-        void panel.webview.postMessage(
-            buildRpcResponse({
-                id: req.id,
-                ok: false,
-                error: message,
-                variantId,
-            }),
-        );
+                // Marks this as the auto-migrated status surface.
+                source: "wsp-bootstrap",
+            },
+        });
     }
+
+    console.log(
+        `weft: WSP-0.1 session ${session.session_id} opened (WEFT-285)`,
+    );
+    return session;
 }
 
 function getWorkspaceCwd(): string | undefined {
@@ -712,16 +898,15 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
 
     // Bridge exposed to the wasm module. clawft_gui_egui::live::wasm_live
     // looks up window.__weftPostToHost and calls it with a JSON value.
+    // Request shape:  { type: "rpc-request", id, method, params }
+    // Response shape: { type: "rpc-response", id, ok, result?, error? }
     //
-    // Plain RPC (backward compatible):
-    //   Request:  { type: "rpc-request", id, method, params }
-    //   Response: { type: "rpc-response", id, ok, result?, error? }
-    //
-    // WEFT-283 active-radar (ADR-007) — optional pulse attribution:
-    //   Request:  { type: "rpc-request", id, method, params, "variant-id"? }
-    //   Response: { type: "rpc-response", id, ok, ..., "variant-id"? }  // echoed
-    //   Return:   { type: "radar-return", "variant-id", kind, "return-type", ... }
-    //   Ack:      { type: "radar-return-ack", "variant-id", ok, error? }
+    // WEFT-285 also accepts WSP-0.1 verbs:
+    //   { type: "wsp-request", id, method: "<verb>", params }
+    //   { type: "wsp-response", id, method, ok, result?, error? }
+    //   { type: "wsp-hello", result: server-caps }   // auto on ready
+    //   { type: "wsp-notification", method, params } // e.g. substrate.update
+    // Raw rpc-request remains fully supported (backward compat).
     window.__weftPostToHost = (payload) => {
       try {
         vscode.postMessage(payload);
@@ -730,30 +915,13 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
       }
     };
 
-    // Webview-side helper for typed active-radar returns (WEFT-283).
-    // Wasm / future UI can call this without hand-rolling the envelope.
-    // Host validates + acks with the same variant-id.
-    window.__weftPostRadarReturn = (observation) => {
-      try {
-        if (!observation || typeof observation !== "object") {
-          console.error("radar-return: expected object");
-          return false;
-        }
-        const payload = Object.assign({ type: "radar-return" }, observation);
-        if (payload["variant-id"] == null && payload.variantId != null) {
-          payload["variant-id"] = payload.variantId;
-          delete payload.variantId;
-        }
-        if (payload["return-type"] == null && payload.returnType != null) {
-          payload["return-type"] = payload.returnType;
-          delete payload.returnType;
-        }
-        vscode.postMessage(payload);
-        return true;
-      } catch (e) {
-        console.error("radar-return postMessage failed", e);
-        return false;
-      }
+    // Convenience WSP helper for webview scripts / future wasm bindings.
+    // Does not replace raw RPC — both paths share the host allowlist.
+    let __weftWspSeq = 1;
+    window.__weftWsp = (method, params) => {
+      const id = __weftWspSeq++;
+      vscode.postMessage({ type: "wsp-request", id, method, params: params ?? null });
+      return id;
     };
 
     try {

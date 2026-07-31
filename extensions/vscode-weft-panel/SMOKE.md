@@ -143,23 +143,83 @@ Production panels leave the strip **empty** (container only) unless
 `WEFT_PANEL_E2E=1`. The test command is host-only and never contributed
 to the command palette.
 
-## Known gaps (deferred to M2 / M3)
+## 10. WSP-0.1 verb surface (WEFT-285)
+
+The extension host accepts **WSP-0.1 verbs** alongside raw RPC.
+
+| Webview → host | Host → webview |
+|----------------|----------------|
+| `{ type: "wsp-request", id, method, params }` | `{ type: "wsp-response", id, method, ok, result?, error? }` |
+| (auto on `ready`) | `{ type: "wsp-hello", result: server-caps }` |
+| | `{ type: "wsp-notification", method, params }` |
+
+Raw `{ type: "rpc-request", … }` is **unchanged** (backward compatible).
+
+### Verb set (17 — ADR-005 hard cap)
+
+`session.initialize`, `session.shutdown`, `surface.compose`,
+`surface.get`, `surface.update`, `surface.dispose`, `subscribe`,
+`unsubscribe`, `observe`, `observe.close`, `invoke`, `mutate`,
+`gate.check`, `consent.request`, `consent.revoke`,
+`ontology.describe`, `cancel`.
+
+### Common panel ops → daemon RPC
+
+| WSP path | Daemon RPC |
+|----------|------------|
+| `subscribe` `resource://kernel/status` | `kernel.status` |
+| `subscribe` `resource://kernel/ps` | `kernel.ps` |
+| `subscribe` `resource://kernel/services` | `kernel.services` |
+| `subscribe` `resource://kernel/logs` | `kernel.logs` |
+| `subscribe` `resource://cluster/*` | `cluster.status` / `cluster.nodes` |
+| `subscribe` `resource://chain/*` | `chain.status` / `chain.tail` |
+| `subscribe` `substrate://…` | `substrate.subscribe` (or `.read`) |
+| `invoke` affordance `chat` | `agent.chat` |
+| `invoke` affordance `chat_stream` | `agent.chat_stream` |
+| `invoke` affordance `terminal_*` | `terminal.*` |
+| `invoke` affordance `service_*` | `service.*` |
+| `invoke` affordance `control_set_enabled` | `control.set_enabled` |
+
+Full tables live in `src/wsp.ts` (`RESOURCE_RPC_MAP`,
+`AFFORDANCE_RPC_MAP`, `verbMappingTable()`).
+
+### Migrated surface
+
+On webview `ready` the host:
+
+1. Runs `session.initialize` (persona `persona://dev-panel`).
+2. Posts `wsp-hello` with server-caps (verbs, resources, flags).
+3. `subscribe`s `resource://kernel/status` → `kernel.status` and
+   posts a `substrate.update` notification (`source: "wsp-bootstrap"`).
+
+The wasm Live loop may keep using raw RPC; both paths share the
+allowlist + multi-user gates.
+
+### Unit tests (no VSCode host)
+
+```bash
+cd extensions/vscode-weft-panel
+npm run test:wsp
+# or: npm run test:unit
+```
+
+## Known gaps (deferred)
 
 - No voice input — VSCode webviews can't expose `allow="microphone"`
   yet (microsoft/vscode#303293). Capture sidecar lands next.
-- Typed active-radar return schema + `variant-id` echo shipped
-  (WEFT-283 / ADR-007): `radar-return` / `radar-return-ack` on the
-  postMessage bridge, optional `variant-id` on plain RPC echoed by
-  the host. Full `ux/returns` substrate publish + ECC consumption
-  still deferred to the M2 radar loop. Unit tests:
-  `npm run test:active-radar`.
+- No typed active-radar return schema on the observation stream
+  (`observe` opens a local id; full radar is M2).
 - No `ThreadDock` primitive for per-agent parallel output.
-- Panel does not yet speak WSP-0.1 verbs (protocol-spec.md); raw
-  kernel.* RPC only. WSP verbs land in M3.
 - Live tone sync from wasm → DOM a11y strip (today the E2E path uses
   a mock inject; production canvas tones are still canvas-only).
 
 References:
 - Architecture & rationale: ADR-011, session-7 findings.
 - Protocol: `.planning/symposiums/compositional-ui/protocol-spec.md`.
+- Verb set: `.planning/symposiums/compositional-ui/adrs/adr-005-wsp-verb-set.md`.
 - Chip DOM followup: WEFT-558 / WEFT-486.
+- WEFT-285: `docs/plans/wave-0-WEFT-285-result.md`.
+
+## WEFT-283 active-radar
+
+Typed `radar-return` / `variant-id` echo — see `src/activeRadar.ts` and `npm run test:active-radar`.

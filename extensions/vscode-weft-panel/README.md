@@ -23,8 +23,13 @@ Predicate framing: `.planning/symposiums/compositional-ui/foundations.md`.
   host; extension proxies them to the daemon UDS and posts
   RPC-response messages back via `webview.postMessage` (the default
   `window 'message'` channel the wasm side already listens on).
-- Allowlists four methods for the panel's use:
-  `kernel.status`, `kernel.ps`, `kernel.services`, `kernel.logs`.
+- **WSP-0.1 verbs (WEFT-285):** also accepts `wsp-request` messages
+  and maps the 17 protocol verbs onto existing daemon RPC / local
+  session state (`src/wsp.ts`). On `ready`, auto `session.initialize`
+  + seed `resource://kernel/status`. Raw RPC remains fully supported.
+  Helper: `window.__weftWsp(method, params)`.
+- Allowlists panel RPC methods (static seed + daemon introspection);
+  see `src/allowlist.ts`.
 
 ## Build
 
@@ -95,6 +100,10 @@ Or palette → `Developer: Install Extension from Location…`.
 
 If you see the fallback "Failed to load the wasm bundle" card, step 1
 of Build wasn't run. See `SMOKE.md` for the full smoke test and the
-known gaps (voice/capture sidecar, full ux/returns substrate publish,
-WSP verbs — M2/M3). Typed active-radar envelope + variant-id echo is
-in (WEFT-283); see `src/activeRadar.ts`.
+known gaps (voice/capture sidecar, full active-radar stream — M2).
+WSP-0.1 verbs are implemented on the extension host (WEFT-285);
+see `SMOKE.md` §10 and `src/wsp.ts`.
+
+## WEFT-283 active-radar
+
+Typed `radar-return` / `variant-id` echo — see `src/activeRadar.ts` and `npm run test:active-radar`.
