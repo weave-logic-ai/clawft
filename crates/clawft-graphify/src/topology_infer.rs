@@ -327,6 +327,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg.add_relationship(Relationship {
             source: m.id.clone(),
@@ -337,6 +338,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
 
         let schema = infer_schema(&kg, "test-project");

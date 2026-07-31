@@ -22,6 +22,7 @@ use clawft_kernel::crossref::{
 use clawft_kernel::hnsw_service::HnswService;
 
 use crate::GraphifyError;
+use crate::edge_embed::{EDGE_HNSW_PREFIX, EdgeEmbeddingIndex};
 use crate::entity::EntityId;
 use crate::model::{Entity, GodNode, KnowledgeGraph};
 use crate::relationship::{Confidence, RelationType, Relationship};
@@ -66,7 +67,10 @@ pub struct IngestResult {
     pub nodes_created: usize,
     pub edges_created: usize,
     pub crossrefs_created: usize,
+    /// Entity embeddings indexed into HNSW.
     pub embeddings_indexed: usize,
+    /// Relationship (edge) embeddings indexed into HNSW (WEFT-375).
+    pub edge_embeddings_indexed: usize,
     pub duration_ms: u64,
 }
 
@@ -191,7 +195,8 @@ impl GraphifyBridge {
     /// registers a `CrossRef` to a Graphify-namespaced `UniversalNodeId`.
     ///
     /// For each relationship: creates a `CausalEdge` and a `CrossRef`
-    /// preserving the original `RelationType`.
+    /// preserving the original `RelationType`, and indexes an edge
+    /// embedding under `rel::{stable_id}` (WEFT-375 / LightRAG P5).
     pub async fn ingest(
         &self,
         kg: &KnowledgeGraph,
@@ -210,10 +215,13 @@ impl GraphifyBridge {
             result.embeddings_indexed += 1;
         }
 
-        // Phase 2: Ingest relationships.
-        for (_src, _tgt, rel) in kg.edges() {
+        // Phase 2: Ingest relationships (+ edge embeddings).
+        for (src, tgt, rel) in kg.edges() {
             self.ingest_relationship(rel, hlc_timestamp, chain_seq)?;
+            self.ingest_relationship_embedding(src, tgt, rel, embedding_provider)
+                .await?;
             result.edges_created += 1;
+            result.edge_embeddings_indexed += 1;
         }
 
         // CrossRefs: one per entity (entity -> graphify namespace) + one per edge.
@@ -321,6 +329,71 @@ impl GraphifyBridge {
         });
 
         Ok(())
+    }
+
+    /// Index a single relationship embedding into HNSW (WEFT-375).
+    ///
+    /// Entry id: `rel::{stable_id}`. Reuses a pre-populated
+    /// [`Relationship::embedding`] when present; otherwise calls the provider
+    /// with the edge's semantic text.
+    pub async fn ingest_relationship_embedding(
+        &self,
+        src: &Entity,
+        tgt: &Entity,
+        rel: &Relationship,
+        embedding_provider: &dyn EmbeddingProvider,
+    ) -> Result<(), GraphifyError> {
+        let embed_text = Relationship::embed_text_with_context(
+            &src.label,
+            &rel.relation_type,
+            &tgt.label,
+            rel.source_file.as_deref(),
+        );
+        let embedding = match rel.embedding.as_ref() {
+            Some(v) if !v.is_empty() => v.clone(),
+            _ => embedding_provider.embed(&embed_text).await?,
+        };
+        let hnsw_id = EdgeEmbeddingIndex::hnsw_id_for(&rel.stable_id());
+        let metadata = serde_json::json!({
+            "kind": "relationship",
+            "relationship_id": rel.stable_id(),
+            "source": src.id.to_hex(),
+            "target": tgt.id.to_hex(),
+            "relation_type": rel.relation_type_str(),
+            "source_label": src.label,
+            "target_label": tgt.label,
+            "embed_text": embed_text,
+        });
+        self.hnsw.insert(hnsw_id, embedding, metadata);
+        Ok(())
+    }
+
+    /// Relationship-anchored retrieval over HNSW (WEFT-375).
+    ///
+    /// Embeds `query`, searches HNSW, and returns only entries whose id is
+    /// prefixed with [`EDGE_HNSW_PREFIX`] (`rel::`).
+    pub async fn search_relationships(
+        &self,
+        query: &str,
+        embedding_provider: &dyn EmbeddingProvider,
+        top_k: usize,
+    ) -> Result<Vec<clawft_kernel::hnsw_service::HnswSearchResult>, GraphifyError> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let q = embedding_provider.embed(query).await?;
+        // Oversample so entity hits do not starve edge results.
+        let raw = self.hnsw.search(&q, top_k.saturating_mul(4).max(top_k));
+        let mut out = Vec::with_capacity(top_k);
+        for r in raw {
+            if r.id.starts_with(EDGE_HNSW_PREFIX) {
+                out.push(r);
+                if out.len() >= top_k {
+                    break;
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Look up which CausalNodeId corresponds to an EntityId.
@@ -437,6 +510,7 @@ impl GraphifyBridge {
                         source_file: None,
                         source_location: None,
                         metadata: serde_json::json!({}),
+                        embedding: None,
                     };
                     kg.add_relationship(rel);
                 }
@@ -765,6 +839,7 @@ mod tests {
             source_file: Some("test.py".into()),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 
@@ -886,13 +961,15 @@ mod tests {
         assert_eq!(result.nodes_created, 2);
         assert_eq!(result.edges_created, 1);
         assert_eq!(result.crossrefs_created, 3); // 2 entities + 1 edge
+        assert_eq!(result.embeddings_indexed, 2);
+        assert_eq!(result.edge_embeddings_indexed, 1);
 
         // Verify CausalGraph.
         assert_eq!(causal.node_count(), 2);
         assert_eq!(causal.edge_count(), 1);
 
-        // Verify HNSW.
-        assert_eq!(hnsw.len(), 2);
+        // Verify HNSW: 2 entity vectors + 1 edge vector (WEFT-375).
+        assert_eq!(hnsw.len(), 3);
 
         // Verify CrossRefStore.
         assert_eq!(crossref.count(), 3);
@@ -993,6 +1070,112 @@ mod tests {
             hub_rank < iso_rank || hub_hit.features.degree > 0.0,
             "expected topology signals on hub; ranks hub={hub_rank} iso={iso_rank}"
         );
+    }
+
+    /// WEFT-375: relationship-level HNSW search ("how does X interact with Y?").
+    #[tokio::test]
+    async fn bridge_relationship_hnsw_search() {
+        use clawft_kernel::hnsw_service::HnswServiceConfig;
+
+        /// Embedder that hashes text into a one-hot-ish vector so
+        /// interaction queries discriminate edges.
+        struct HashishEmbedder;
+        #[async_trait]
+        impl EmbeddingProvider for HashishEmbedder {
+            async fn embed(&self, text: &str) -> Result<Vec<f32>, GraphifyError> {
+                let mut v = vec![0.0f32; 8];
+                for (i, word) in text.split_whitespace().enumerate() {
+                    let h = word
+                        .bytes()
+                        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+                    let idx = (h as usize) % 8;
+                    v[idx] += 1.0 + (i as f32) * 0.01;
+                }
+                let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for x in &mut v {
+                        *x /= norm;
+                    }
+                }
+                Ok(v)
+            }
+        }
+
+        let causal = Arc::new(CausalGraph::new());
+        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let crossref = Arc::new(CrossRefStore::new());
+        let bridge = GraphifyBridge::new(causal, hnsw.clone(), crossref);
+        let embedder = HashishEmbedder;
+
+        let mut kg = KnowledgeGraph::new();
+        let auth = Entity {
+            id: EntityId::new(
+                &DomainTag::Code,
+                &EntityType::Service,
+                "AuthService",
+                "a.rs",
+            ),
+            entity_type: EntityType::Service,
+            label: "AuthService".into(),
+            source_file: Some("a.rs".into()),
+            source_location: None,
+            file_type: FileType::Code,
+            metadata: serde_json::json!({}),
+            legacy_id: None,
+            iri: None,
+        };
+        let db = Entity {
+            id: EntityId::new(&DomainTag::Code, &EntityType::Service, "Database", "d.rs"),
+            entity_type: EntityType::Service,
+            label: "Database".into(),
+            source_file: Some("d.rs".into()),
+            source_location: None,
+            file_type: FileType::Code,
+            metadata: serde_json::json!({}),
+            legacy_id: None,
+            iri: None,
+        };
+        let logger = Entity {
+            id: EntityId::new(&DomainTag::Code, &EntityType::Service, "Logger", "l.rs"),
+            entity_type: EntityType::Service,
+            label: "Logger".into(),
+            source_file: Some("l.rs".into()),
+            source_location: None,
+            file_type: FileType::Code,
+            metadata: serde_json::json!({}),
+            legacy_id: None,
+            iri: None,
+        };
+        kg.add_entity(auth.clone());
+        kg.add_entity(db.clone());
+        kg.add_entity(logger.clone());
+        kg.add_relationship(make_rel(&auth, &db));
+        kg.add_relationship(Relationship {
+            source: logger.id.clone(),
+            target: db.id.clone(),
+            relation_type: RelationType::DependsOn,
+            confidence: Confidence::Inferred,
+            weight: 0.7,
+            source_file: Some("l.rs".into()),
+            source_location: None,
+            metadata: serde_json::json!({}),
+            embedding: None,
+        });
+
+        bridge.ingest(&kg, &embedder, 1, 1).await.unwrap();
+        assert_eq!(hnsw.len(), 5); // 3 entities + 2 edges
+
+        let hits = bridge
+            .search_relationships("AuthService calls Database", &embedder, 2)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits[0].id.starts_with(EDGE_HNSW_PREFIX),
+            "expected rel:: prefix, got {}",
+            hits[0].id
+        );
+        assert_eq!(hits[0].metadata["kind"], "relationship");
     }
 
     #[test]

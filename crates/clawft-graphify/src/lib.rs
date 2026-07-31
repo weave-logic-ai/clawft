@@ -22,6 +22,8 @@ pub mod cache;
 pub mod cluster;
 pub mod conversation;
 pub mod domain;
+// WEFT-375 / LightRAG P5: edge embeddings for relationship-level queries.
+pub mod edge_embed;
 pub mod eml_models;
 pub mod entity;
 pub mod export;
@@ -73,6 +75,11 @@ pub use hyperedge::{
 pub use model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, GodNode, GraphDiff, Hyperedge,
     KnowledgeGraph, SuggestedQuestion, SurprisingConnection,
+};
+pub use edge_embed::{
+    DEFAULT_EDGE_EMBED_DIMS, EDGE_HNSW_PREFIX, EdgeEmbeddingIndex, EdgeSearchResult,
+    populate_edge_embeddings, query_relationships, query_relationships_dims,
+    relationship_search_keys,
 };
 pub use graph_rerank::{
     GraphRerankConfig, RerankFeatures, RerankedHit, VectorHit, graph_rerank, graph_rerank_top_k,

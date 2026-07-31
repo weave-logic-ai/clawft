@@ -414,6 +414,7 @@ mod tests {
             source_file: Some("case.json".into()),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 

@@ -185,6 +185,7 @@ impl RawExtractionResult {
                     source_file: Some(e.source_file),
                     source_location: Some(e.source_location),
                     metadata: serde_json::json!({}),
+                    embedding: None,
                 }
             })
             .collect();

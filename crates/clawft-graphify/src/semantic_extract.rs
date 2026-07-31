@@ -187,6 +187,7 @@ where
             source_file: Some(source_file.to_string()),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
     }
 

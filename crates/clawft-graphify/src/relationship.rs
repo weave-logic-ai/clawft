@@ -166,6 +166,12 @@ pub struct Relationship {
     pub source_file: Option<String>,
     pub source_location: Option<String>,
     pub metadata: serde_json::Value,
+    /// Optional embedding for relationship-level retrieval (WEFT-375 / LightRAG P5).
+    ///
+    /// When present, this vector is indexed under a stable edge id so queries
+    /// such as "how does X interact with Y?" can retrieve edges directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Relationship {
@@ -173,6 +179,54 @@ impl Relationship {
     pub fn relation_type_str(&self) -> String {
         self.relation_type.to_string()
     }
+
+    /// Stable hex id for HNSW / index keys: BLAKE3(source || relation || target).
+    ///
+    /// Deterministic across runs so edge embeddings can be upserted and
+    /// looked up without a separate edge primary key.
+    pub fn stable_id(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.source.as_bytes());
+        hasher.update(self.relation_type_str().as_bytes());
+        hasher.update(self.target.as_bytes());
+        hex_encode_bytes(hasher.finalize().as_bytes())
+    }
+
+    /// Build semantic text used to embed this edge as a unit.
+    ///
+    /// Format: `"{source_label} {relation_type} {target_label}"` plus optional
+    /// source-file context — matches LightRAG-style relationship units.
+    pub fn embed_text(
+        source_label: &str,
+        relation_type: &RelationType,
+        target_label: &str,
+    ) -> String {
+        format!("{source_label} {relation_type} {target_label}")
+    }
+
+    /// Extended embed text including source file when available.
+    pub fn embed_text_with_context(
+        source_label: &str,
+        relation_type: &RelationType,
+        target_label: &str,
+        source_file: Option<&str>,
+    ) -> String {
+        let base = Self::embed_text(source_label, relation_type, target_label);
+        match source_file {
+            Some(sf) if !sf.is_empty() => format!("{base} in {sf}"),
+            _ => base,
+        }
+    }
+}
+
+/// Hex-encode raw bytes (local helper; avoids a `hex` crate dep).
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 #[cfg(test)]
@@ -225,10 +279,82 @@ mod tests {
             source_file: Some("a.py".into()),
             source_location: Some("L1".into()),
             metadata: serde_json::json!({}),
+            embedding: None,
         };
         let json = serde_json::to_string(&rel).unwrap();
         let back: Relationship = serde_json::from_str(&json).unwrap();
         assert_eq!(back.relation_type, RelationType::Imports);
         assert_eq!(back.confidence, Confidence::Extracted);
+        assert!(back.embedding.is_none());
+        // embedding omitted from JSON when None
+        assert!(!json.contains("embedding"));
+    }
+
+    #[test]
+    fn relationship_stable_id_deterministic() {
+        let src = EntityId::new(&DomainTag::Code, &EntityType::Module, "a", "a.py");
+        let tgt = EntityId::new(&DomainTag::Code, &EntityType::Module, "b", "b.py");
+        let rel = Relationship {
+            source: src.clone(),
+            target: tgt.clone(),
+            relation_type: RelationType::Calls,
+            confidence: Confidence::Extracted,
+            weight: 1.0,
+            source_file: None,
+            source_location: None,
+            metadata: serde_json::json!({}),
+            embedding: None,
+        };
+        let id1 = rel.stable_id();
+        let id2 = rel.stable_id();
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 64);
+
+        let other = Relationship {
+            source: src,
+            target: tgt,
+            relation_type: RelationType::Imports,
+            confidence: Confidence::Extracted,
+            weight: 1.0,
+            source_file: None,
+            source_location: None,
+            metadata: serde_json::json!({}),
+            embedding: None,
+        };
+        assert_ne!(rel.stable_id(), other.stable_id());
+    }
+
+    #[test]
+    fn relationship_embed_text_format() {
+        let t = Relationship::embed_text("AuthService", &RelationType::Calls, "Database");
+        assert_eq!(t, "AuthService calls Database");
+        let with_ctx = Relationship::embed_text_with_context(
+            "AuthService",
+            &RelationType::DependsOn,
+            "Database",
+            Some("auth.rs"),
+        );
+        assert_eq!(with_ctx, "AuthService depends_on Database in auth.rs");
+    }
+
+    #[test]
+    fn relationship_embedding_roundtrip() {
+        let src = EntityId::new(&DomainTag::Code, &EntityType::Function, "f", "f.rs");
+        let tgt = EntityId::new(&DomainTag::Code, &EntityType::Function, "g", "g.rs");
+        let rel = Relationship {
+            source: src,
+            target: tgt,
+            relation_type: RelationType::Calls,
+            confidence: Confidence::Inferred,
+            weight: 0.7,
+            source_file: None,
+            source_location: None,
+            metadata: serde_json::json!({}),
+            embedding: Some(vec![0.1, 0.2, 0.3]),
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        assert!(json.contains("embedding"));
+        let back: Relationship = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.embedding.as_ref().unwrap().len(), 3);
     }
 }

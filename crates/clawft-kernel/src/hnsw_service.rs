@@ -685,6 +685,82 @@ pub fn entity_search_keys(
     keys
 }
 
+// ── Relationship (edge) embedding helpers — WEFT-375 / LightRAG P5 ──────
+
+/// HNSW id prefix for relationship (edge) embeddings.
+///
+/// Full form: `rel::{stable_id}`. Matches `clawft_graphify::EDGE_HNSW_PREFIX`.
+pub const RELATIONSHIP_HNSW_PREFIX: &str = "rel::";
+
+/// Build the HNSW entry id for a relationship embedding.
+pub fn relationship_hnsw_id(stable_id: &str) -> String {
+    format!("{RELATIONSHIP_HNSW_PREFIX}{stable_id}")
+}
+
+/// Generate embed texts for a relationship edge (LightRAG-style unit).
+///
+/// Returns `(key_type, text)` pairs. The primary `"relation"` key is the
+/// canonical edge unit (`"{src} {rel} {tgt}"`). An `"interaction"` key uses
+/// natural-language phrasing for "how does X interact with Y?" queries.
+///
+/// Field types are plain strings so this module stays free of graphify deps.
+pub fn relationship_search_keys(
+    source_label: &str,
+    relation_type: &str,
+    target_label: &str,
+    source_file: Option<&str>,
+) -> Vec<(String, String)> {
+    let base = format!("{source_label} {relation_type} {target_label}");
+    let mut keys = vec![
+        ("relation".to_string(), base.clone()),
+        (
+            "interaction".to_string(),
+            format!("how does {source_label} interact with {target_label}: {relation_type}"),
+        ),
+    ];
+    if let Some(sf) = source_file.filter(|s| !s.is_empty()) {
+        keys.push(("context".to_string(), format!("{base} in {sf}")));
+    }
+    keys
+}
+
+impl HnswService {
+    /// Insert a relationship (edge) embedding under `rel::{stable_id}`.
+    ///
+    /// Metadata should include at least `kind: "relationship"` and the
+    /// edge endpoints so consumers can reconstruct the hit without a
+    /// separate graph lookup.
+    pub fn insert_relationship(
+        &self,
+        stable_id: &str,
+        embedding: Vec<f32>,
+        metadata: serde_json::Value,
+    ) {
+        self.insert(relationship_hnsw_id(stable_id), embedding, metadata);
+    }
+
+    /// Search and keep only relationship-prefixed hits (`rel::`).
+    ///
+    /// Oversamples the underlying store so entity vectors do not starve
+    /// edge results when both share one HNSW index.
+    pub fn search_relationships(&self, query: &[f32], top_k: usize) -> Vec<HnswSearchResult> {
+        if top_k == 0 {
+            return Vec::new();
+        }
+        let raw = self.search(query, top_k.saturating_mul(4).max(top_k));
+        let mut out = Vec::with_capacity(top_k);
+        for r in raw {
+            if r.id.starts_with(RELATIONSHIP_HNSW_PREFIX) {
+                out.push(r);
+                if out.len() >= top_k {
+                    break;
+                }
+            }
+        }
+        out
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1042,5 +1118,54 @@ mod tests {
         assert_eq!(keys[1].0, "context");
         assert_eq!(keys[2].0, "description");
         assert_eq!(keys[3].0, "relationship");
+    }
+
+    // ── WEFT-375 relationship (edge) embedding helpers ───────────────
+
+    #[test]
+    fn relationship_hnsw_id_uses_prefix() {
+        assert_eq!(relationship_hnsw_id("abc"), "rel::abc");
+        assert!(relationship_hnsw_id("x").starts_with(RELATIONSHIP_HNSW_PREFIX));
+    }
+
+    #[test]
+    fn relationship_search_keys_interaction_phrasing() {
+        let keys = relationship_search_keys("AuthService", "calls", "Database", Some("auth.rs"));
+        assert!(keys.iter().any(|(k, _)| k == "relation"));
+        assert!(keys.iter().any(|(k, _)| k == "interaction"));
+        assert!(keys.iter().any(|(k, _)| k == "context"));
+        let interaction = keys
+            .iter()
+            .find(|(k, _)| k == "interaction")
+            .map(|(_, t)| t.as_str())
+            .unwrap();
+        assert!(interaction.contains("how does AuthService interact with Database"));
+    }
+
+    #[test]
+    fn insert_and_search_relationships() {
+        let svc = make_service();
+        // Entity vector (no rel:: prefix).
+        svc.insert(
+            "entity-auth".into(),
+            vec![1.0, 0.0, 0.0],
+            serde_json::json!({"kind": "entity"}),
+        );
+        // Edge vector.
+        svc.insert_relationship(
+            "edge-auth-db",
+            vec![0.0, 1.0, 0.0],
+            serde_json::json!({
+                "kind": "relationship",
+                "source_label": "AuthService",
+                "target_label": "Database",
+            }),
+        );
+        assert_eq!(svc.len(), 2);
+
+        let hits = svc.search_relationships(&[0.0, 1.0, 0.0], 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "rel::edge-auth-db");
+        assert_eq!(hits[0].metadata["kind"], "relationship");
     }
 }

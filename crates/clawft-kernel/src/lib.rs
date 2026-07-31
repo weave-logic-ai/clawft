@@ -406,7 +406,8 @@ pub use hnsw_eml::{
 };
 #[cfg(feature = "ecc")]
 pub use hnsw_service::{
-    HnswSearchResult, HnswService, HnswServiceConfig, MultiKey, MultiKeyConfig, entity_search_keys,
+    HnswSearchResult, HnswService, HnswServiceConfig, MultiKey, MultiKeyConfig,
+    RELATIONSHIP_HNSW_PREFIX, entity_search_keys, relationship_hnsw_id, relationship_search_keys,
 };
 #[cfg(feature = "ecc")]
 pub use impulse::{ImpulseQueue, ImpulseType};

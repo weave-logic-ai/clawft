@@ -124,6 +124,7 @@ pub fn resolve_cross_file_imports(
                             source_file: Some(str_path.clone()),
                             source_location: rel.source_location.clone(),
                             metadata: serde_json::json!({}),
+                            embedding: None,
                         });
                     }
                 }
@@ -161,11 +162,10 @@ mod tests {
             relation_type: rel_type,
             confidence: Confidence::Extracted,
             weight: 1.0,
-            source_file: "auth.py".to_string(),
-            source_location: "L1".to_string(),
-            metadata: HashMap::new(),
-            legacy_source: Some(source.to_string()),
-            legacy_target: Some(target.to_string()),
+            source_file: Some("auth.py".to_string()),
+            source_location: Some("L1".to_string()),
+            metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 

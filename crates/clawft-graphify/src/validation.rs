@@ -960,6 +960,7 @@ mod tests {
             source_file: Some("a.py".into()),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         assert!(reject_invalid_edges(&kg, &schema).is_ok());
 
@@ -973,6 +974,7 @@ mod tests {
             source_file: Some("a.py".into()),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         let errs = validate_kg_edges(&kg, &schema);
         assert_eq!(errs.len(), 1);

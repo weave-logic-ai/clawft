@@ -157,6 +157,7 @@ where
             source_file: Some(source_file.clone()),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
     }
 

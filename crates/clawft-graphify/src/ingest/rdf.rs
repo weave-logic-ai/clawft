@@ -587,6 +587,7 @@ fn map_quads_to_graph(
                 source_file: Some(options.source.clone()),
                 source_location: None,
                 metadata: meta,
+                embedding: None,
             })
             .is_some()
         {

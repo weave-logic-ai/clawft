@@ -205,6 +205,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
 
         let schema = TopologySchema::from_yaml(

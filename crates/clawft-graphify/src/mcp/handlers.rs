@@ -593,6 +593,7 @@ fn build_extractions_from_detection(
                     source_file: None,
                     source_location: None,
                     metadata: json!({}),
+                    embedding: None,
                 });
             }
         }

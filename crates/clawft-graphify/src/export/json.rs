@@ -212,6 +212,7 @@ mod tests {
             source_file: Some("auth.py".into()),
             source_location: Some("L3".into()),
             metadata: json!({"_src": "auth", "_tgt": "db"}),
+            embedding: None,
         });
         kg
     }

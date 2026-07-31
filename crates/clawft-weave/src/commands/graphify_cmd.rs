@@ -1018,6 +1018,7 @@ fn build_extractions_from_detection(
                 source_file: None,
                 source_location: None,
                 metadata: serde_json::json!({"co_located": true}),
+                embedding: None,
             };
             // Append to the first extraction for this directory's hub
             if let Some(ext) = extractions

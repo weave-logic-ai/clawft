@@ -257,6 +257,7 @@ mod tests {
             source_file: Some("auth.py".into()),
             source_location: Some("L3".into()),
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg
     }

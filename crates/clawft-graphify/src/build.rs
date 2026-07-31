@@ -298,6 +298,10 @@ pub fn build_from_json(data: &serde_json::Value) -> Result<KnowledgeGraph, Graph
                     "_src": src_str,
                     "_tgt": tgt_str,
                 }),
+                // WEFT-375: restore edge embedding when present in graph.json.
+                embedding: edge
+                    .get("embedding")
+                    .and_then(|v| serde_json::from_value::<Vec<f32>>(v.clone()).ok()),
             };
             kg.add_relationship(rel);
         }
@@ -403,6 +407,7 @@ mod tests {
             source_file: Some("app.py".into()),
             source_location: Some("L5".into()),
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         let kg = build(&[ext]);
         assert_eq!(kg.entity_count(), 1);
@@ -468,6 +473,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 

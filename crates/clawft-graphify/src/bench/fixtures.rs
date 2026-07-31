@@ -34,6 +34,7 @@ pub fn make_calls(src: &Entity, tgt: &Entity) -> Relationship {
         source_file: src.source_file.clone(),
         source_location: None,
         metadata: serde_json::json!({}),
+        embedding: None,
     }
 }
 

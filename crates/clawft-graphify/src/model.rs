@@ -311,6 +311,14 @@ impl KnowledgeGraph {
         &self.graph
     }
 
+    /// Mutable access to an edge weight by petgraph edge index (WEFT-375).
+    pub fn edge_weight_mut(
+        &mut self,
+        idx: petgraph::graph::EdgeIndex,
+    ) -> Option<&mut Relationship> {
+        self.graph.edge_weight_mut(idx)
+    }
+
     /// Access the entity index (read-only).
     pub fn entity_index(&self) -> &HashMap<EntityId, NodeIndex> {
         &self.entity_index
@@ -700,6 +708,7 @@ mod tests {
             source_file: Some("test.py".into()),
             source_location: Some("L1".into()),
             metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 
@@ -858,6 +867,7 @@ mod tests {
                     source_file: None,
                     source_location: None,
                     metadata: serde_json::json!({}),
+                    embedding: None,
                 };
                 if kg.add_relationship(rel).is_some() {
                     edge_count += 1;
@@ -896,6 +906,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 
@@ -981,6 +992,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
 
         let steps = kg.trace_data_flow(&a.id, FlowDirection::Forward, 3);
@@ -1006,6 +1018,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
 
         let steps = kg.trace_data_flow(&a.id, FlowDirection::Forward, 3);
@@ -1156,6 +1169,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg.add_relationship(Relationship {
             source: e2.id.clone(),
@@ -1166,6 +1180,7 @@ mod tests {
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
 
         assert_eq!(kg.entity_count(), 3);

@@ -836,6 +836,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg.add_relationship(Relationship {
             source: dog.id.clone(),
@@ -846,6 +847,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg
     }
@@ -868,6 +870,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({"owl_type": "owl:DatatypeProperty"}),
+            embedding: None,
         });
         kg.add_relationship(Relationship {
             source: person.id.clone(),
@@ -878,6 +881,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({"owl_type": "owl:DatatypeProperty"}),
+            embedding: None,
         });
         kg
     }
@@ -910,6 +914,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg.add_relationship(Relationship {
             source: process.id.clone(),
@@ -920,6 +925,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg.add_relationship(Relationship {
             source: legacy.id.clone(),
@@ -930,6 +936,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         });
         kg
     }
@@ -1125,6 +1132,7 @@ edges:
             source_file: None,
             source_location: None,
             metadata: serde_json::json!({"owl_type": "owl:equivalentClass"}),
+            embedding: None,
         });
 
         let svg = to_svg_string(&kg, &test_schema(), 400.0, 300.0).unwrap();

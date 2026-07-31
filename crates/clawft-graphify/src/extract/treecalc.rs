@@ -201,6 +201,7 @@ pub fn extract_rust(source: &str, file_path: &str) -> ExtractionResult {
             source_file: Some(file_path.to_string()),
             source_location: Some(format!("L{}", item.line)),
             metadata: serde_json::json!({}),
+            embedding: None,
         });
 
         // Process children (methods in impl/trait, variants in enum, fields in struct).
@@ -254,6 +255,7 @@ pub fn extract_rust(source: &str, file_path: &str) -> ExtractionResult {
                 source_file: Some(file_path.to_string()),
                 source_location: Some(format!("L{}", child.line)),
                 metadata: serde_json::json!({}),
+                embedding: None,
             });
         }
 
@@ -282,6 +284,7 @@ pub fn extract_rust(source: &str, file_path: &str) -> ExtractionResult {
                     source_file: Some(file_path.to_string()),
                     source_location: Some(format!("L{}", item.line)),
                     metadata: serde_json::json!({}),
+                    embedding: None,
                 });
             }
         }
@@ -342,6 +345,7 @@ pub fn extract_rust(source: &str, file_path: &str) -> ExtractionResult {
                                 source_file: Some(file_path.to_string()),
                                 source_location: None,
                                 metadata: serde_json::json!({}),
+                                embedding: None,
                             });
                         }
                     }
