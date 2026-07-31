@@ -5,7 +5,7 @@
 # WEFT-405: version + checksum + sigstore attestation on tag releases,
 # parity with release-wasi.yml via scripts/release/package-wasm-artifact.sh.
 # WEFT-455: post-bindgen size budget (raw + gzip) via check-bundle-size.sh,
-# same defaults as scripts/build.sh bundle-size (1600 KB / 600 KB).
+# same defaults as scripts/build.sh bundle-size (1700 KB / 600 KB as of 0.8.0).
 
 name: Browser WASM
 
@@ -113,7 +113,7 @@ jobs:
           done
 
       # WEFT-455: gate the playground/release post-bindgen bundle against the
-      # same budget as `scripts/build.sh bundle-size` (defaults 1600 KB raw /
+      # same budget as `scripts/build.sh bundle-size` (defaults 1700 KB raw /
       # 600 KB gzip in scripts/bench/check-bundle-size.sh). Mirrors the WASI
       # size gate in wasm-build.yml for the user-facing browser artifact.
       - name: Browser WASM size budget
