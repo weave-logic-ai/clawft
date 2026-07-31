@@ -23,6 +23,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

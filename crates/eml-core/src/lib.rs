@@ -13,6 +13,7 @@
 //! # Components
 //!
 //! - [`eml`] / [`eml_safe`] / [`softmax3`] — primitive operators
+//! - [`stability`] — numerical-stability layer (log-sum-exp, clamps, AdaScale)
 //! - [`EmlTree`] — depth-configurable evaluation tree
 //! - [`EmlModel`] — multi-head model with training
 //! - [`FeatureVector`] — trait for types that produce `&[f64]` inputs
@@ -45,6 +46,7 @@ pub mod events;
 pub mod features;
 pub mod model;
 pub mod operator;
+pub mod stability;
 pub mod tree;
 
 #[cfg(feature = "experimental-attention")]
@@ -62,6 +64,10 @@ pub use events::{EmlEvent, EmlEventLog};
 pub use features::FeatureVector;
 pub use model::EmlModel;
 pub use operator::{eml, eml_safe, softmax3};
+pub use stability::{
+    AdaScaleState, EXP_CLAMP, EXP_CLAMP_LO, FEATURE_CLAMP, LN_ARG_FLOOR, PARAM_CLAMP, clamp_finite,
+    clamp_params, log_sum_exp, normalize_features, stable_eml, stable_nested_eml,
+};
 pub use tree::EmlTree;
 
 #[cfg(feature = "experimental-attention")]

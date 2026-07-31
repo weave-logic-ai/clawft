@@ -21,15 +21,15 @@ The governance gate system has been expanded from the original 2 call sites to *
 
 | File | Method | Gate Present? | Check Position | Denial Handling | EffectVector | CERTIFIED |
 |------|--------|:---:|-----------|----------------|-------------|:---:|
-| auth_service.rs | register_credential | YES | Before mutation (L275) | Returns `KernelError::GovernanceDenied` | (context-only, no explicit EV) | YES |
-| auth_service.rs | register_hashed_credential | YES | Before mutation (L488) | Returns `KernelError::GovernanceDenied` | (context-only, no explicit EV) | YES |
-| config_service.rs | set_secret | YES | Before secret write (L444) | Returns `KernelError::GovernanceDenied` | (context-only, no explicit EV) | YES |
+| auth_service.rs | register_credential | YES | Before mutation (L275) | Returns `KernelError::GovernanceDenied` | GateEffectKind::AuthCredentialRegister (risk=0.5, privacy=0.6, security=0.8) | YES |
+| auth_service.rs | register_hashed_credential | YES | Before mutation (L488) | Returns `KernelError::GovernanceDenied` | GateEffectKind::AuthCredentialRegister (risk=0.5, privacy=0.6, security=0.8) | YES |
+| config_service.rs | set_secret | YES | Before secret write (L444) | Returns `KernelError::GovernanceDenied` | GateEffectKind::ConfigSecretSet (risk=0.55, privacy=0.85, security=0.9) | YES |
 | profile_store.rs | delete_profile | YES | Before deletion (L247) | Returns `ProfileError::GovernanceDenied` | risk=0.7, privacy=0.4 | YES |
 | hnsw_service.rs | clear | YES | Before bulk destruction (L212) | Returns `Err(String)` | risk=0.8 | YES |
 | causal.rs | clear | YES | Before graph wipe (L376) | Returns `KernelError::GovernanceDenied` | risk=0.8 | YES |
 | app.rs | install | YES | Before installation (L475) | Returns `AppError::GovernanceDenied` | risk=0.3, security=0.3 | YES |
 | app.rs | remove | YES | Before removal (L621) | Returns `AppError::GovernanceDenied` | risk=0.4, security=0.2 | YES |
-| cron.rs | add_job | YES | Before scheduling (L126) | Returns `CronError::GovernanceDenied` | risk=0.2, security=0.1 | YES |
+| cron.rs | add_job | YES | Before scheduling (L126) | Returns `CronError::GovernanceDenied` | GateEffectKind::CronAdd (risk=0.2, security=0.1) | YES |
 | cluster.rs | add_peer | YES | Before trust boundary expansion (L414) | Returns `ClusterError::AuthFailed` | risk=0.4, security=0.3 | YES |
 | cluster.rs | remove_peer | YES | Before trust boundary contraction (L487) | Returns `ClusterError::AuthFailed` | risk=0.3, security=0.2 | YES |
 | capability.rs | request_elevation_gated | YES | Before privilege escalation (L581) | Returns `ElevationResult::Denied` | risk=0.5, security=0.5 | YES |
@@ -41,9 +41,9 @@ The governance gate system has been expanded from the original 2 call sites to *
 | File | Method | Gate Present? | Check Position | Denial Handling | EffectVector | CERTIFIED |
 |------|--------|:---:|-----------|----------------|-------------|:---:|
 | profile_store.rs | create_profile | YES | Before creation (L199) | Returns `ProfileError::GovernanceDenied` | risk=0.3, privacy=0.2 | YES |
-| config_service.rs | set (config) | YES | Before config write (L199) | Returns `KernelError::GovernanceDenied` | (context-only) | YES |
-| config_service.rs | delete (config) | YES | Before config delete (L267) | Returns `KernelError::GovernanceDenied` | (context-only) | YES |
-| a2a.rs | send (routing) | YES | Before message delivery (L262) | Returns `KernelError::CapabilityDenied` | (context-only, layer=routing) | YES |
+| config_service.rs | set (config) | YES | Before config write (L199) | Returns `KernelError::GovernanceDenied` | GateEffectKind::ConfigSet (risk=0.35, security=0.4) | YES |
+| config_service.rs | delete (config) | YES | Before config delete (L267) | Returns `KernelError::GovernanceDenied` | GateEffectKind::ConfigDelete (risk=0.4, security=0.45) | YES |
+| a2a.rs | send (routing) | YES | Before message delivery (L262) | Returns `KernelError::CapabilityDenied` | GateEffectKind::A2aRouting (risk=0.25, security=0.3) | YES |
 | http_api.rs | handle_request | YES | Before governance evaluation (L212) | Returns GovernResponse with decision | Extracted from context map | YES |
 
 ### Sandbox (clawft-core) -- Policy-Based (Not GovernanceGate)

@@ -1685,6 +1685,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-sonobuoy-ranging"
+version = "0.6.20"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "clawft-splat-pipeline"
 version = "0.6.20"
 dependencies = [
@@ -3303,6 +3311,7 @@ name = "exo-resource-tree"
 version = "0.6.20"
 dependencies = [
  "chrono",
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "sha3",

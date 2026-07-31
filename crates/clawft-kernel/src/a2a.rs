@@ -257,11 +257,15 @@ impl A2ARouter {
                 crate::ipc::MessagePayload::Signal(_) => "ipc.signal".to_string(),
                 _ => "ipc.send".to_string(),
             };
-            let context = serde_json::json!({
-                "from": from,
-                "target": format!("{:?}", msg.target),
-                "layer": "routing",
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let context = with_effect_context(
+                serde_json::json!({
+                    "from": from,
+                    "target": format!("{:?}", msg.target),
+                    "layer": "routing",
+                }),
+                &GateEffectKind::A2aRouting.effect_vector(),
+            );
             match gate.check(&from.to_string(), &action, &context) {
                 crate::gate::GateDecision::Deny { reason, .. } => {
                     return Err(KernelError::CapabilityDenied {

@@ -274,10 +274,14 @@ impl AuthService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "credential_name": name,
-                "credential_type": credential_type.to_string(),
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "credential_name": name,
+                    "credential_type": credential_type.to_string(),
+                }),
+                &GateEffectKind::AuthCredentialRegister.effect_vector(),
+            );
             let decision = gate.check("auth-service", "auth.credential.register", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -327,9 +331,13 @@ impl AuthService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "credential_name": name,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "credential_name": name,
+                }),
+                &GateEffectKind::AuthCredentialRotate.effect_vector(),
+            );
             let decision = gate.check("auth-service", "auth.credential.rotate", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -367,11 +375,15 @@ impl AuthService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "credential_name": &request.credential_name,
-                "agent_id": &request.agent_id,
-                "ttl_secs": request.ttl_secs,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "credential_name": &request.credential_name,
+                    "agent_id": &request.agent_id,
+                    "ttl_secs": request.ttl_secs,
+                }),
+                &GateEffectKind::AuthTokenIssue.effect_vector(),
+            );
             let decision = gate.check("auth-service", "auth.token.issue", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -487,9 +499,13 @@ impl AuthService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "token_id": token_id,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "token_id": token_id,
+                }),
+                &GateEffectKind::AuthTokenRevoke.effect_vector(),
+            );
             let decision = gate.check("auth-service", "auth.token.revoke", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -544,9 +560,13 @@ impl AuthService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "agent_id": agent_id,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "agent_id": agent_id,
+                }),
+                &GateEffectKind::AuthCredentialRegister.effect_vector(),
+            );
             let decision = gate.check("auth-service", "auth.credential.register", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(

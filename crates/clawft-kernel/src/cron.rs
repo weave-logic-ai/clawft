@@ -124,12 +124,15 @@ impl CronService {
         // Governance gate — block job creation if policy denies it.
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
-            let context = serde_json::json!({
-                "job_name": &name,
-                "interval_secs": interval_secs,
-                "command": &command,
-                "effect": { "risk": 0.2, "security": 0.1 },
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let context = with_effect_context(
+                serde_json::json!({
+                    "job_name": &name,
+                    "interval_secs": interval_secs,
+                    "command": &command,
+                }),
+                &GateEffectKind::CronAdd.effect_vector(),
+            );
             let decision = gate.check("kernel", "cron.add", &context);
             if decision.is_deny() {
                 return Err(CronError::GovernanceDenied {
@@ -184,10 +187,13 @@ impl CronService {
         // Governance gate -- block job removal if policy denies it.
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
-            let context = serde_json::json!({
-                "job_id": id,
-                "effect": { "risk": 0.2, "security": 0.1 },
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let context = with_effect_context(
+                serde_json::json!({
+                    "job_id": id,
+                }),
+                &GateEffectKind::CronRemove.effect_vector(),
+            );
             let decision = gate.check("kernel", "cron.remove", &context);
             if decision.is_deny() {
                 return Err(CronError::GovernanceDenied {

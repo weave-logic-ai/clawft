@@ -332,6 +332,156 @@ impl EffectVector {
         .into_iter()
         .fold(0.0_f64, f64::max)
     }
+
+    /// Serialize into the gate-context `"effect"` object shape expected by
+    /// [`crate::gate::GovernanceGate::extract_effect`].
+    pub fn to_context_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "risk": self.risk,
+            "fairness": self.fairness,
+            "privacy": self.privacy,
+            "novelty": self.novelty,
+            "security": self.security,
+        })
+    }
+
+    /// Explicit EffectVector schema for a privileged gate family (WEFT-506).
+    ///
+    /// Dimensions are auditable constants — not inferred from free-form
+    /// context — so governance decisions remain explainable in chain logs.
+    pub fn for_gate(kind: GateEffectKind) -> Self {
+        kind.effect_vector()
+    }
+}
+
+/// Privileged gate families that must publish an explicit [`EffectVector`]
+/// (WEFT-506). Cron already had inline vectors; auth / config / a2a share
+/// this enum so tests can pin dimensions per gate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateEffectKind {
+    /// Credential registration (auth).
+    AuthCredentialRegister,
+    /// Credential rotation (auth).
+    AuthCredentialRotate,
+    /// Token issuance (auth).
+    AuthTokenIssue,
+    /// Token revocation (auth).
+    AuthTokenRevoke,
+    /// Config namespace write.
+    ConfigSet,
+    /// Config namespace delete (including typed).
+    ConfigDelete,
+    /// Secret store write.
+    ConfigSecretSet,
+    /// A2A routing-time IPC gate.
+    A2aRouting,
+    /// Cron job add.
+    CronAdd,
+    /// Cron job remove.
+    CronRemove,
+}
+
+impl GateEffectKind {
+    /// Fixed 5-D weights for this gate family.
+    pub fn effect_vector(self) -> EffectVector {
+        match self {
+            // Auth: high security / privacy; moderate risk.
+            Self::AuthCredentialRegister => EffectVector {
+                risk: 0.5,
+                fairness: 0.0,
+                privacy: 0.6,
+                novelty: 0.1,
+                security: 0.8,
+            },
+            Self::AuthCredentialRotate => EffectVector {
+                risk: 0.55,
+                fairness: 0.0,
+                privacy: 0.5,
+                novelty: 0.15,
+                security: 0.85,
+            },
+            Self::AuthTokenIssue => EffectVector {
+                risk: 0.4,
+                fairness: 0.0,
+                privacy: 0.4,
+                novelty: 0.05,
+                security: 0.7,
+            },
+            Self::AuthTokenRevoke => EffectVector {
+                risk: 0.45,
+                fairness: 0.1,
+                privacy: 0.2,
+                novelty: 0.05,
+                security: 0.75,
+            },
+            // Config: medium risk; secret writes spike security/privacy.
+            Self::ConfigSet => EffectVector {
+                risk: 0.35,
+                fairness: 0.0,
+                privacy: 0.2,
+                novelty: 0.15,
+                security: 0.4,
+            },
+            Self::ConfigDelete => EffectVector {
+                risk: 0.4,
+                fairness: 0.0,
+                privacy: 0.15,
+                novelty: 0.1,
+                security: 0.45,
+            },
+            Self::ConfigSecretSet => EffectVector {
+                risk: 0.55,
+                fairness: 0.0,
+                privacy: 0.85,
+                novelty: 0.1,
+                security: 0.9,
+            },
+            // A2A routing: low baseline; tool/signal variants can layer on top.
+            Self::A2aRouting => EffectVector {
+                risk: 0.25,
+                fairness: 0.0,
+                privacy: 0.1,
+                novelty: 0.05,
+                security: 0.3,
+            },
+            // Cron: matches prior inline constants (risk=0.2, security=0.1).
+            Self::CronAdd => EffectVector {
+                risk: 0.2,
+                fairness: 0.0,
+                privacy: 0.0,
+                novelty: 0.1,
+                security: 0.1,
+            },
+            Self::CronRemove => EffectVector {
+                risk: 0.2,
+                fairness: 0.0,
+                privacy: 0.0,
+                novelty: 0.05,
+                security: 0.1,
+            },
+        }
+    }
+
+    /// Action string prefix associated with this gate family.
+    pub fn action_prefix(self) -> &'static str {
+        match self {
+            Self::AuthCredentialRegister
+            | Self::AuthCredentialRotate
+            | Self::AuthTokenIssue
+            | Self::AuthTokenRevoke => "auth.",
+            Self::ConfigSet | Self::ConfigDelete | Self::ConfigSecretSet => "config.",
+            Self::A2aRouting => "ipc.",
+            Self::CronAdd | Self::CronRemove => "cron.",
+        }
+    }
+}
+
+/// Merge an explicit [`EffectVector`] into a gate context JSON object.
+pub fn with_effect_context(mut base: serde_json::Value, effect: &EffectVector) -> serde_json::Value {
+    if let Some(obj) = base.as_object_mut() {
+        obj.insert("effect".into(), effect.to_context_json());
+    }
+    base
 }
 
 /// Governance decision for an action.
@@ -3198,5 +3348,39 @@ mod tests {
             let events = cm.tail(1);
             assert_eq!(events[0].kind, "governance.defer");
         }
+    }
+
+    // ── WEFT-506: explicit EffectVector schema per gate family ──
+
+    #[test]
+    fn gate_effect_kind_dimensions_pinned() {
+        let auth = GateEffectKind::AuthCredentialRegister.effect_vector();
+        assert!((auth.security - 0.8).abs() < 1e-12);
+        assert!((auth.privacy - 0.6).abs() < 1e-12);
+        assert!((auth.risk - 0.5).abs() < 1e-12);
+
+        let config = GateEffectKind::ConfigSet.effect_vector();
+        assert!((config.risk - 0.35).abs() < 1e-12);
+        assert!((config.security - 0.4).abs() < 1e-12);
+
+        let secret = GateEffectKind::ConfigSecretSet.effect_vector();
+        assert!(secret.privacy > 0.8);
+        assert!(secret.security > 0.8);
+
+        let a2a = GateEffectKind::A2aRouting.effect_vector();
+        assert!((a2a.risk - 0.25).abs() < 1e-12);
+
+        let cron = GateEffectKind::CronAdd.effect_vector();
+        assert!((cron.risk - 0.2).abs() < 1e-12);
+        assert!((cron.security - 0.1).abs() < 1e-12);
+
+        // Context merge embeds the effect object.
+        let ctx = with_effect_context(
+            serde_json::json!({"pid": 1}),
+            &GateEffectKind::AuthTokenIssue.effect_vector(),
+        );
+        assert!(ctx.get("effect").is_some());
+        assert_eq!(ctx["effect"]["security"], 0.7);
+        assert_eq!(ctx["pid"], 1);
     }
 }

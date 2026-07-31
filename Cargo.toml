@@ -85,6 +85,8 @@ members = [
     "crates/clawft-splatd",
     # ADR-056 BVH-on-RVF spatial-temporal index (broad-phase; no chain yet).
     "crates/clawft-bvh",
+    # WEFT-535: inter-buoy acoustic ranging scaffold (ADR-078 / RANGING.md G1 follow-up).
+    "crates/clawft-sonobuoy-ranging",
     # WEFT-229: voice pipeline latency / WER / CPU harness (mock-friendly, no ort).
     "crates/clawft-bench-voice",
 ]
@@ -326,6 +328,7 @@ weftos = { version = "0.6.20", path = "crates/weftos", default-features = false 
 clawft-substrate = { version = "0.6.20", path = "crates/clawft-substrate" }
 # ADR-056 / WEFT-718: BVH broad-phase (kernel SpatialBackend behind `ecc`).
 clawft-bvh = { version = "0.6.20", path = "crates/clawft-bvh" }
+clawft-sonobuoy-ranging = { version = "0.6.20", path = "crates/clawft-sonobuoy-ranging" }
 clawft-app = { version = "0.6.20", path = "crates/clawft-app" }
 clawft-surface = { version = "0.6.20", path = "crates/clawft-surface" }
 clawft-canon = { version = "0.6.20", path = "crates/clawft-canon" }

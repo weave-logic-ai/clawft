@@ -338,16 +338,37 @@ impl KernelMessage {
     }
 }
 
-/// Globally unique process identifier: (node_id, local_pid).
+/// Mesh / cluster node identifier (string DID or stable node name).
+///
+/// This is the **NodeId** half of the composite process identity required
+/// for cross-node uniqueness (WEFT-142). Paired with a local [`Pid`] it
+/// forms a [`GlobalPid`].
+pub type MeshNodeId = String;
+
+/// Globally unique process identifier: (`node_id`, local `pid`).
 ///
 /// Used for cross-node process addressing in K6 mesh networking.
+///
+/// ## WEFT-142
+///
+/// Audit gap "Pid: u64 has no node component" is closed by this type:
+/// - Composite identity at IPC boundaries (`GlobalPid` / `MessageTarget::RemoteNode`)
+/// - Remote inbox bridge: [`crate::mesh_runtime::MeshRuntime::handle_incoming`]
+///   unwraps `RemoteNode` and injects into the local A2A router
+///   (`deliver_to_inbox`)
+///
+/// Prefer `GlobalPid` (or the [`CompositePid`] alias) over bare [`Pid`]
+/// whenever a message may leave the local process table.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GlobalPid {
-    /// Node that owns this process.
-    pub node_id: String,
+    /// Node that owns this process ([`MeshNodeId`]).
+    pub node_id: MeshNodeId,
     /// Local PID on that node.
     pub pid: Pid,
 }
+
+/// Alias emphasising the `(NodeId, Pid)` composite (WEFT-142).
+pub type CompositePid = GlobalPid;
 
 impl GlobalPid {
     /// Create a GlobalPid for a local process.
@@ -358,9 +379,25 @@ impl GlobalPid {
         }
     }
 
+    /// Construct from explicit mesh node id + local pid.
+    pub fn new(node_id: impl Into<MeshNodeId>, pid: Pid) -> Self {
+        Self {
+            node_id: node_id.into(),
+            pid,
+        }
+    }
+
     /// Check if this PID belongs to the given node.
     pub fn is_local(&self, my_node_id: &str) -> bool {
         self.node_id == my_node_id
+    }
+
+    /// Build a [`MessageTarget::RemoteNode`] that addresses this process.
+    pub fn as_remote_target(&self) -> MessageTarget {
+        MessageTarget::RemoteNode {
+            node_id: self.node_id.clone(),
+            target: Box::new(MessageTarget::Process(self.pid)),
+        }
     }
 }
 
@@ -843,6 +880,22 @@ mod tests {
     fn global_pid_display() {
         let gpid = GlobalPid::local(42, "alpha");
         assert_eq!(gpid.to_string(), "alpha:42");
+    }
+
+    #[test]
+    fn global_pid_as_remote_target_and_composite_alias() {
+        let gpid = GlobalPid::new("node-x", 7);
+        let target = gpid.as_remote_target();
+        match target {
+            MessageTarget::RemoteNode { node_id, target } => {
+                assert_eq!(node_id, "node-x");
+                assert!(matches!(*target, MessageTarget::Process(7)));
+            }
+            other => panic!("expected RemoteNode, got {other:?}"),
+        }
+        let alias: CompositePid = gpid.clone();
+        assert_eq!(alias.pid, 7);
+        assert_eq!(alias.node_id, "node-x");
     }
 
     #[test]

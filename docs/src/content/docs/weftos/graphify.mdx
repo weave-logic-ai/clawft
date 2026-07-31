@@ -18,6 +18,13 @@ WeftOS needs to understand the systems it manages. Graphify provides two domain-
 
 Both domains share the same underlying graph infrastructure: BLAKE3-hashed entity IDs, confidence-weighted edges, label propagation clustering, and petgraph-backed traversal.
 
+### LightRAG dual-level retrieval (WEFT-517)
+
+`clawft_graphify::dual_level_retrieve` implements Guo et al. 2410.05779
+dual-level keyword retrieval (low-level entity keywords + high-level
+community/theme keywords). See ADR-091 and `src/lightrag.rs`. Related:
+graph re-rank (P4 / WEFT-376) and edge embeddings (P5 / WEFT-375).
+
 ## Quick Start
 
 ```bash

@@ -198,11 +198,15 @@ impl ConfigService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "namespace": namespace,
-                "key": key,
-                "changed_by": changed_by,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                    "changed_by": changed_by,
+                }),
+                &GateEffectKind::ConfigSet.effect_vector(),
+            );
             let decision = gate.check("config-service", "config.set", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -261,11 +265,15 @@ impl ConfigService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "namespace": namespace,
-                "key": key,
-                "changed_by": changed_by,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                    "changed_by": changed_by,
+                }),
+                &GateEffectKind::ConfigDelete.effect_vector(),
+            );
             let decision = gate.check("config-service", "config.delete", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -388,11 +396,15 @@ impl ConfigService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "namespace": namespace,
-                "key": key,
-                "changed_by": changed_by,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                    "changed_by": changed_by,
+                }),
+                &GateEffectKind::ConfigDelete.effect_vector(),
+            );
             let decision = gate.check("config-service", "config.delete_typed", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(
@@ -461,10 +473,14 @@ impl ConfigService {
         #[cfg(feature = "exochain")]
         if let Some(ref gate) = self.governance_gate {
             use crate::gate::GateDecision;
-            let ctx = serde_json::json!({
-                "namespace": namespace,
-                "key": key,
-            });
+            use crate::governance::{GateEffectKind, with_effect_context};
+            let ctx = with_effect_context(
+                serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                }),
+                &GateEffectKind::ConfigSecretSet.effect_vector(),
+            );
             let decision = gate.check("config-service", "config.secret.set", &ctx);
             if let GateDecision::Deny { reason, .. } = decision {
                 return Err(KernelError::GovernanceDenied(format!(

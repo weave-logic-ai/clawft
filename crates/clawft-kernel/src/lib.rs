@@ -197,6 +197,7 @@ pub mod error;
 #[cfg(feature = "exochain")]
 pub mod gate;
 pub mod governance;
+pub mod rule_distribution;
 pub mod health;
 pub mod heartbeat;
 pub mod ipc;
@@ -464,8 +465,11 @@ pub use floor::{
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 pub use governance::{
-    EffectVector, GovernanceBranch, GovernanceDecision, GovernanceEngine, GovernanceRequest,
-    GovernanceResult, GovernanceRule, RuleSeverity,
+    EffectVector, GateEffectKind, GovernanceBranch, GovernanceDecision, GovernanceEngine,
+    GovernanceRequest, GovernanceResult, GovernanceRule, RuleSeverity, with_effect_context,
+};
+pub use rule_distribution::{
+    EscalationOutcome, EscalationRecord, RuleDistribution, RuleGossipEnvelope, VersionedRule,
 };
 pub use health::{HealthStatus, HealthSystem, OverallHealth};
 #[cfg(feature = "os-patterns")]
@@ -487,8 +491,8 @@ pub use hnsw_service::{
 #[cfg(feature = "ecc")]
 pub use impulse::{ImpulseQueue, ImpulseType};
 pub use ipc::{
-    ExitReason as SignalExitReason, GlobalPid, KernelIpc, KernelMessage, KernelSignal,
-    MessagePayload, MessageTarget, ProcessDown as SignalProcessDown,
+    CompositePid, ExitReason as SignalExitReason, GlobalPid, KernelIpc, KernelMessage, KernelSignal,
+    MeshNodeId, MessagePayload, MessageTarget, ProcessDown as SignalProcessDown,
 };
 #[cfg(feature = "mesh")]
 pub use mesh::{

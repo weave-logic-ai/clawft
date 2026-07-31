@@ -1,0 +1,16 @@
+[package]
+name = "clawft-sonobuoy-ranging"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Inter-buoy acoustic ranging primitives (ADR-078 / WEFT-535). Scaffold for sonobuoy field geometry."
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

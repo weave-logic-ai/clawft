@@ -42,7 +42,7 @@ pub mod scoring;
 pub mod tree;
 
 pub use boot::{bootstrap_fresh, from_checkpoint, to_checkpoint};
-pub use delegation::DelegationCert;
+pub use delegation::{DelegationCert, DelegationError, validate_chain};
 pub use error::{TreeError, TreeResult};
 pub use merkle::{
     DiffNodePayload, MerkleDiff, MerkleDiffEntry, MerkleDiffKind, MerkleInclusionProof,

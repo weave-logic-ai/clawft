@@ -70,6 +70,23 @@ Level D: multi-head output (2 params per head)
 
 Supported depths: 2, 3, 4, 5. Each depth adds more representational capacity at the cost of more parameters and slightly slower inference.
 
+### Numerical stability layer (WEFT-548)
+
+Deep EML trees (CIFAR-scale depth, nested exp/ln) can overflow. `eml-core`
+ships a framework-level stability module:
+
+| Helper | Role |
+|--------|------|
+| `stable_eml` / `eml_safe` | Clamp exp to ±20; floor ln arg at `f64::MIN_POSITIVE` |
+| `log_sum_exp` | Max-subtraction log-sum-exp for large logits |
+| `normalize_features` | L2 normalize + clamp features |
+| `clamp_params` | Bound coordinate-descent params |
+| `AdaScaleState` | EMA gain keeping activations near target RMS |
+| `stable_nested_eml` | Demonstration nested chain that stays finite at depth 12 |
+
+Catalogue of overflow/underflow loci lives in
+`crates/eml-core/src/stability.rs` module docs.
+
 ### API
 
 | Method | Description |

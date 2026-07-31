@@ -22,7 +22,7 @@
 //!
 //! See the 0.8.x Plane backlog for the deferred work:
 //! - `Did`-based principals + ConsentProof emission
-//! - DelegationCert grant/revoke/prune
+//! - DelegationCert grant/revoke/chain (WEFT-131 lifecycle landed; prune UI deferred)
 //! - exo_consent::evaluate integration with risk scoring
 //! - LRU eviction in EffectiveAclCache (currently bulk-clear)
 //! - CLI: `weaver resource {grant, revoke, check}`

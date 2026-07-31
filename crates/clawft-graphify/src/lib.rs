@@ -24,6 +24,8 @@ pub mod conversation;
 pub mod domain;
 // WEFT-375 / LightRAG P5: edge embeddings for relationship-level queries.
 pub mod edge_embed;
+// WEFT-517 / LightRAG: dual-level keyword retrieval (Guo et al. 2410.05779).
+pub mod lightrag;
 pub mod eml_models;
 pub mod entity;
 pub mod export;
@@ -75,6 +77,10 @@ pub use hyperedge::{
 pub use model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, GodNode, GraphDiff, Hyperedge,
     KnowledgeGraph, SuggestedQuestion, SurprisingConnection,
+};
+pub use lightrag::{
+    DualLevelHit, DualLevelResult, TokenCostEstimate, dual_level_retrieve, split_levels,
+    token_cost_estimate, tokenize_keywords,
 };
 pub use edge_embed::{
     DEFAULT_EDGE_EMBED_DIMS, EDGE_HNSW_PREFIX, EdgeEmbeddingIndex, EdgeSearchResult,
