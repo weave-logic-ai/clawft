@@ -1047,8 +1047,9 @@ mod tests {
             max_tokens: None,
             conv_id: "c".into(),
             metadata: None,
+            caller_id: None,
         };
-        let inbound = inbound_from_params(&p, "c");
+        let inbound = inbound_from_params(&p, "c", None);
         assert_eq!(inbound.content, "said aloud");
         assert_eq!(inbound.media, vec![audio.substrate_path.clone()]);
         let got = clawft_types::audio_from_metadata(

@@ -34,7 +34,8 @@ use async_trait::async_trait;
 use tracing::{debug, warn};
 
 use clawft_core::agent::spawn::{
-    SpawnBackend, SpawnError, SpawnHandle, SpawnSpec, SubagentSpawner, TaskOutcome, TaskStatus,
+    SpawnBackend, SpawnBudget, SpawnError, SpawnHandle, SpawnSpec, SubagentSpawner, TaskOutcome,
+    TaskStatus,
 };
 use clawft_kernel::chain::ChainManager;
 use clawft_kernel::{CausalGraph, CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
@@ -287,6 +288,12 @@ impl<H: AgentLoopHandle> SubagentSpawner for DaemonSubagentSpawner<H> {
             return Err(SpawnError::DispatchFailed("agent service unavailable".into()));
         };
 
+        // WEFT-631: seed per-child CostBudget from the spawn hint before
+        // dispatch so the shared ConversationBudget enforces the tighter
+        // caps during the child's LLM loop (design D5). No-op when the
+        // service has no cost budget attached (CLI / stub tests).
+        let seeded_budget = seed_child_budget(service.as_ref(), &child_conv, spec.budget.as_ref());
+
         let ctx = DriveCtx {
             task_id: task_id.clone(),
             child_conv: child_conv.clone(),
@@ -297,6 +304,7 @@ impl<H: AgentLoopHandle> SubagentSpawner for DaemonSubagentSpawner<H> {
             depth: spec.depth,
             timeout: self.config.timeout,
             parent_uid,
+            seeded_budget,
         };
 
         if spec.await_completion {
@@ -435,6 +443,65 @@ struct DriveCtx {
     /// parent conversation may advance before an async child finishes, so we
     /// bind the edge target at spawn time.
     parent_uid: UniversalNodeId,
+    /// Effective per-child caps installed on the shared ConversationBudget
+    /// (WEFT-631). Surfaced on the spawn_result node / witness when the child
+    /// exhausts so governance can attribute the breach.
+    seeded_budget: Option<SeededChildBudget>,
+}
+
+/// Snapshot of the caps installed for a child conversation (WEFT-631).
+#[derive(Debug, Clone)]
+struct SeededChildBudget {
+    max_tokens: u64,
+    max_usd: f64,
+    max_iterations: u32,
+}
+
+impl SeededChildBudget {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "max_tokens": self.max_tokens,
+            "max_usd": self.max_usd,
+            "max_iterations": self.max_iterations,
+        })
+    }
+}
+
+/// Install per-child budget caps from the spawn hint onto the service's
+/// shared [`ConversationBudget`] (WEFT-631 / design D5).
+///
+/// When `hint` is `None` the child keeps the daemon base caps (still
+/// per-`conv_id` accounting). When the service has no budget attached
+/// this is a no-op and returns `None` — enforcement requires the same
+/// `Arc<ConversationBudget>` wired into the agent loop.
+fn seed_child_budget<H: AgentLoopHandle>(
+    service: &AgentService<H>,
+    child_conv: &str,
+    hint: Option<&SpawnBudget>,
+) -> Option<SeededChildBudget> {
+    let budget = service.cost_budget()?;
+    let base = budget.config().clone();
+    let effective = match hint {
+        Some(h) if h.has_any() => budget.set_conv_config(child_conv, h.resolve_against(&base)),
+        // Explicit empty budget object or no hint → base caps, still
+        // register a snapshot so the result/witness can report the ceiling.
+        _ => base,
+    };
+    Some(SeededChildBudget {
+        max_tokens: effective.max_tokens_per_conv,
+        max_usd: effective.max_usd_per_conv,
+        max_iterations: effective.max_iterations_per_conv,
+    })
+}
+
+/// `true` when a dispatch error string is a conversation-budget trip
+/// (WEFT-322 / WEFT-631). Used to map the child outcome to
+/// [`TaskStatus::Exhausted`] instead of [`TaskStatus::Failed`].
+fn is_budget_dispatch_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("budget exceeded")
+        || lower.contains("circuit_open")
+        || lower.contains("conversation budget")
 }
 
 /// Dispatch the child conversation and record its outcome (design D3). Shared by
@@ -456,8 +523,21 @@ async fn drive_child<H: AgentLoopHandle>(
                     svc.cancel(&ctx.child_conv);
                     failed_outcome(&ctx.task_id, &ctx.child_conv, ctx.group_id.clone(), "timeout")
                 }
+                // WEFT-631: budget trip → Exhausted (not Failed) so the parent
+                // sees a partial/denial outcome with finish_reason "budget"
+                // (design D5 failure table).
                 Ok(Err(e)) => {
-                    failed_outcome(&ctx.task_id, &ctx.child_conv, ctx.group_id.clone(), &e.to_string())
+                    let msg = e.to_string();
+                    if is_budget_dispatch_error(&msg) {
+                        exhausted_budget_outcome(
+                            &ctx.task_id,
+                            &ctx.child_conv,
+                            ctx.group_id.clone(),
+                            &msg,
+                        )
+                    } else {
+                        failed_outcome(&ctx.task_id, &ctx.child_conv, ctx.group_id.clone(), &msg)
+                    }
                 }
                 Ok(Ok(res)) => outcome_from_result(&ctx.task_id, &ctx.child_conv, ctx.group_id.clone(), res),
             }
@@ -466,6 +546,11 @@ async fn drive_child<H: AgentLoopHandle>(
 
     let terminal = outcome.status;
     let is_failure = matches!(terminal, TaskStatus::Failed);
+    let is_budget_breach = matches!(terminal, TaskStatus::Exhausted)
+        && outcome
+            .finish_reason
+            .as_deref()
+            .is_some_and(|r| r == "budget" || r == "max_iterations");
     registry.set_outcome(&ctx.task_id, outcome.clone());
 
     // Forest: R_c@C --EvidenceFor--> T_user@P (design D3).
@@ -474,17 +559,33 @@ async fn drive_child<H: AgentLoopHandle>(
         // topic inherited from the goal so the result renders the same hue as its
         // parent goal in the graph view, emotion neutral.
         let result_class = spawn_result_classification(&ctx.goal, outcome.result.as_deref());
-        forest.causal.add_node(
-            format!("spawn_result:{}", ctx.task_id),
-            serde_json::json!({
-                "conv_id": ctx.child_conv,
-                "task_id": ctx.task_id,
-                "kind": "spawn_result",
-                "status": terminal.as_str(),
-                "state": "frontier",
-                "classification": result_class.to_metadata_value(),
-            }),
-        );
+        let mut meta = serde_json::json!({
+            "conv_id": ctx.child_conv,
+            "task_id": ctx.task_id,
+            "kind": "spawn_result",
+            "status": terminal.as_str(),
+            "state": "frontier",
+            "classification": result_class.to_metadata_value(),
+        });
+        // WEFT-631: surface the budget breach on the spawn_result node so
+        // governance / ADR-067 views can attribute the halt (AC #2).
+        if let Some(ref caps) = ctx.seeded_budget {
+            meta.as_object_mut()
+                .expect("meta object")
+                .insert("budget".into(), caps.to_json());
+        }
+        if is_budget_breach {
+            meta.as_object_mut()
+                .expect("meta object")
+                .insert(
+                    "budget_breach".into(),
+                    serde_json::json!({
+                        "finish_reason": outcome.finish_reason.clone().unwrap_or_default(),
+                        "error": outcome.error.clone().unwrap_or_default(),
+                    }),
+                );
+        }
+        forest.causal.add_node(format!("spawn_result:{}", ctx.task_id), meta);
         link_cross_conv(
             &forest.crossrefs,
             spawn_result_uid(&ctx.child_conv, &ctx.task_id),
@@ -494,7 +595,9 @@ async fn drive_child<H: AgentLoopHandle>(
         );
     }
 
-    // Witness the terminal transition (design D6).
+    // Witness the terminal transition (design D6). Budget breach is a
+    // completion with status exhausted + budget_breach payload — not a
+    // hard fail — so the parent can still read a partial result (D5).
     if let Some(ref chain) = chain {
         if is_failure {
             chain.append(
@@ -506,16 +609,30 @@ async fn drive_child<H: AgentLoopHandle>(
                 })),
             );
         } else {
-            chain.append(
-                WITNESS_SOURCE,
-                EVENT_COMPLETE,
-                Some(serde_json::json!({
-                    "task_id": ctx.task_id,
-                    "finish_reason": outcome.finish_reason.clone().unwrap_or_default(),
-                    "iterations": outcome.iterations,
-                    "status": terminal.as_str(),
-                })),
-            );
+            let mut payload = serde_json::json!({
+                "task_id": ctx.task_id,
+                "finish_reason": outcome.finish_reason.clone().unwrap_or_default(),
+                "iterations": outcome.iterations,
+                "status": terminal.as_str(),
+            });
+            if let Some(ref caps) = ctx.seeded_budget {
+                payload
+                    .as_object_mut()
+                    .expect("payload object")
+                    .insert("budget".into(), caps.to_json());
+            }
+            if is_budget_breach {
+                payload.as_object_mut().expect("payload object").insert(
+                    "budget_breach".into(),
+                    serde_json::json!({
+                        "verdict": "deny",
+                        "reason": outcome.error.clone().unwrap_or_else(|| {
+                            "child cost budget exceeded".into()
+                        }),
+                    }),
+                );
+            }
+            chain.append(WITNESS_SOURCE, EVENT_COMPLETE, Some(payload));
         }
     }
     debug!(task_id = %ctx.task_id, status = terminal.as_str(), "subagent child finished");
@@ -599,6 +716,29 @@ fn failed_outcome(
         status: TaskStatus::Failed,
         result: None,
         finish_reason: Some("error".into()),
+        iterations: 0,
+        group_id,
+        error: Some(reason.to_string()),
+    }
+}
+
+/// Child hit its CostBudget circuit (WEFT-631 / design D5) — status
+/// [`TaskStatus::Exhausted`] with `finish_reason: "budget"`. Partial
+/// result is absent when the trip happened before any assistant text
+/// landed; the error string carries the typed budget message for
+/// governance attribution.
+fn exhausted_budget_outcome(
+    task_id: &str,
+    child_conv: &str,
+    group_id: Option<String>,
+    reason: &str,
+) -> TaskOutcome {
+    TaskOutcome {
+        task_id: task_id.to_string(),
+        child_conv_id: child_conv.to_string(),
+        status: TaskStatus::Exhausted,
+        result: None,
+        finish_reason: Some("budget".into()),
         iterations: 0,
         group_id,
         error: Some(reason.to_string()),
@@ -717,6 +857,8 @@ fn decode_hex32(hex: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clawft_core::agent::cost_budget::{ConversationBudget, InMemoryBudgetStore};
+    use clawft_types::config::CostBudgetConfig;
     use clawft_types::event::{InboundMessage, OutboundMessage};
 
     /// Stub loop handle: echoes a canned answer, ignoring the goal text.
@@ -739,6 +881,25 @@ mod tests {
                 media: Vec::new(),
                 metadata: std::collections::HashMap::new(),
             })
+        }
+    }
+
+    /// Loop that always returns a ConversationBudgetExceeded-shaped error
+    /// (WEFT-631 over-budget path).
+    struct BudgetTripLoop;
+
+    #[async_trait]
+    impl AgentLoopHandle for BudgetTripLoop {
+        async fn handle_turn(
+            &self,
+            _msg: InboundMessage,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<OutboundMessage, String> {
+            Err(
+                "conversation budget exceeded for `sub:P:x`: tokens 100 >= limit 50 \
+                 (circuit_open until reset_budget)"
+                    .into(),
+            )
         }
     }
 
@@ -1044,5 +1205,157 @@ mod tests {
         let anchor = parent_target_uid(None, "P");
         assert_ne!(anchor.as_bytes(), real.as_bytes());
         assert_eq!(anchor.as_bytes(), parent_target_uid(Some("bad"), "P").as_bytes());
+    }
+
+    // ── WEFT-631: per-child CostBudget enforcement ─────────────────
+
+    #[test]
+    fn is_budget_dispatch_error_detects_typed_messages() {
+        assert!(is_budget_dispatch_error(
+            "conversation budget exceeded for `c1`: tokens 10 >= limit 5 (circuit_open until reset_budget)"
+        ));
+        assert!(is_budget_dispatch_error("budget exceeded"));
+        assert!(!is_budget_dispatch_error("timeout waiting for llm"));
+        assert!(!is_budget_dispatch_error("provider error: 500"));
+    }
+
+    #[tokio::test]
+    async fn budget_trip_maps_to_exhausted_with_budget_finish_reason() {
+        // Over-budget: loop returns a ConversationBudgetExceeded string;
+        // drive_child must surface Exhausted / finish_reason "budget"
+        // (design D5), not Failed.
+        let registry = Arc::new(SpawnRegistry::new());
+        let chain = Arc::new(ChainManager::new(0, 128));
+        let forest = SubagentForest {
+            causal: Arc::new(CausalGraph::new()),
+            crossrefs: Arc::new(CrossRefStore::new()),
+        };
+        let sp = DaemonSubagentSpawner::new(Arc::clone(&registry), SubagentConfig::default())
+            .with_chain(Arc::clone(&chain))
+            .with_forest(forest.clone());
+        let svc = Arc::new(AgentService::new(Arc::new(BudgetTripLoop)));
+        sp.set_service(Arc::downgrade(&svc));
+
+        let mut s = spec("P", "burn tokens");
+        s.budget = Some(SpawnBudget {
+            tokens: Some(50),
+            usd: None,
+            iterations: None,
+        });
+        let handle = sp.spawn(s).await.unwrap();
+        assert_eq!(handle.status, TaskStatus::Exhausted);
+        let outcome = handle.outcome.expect("await:true carries outcome");
+        assert_eq!(outcome.status, TaskStatus::Exhausted);
+        assert_eq!(outcome.finish_reason.as_deref(), Some("budget"));
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("budget")),
+            "error should carry budget detail: {:?}",
+            outcome.error
+        );
+
+        // Governance surface: spawn_result carries budget_breach, witness
+        // agent.complete carries verdict deny.
+        let nodes = forest.causal.nodes_for_conv(&handle.child_conv_id);
+        let result_node = nodes
+            .iter()
+            .find(|n| n.metadata.get("kind").and_then(|v| v.as_str()) == Some("spawn_result"))
+            .expect("spawn_result present");
+        assert_eq!(
+            result_node.metadata.get("status").and_then(|v| v.as_str()),
+            Some("exhausted")
+        );
+        assert!(
+            result_node.metadata.get("budget_breach").is_some(),
+            "spawn_result must surface budget_breach for governance"
+        );
+
+        let events = chain.tail(8);
+        let complete = events
+            .iter()
+            .find(|e| e.kind == EVENT_COMPLETE)
+            .expect("agent.complete witnessed");
+        let payload = complete.payload.as_ref().expect("payload");
+        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("exhausted"));
+        assert_eq!(
+            payload
+                .pointer("/budget_breach/verdict")
+                .and_then(|v| v.as_str()),
+            Some("deny")
+        );
+    }
+
+    #[tokio::test]
+    async fn under_budget_completes_normally() {
+        let registry = Arc::new(SpawnRegistry::new());
+        let store: Arc<dyn clawft_core::agent::cost_budget::BudgetStore> =
+            Arc::new(InMemoryBudgetStore::new());
+        let budget = Arc::new(ConversationBudget::new(
+            CostBudgetConfig {
+                max_tokens_per_conv: 200_000,
+                max_usd_per_conv: 1.0,
+                max_iterations_per_conv: 30,
+            },
+            store,
+        ));
+        let svc = Arc::new(
+            AgentService::new(Arc::new(StubLoop {
+                answer: "ok".into(),
+            }))
+            .with_cost_budget(Arc::clone(&budget)),
+        );
+        let sp = spawner(registry, SubagentConfig::default());
+        sp.set_service(Arc::downgrade(&svc));
+
+        let mut s = spec("P", "cheap work");
+        s.budget = Some(SpawnBudget {
+            tokens: Some(1_000),
+            usd: Some(0.10),
+            iterations: Some(5),
+        });
+        let handle = sp.spawn(s).await.unwrap();
+        assert_eq!(handle.status, TaskStatus::Completed);
+        assert_eq!(
+            handle.outcome.as_ref().and_then(|o| o.result.as_deref()),
+            Some("ok")
+        );
+        // Override was seeded onto the shared budget for the child conv.
+        let child = &handle.child_conv_id;
+        assert_eq!(budget.config_for(child).max_tokens_per_conv, 1_000);
+        assert!((budget.config_for(child).max_usd_per_conv - 0.10).abs() < 1e-9);
+        assert_eq!(budget.config_for(child).max_iterations_per_conv, 5);
+    }
+
+    #[tokio::test]
+    async fn spawn_budget_clamped_to_daemon_base() {
+        let registry = Arc::new(SpawnRegistry::new());
+        let budget = Arc::new(ConversationBudget::in_memory(CostBudgetConfig {
+            max_tokens_per_conv: 100,
+            max_usd_per_conv: 0.50,
+            max_iterations_per_conv: 3,
+        }));
+        let svc = Arc::new(
+            AgentService::new(Arc::new(StubLoop {
+                answer: "x".into(),
+            }))
+            .with_cost_budget(Arc::clone(&budget)),
+        );
+        let sp = spawner(registry, SubagentConfig::default());
+        sp.set_service(Arc::downgrade(&svc));
+
+        let mut s = spec("P", "try raise ceiling");
+        s.budget = Some(SpawnBudget {
+            tokens: Some(9_999_999),
+            usd: Some(99.0),
+            iterations: Some(999),
+        });
+        let handle = sp.spawn(s).await.unwrap();
+        let child = &handle.child_conv_id;
+        // Clamped to base — child cannot raise the process-wide ceiling.
+        assert_eq!(budget.config_for(child).max_tokens_per_conv, 100);
+        assert!((budget.config_for(child).max_usd_per_conv - 0.50).abs() < 1e-9);
+        assert_eq!(budget.config_for(child).max_iterations_per_conv, 3);
     }
 }

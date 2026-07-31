@@ -29,6 +29,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use clawft_types::config::CostBudgetConfig;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -84,8 +85,12 @@ impl SpawnBackend {
     }
 }
 
-/// Optional per-child budget overrides (design D5). Any `None` field falls back
-/// to the daemon's `CostBudgetConfig` default for that dimension.
+/// Optional per-child budget overrides (design D5 / WEFT-631). Any `None`
+/// field falls back to the daemon's [`CostBudgetConfig`] default for that
+/// dimension. Enforcement is applied by seeding the shared
+/// [`crate::agent::cost_budget::ConversationBudget`] before the child
+/// conversation is dispatched — see
+/// [`SpawnBudget::resolve_against`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpawnBudget {
     /// Max cumulative input+output tokens for the child conversation.
@@ -97,6 +102,27 @@ pub struct SpawnBudget {
     /// Max cumulative LLM iterations (round-trips) for the child conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<u32>,
+}
+
+impl SpawnBudget {
+    /// Merge this hint against the daemon base caps.
+    ///
+    /// Each set field replaces the base value for that dimension; unset
+    /// fields keep the base. The resulting caps are the ones the spawner
+    /// installs via `ConversationBudget::set_conv_config` (which further
+    /// clamps to the base so a child cannot raise the ceiling).
+    pub fn resolve_against(&self, base: &CostBudgetConfig) -> CostBudgetConfig {
+        CostBudgetConfig {
+            max_tokens_per_conv: self.tokens.unwrap_or(base.max_tokens_per_conv),
+            max_usd_per_conv: self.usd.unwrap_or(base.max_usd_per_conv),
+            max_iterations_per_conv: self.iterations.unwrap_or(base.max_iterations_per_conv),
+        }
+    }
+
+    /// `true` when at least one dimension is set (a real override hint).
+    pub fn has_any(&self) -> bool {
+        self.tokens.is_some() || self.usd.is_some() || self.iterations.is_some()
+    }
 }
 
 /// A request to spawn a subagent (design D2/D4/D5/D7).
@@ -350,4 +376,43 @@ pub trait SubagentSpawner: Send + Sync {
 
     /// Cancel a running task (explicit or parent-end cascade, design D5).
     async fn cancel(&self, task_id: &str) -> Result<(), SpawnError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_budget_resolve_against_merges_and_keeps_base() {
+        let base = CostBudgetConfig {
+            max_tokens_per_conv: 200_000,
+            max_usd_per_conv: 1.0,
+            max_iterations_per_conv: 30,
+        };
+        let only_iters = SpawnBudget {
+            tokens: None,
+            usd: None,
+            iterations: Some(3),
+        };
+        let resolved = only_iters.resolve_against(&base);
+        assert_eq!(resolved.max_tokens_per_conv, 200_000);
+        assert!((resolved.max_usd_per_conv - 1.0).abs() < 1e-9);
+        assert_eq!(resolved.max_iterations_per_conv, 3);
+        assert!(only_iters.has_any());
+        assert!(!SpawnBudget::default().has_any());
+    }
+
+    #[test]
+    fn spawn_budget_resolve_tighter_tokens() {
+        let base = CostBudgetConfig::default();
+        let hint = SpawnBudget {
+            tokens: Some(512),
+            usd: Some(0.05),
+            iterations: Some(2),
+        };
+        let r = hint.resolve_against(&base);
+        assert_eq!(r.max_tokens_per_conv, 512);
+        assert!((r.max_usd_per_conv - 0.05).abs() < 1e-9);
+        assert_eq!(r.max_iterations_per_conv, 2);
+    }
 }

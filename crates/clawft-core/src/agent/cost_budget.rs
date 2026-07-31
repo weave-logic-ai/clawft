@@ -22,9 +22,21 @@
 //! - [`ConversationBudget`] wraps a config + store and is what the
 //!   loop holds (`AgentLoop::with_cost_budget`).
 //!
+//! ## Per-child overrides (WEFT-631)
+//!
+//! Subagent spawn carries an optional budget hint (`SpawnBudget` on
+//! `SpawnSpec`). Before the child conversation is dispatched the
+//! spawner calls [`ConversationBudget::set_conv_config`] so the child
+//! is enforced against the tighter (or default) caps — not merely
+//! logged. Overrides are **clamped** to the daemon base config so a
+//! child cannot raise the ceiling. Without an override the child uses
+//! the same base caps as any other conversation (still per-`conv_id`
+//! accounting).
+//!
 //! State that survives daemon restart lives in the [`BudgetStore`];
 //! the trait shape is sync because the in-memory impl needs no I/O
 //! and the substrate impl wraps the kernel's already-sync publish.
+//! Per-conv config overrides are process-local (re-seeded on spawn).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -191,15 +203,25 @@ impl BudgetDecision {
 ///
 /// The `reset(conv_id)` API matches item 3 of WEFT-322 — invoked by
 /// the daemon's `agent.chat.reset_budget` RPC.
+///
+/// Per-child caps (WEFT-631) are installed via [`Self::set_conv_config`]
+/// before the child conversation's first LLM call.
 pub struct ConversationBudget {
     config: CostBudgetConfig,
+    /// Process-local per-`conv_id` cap overrides (WEFT-631). Clamped to
+    /// [`Self::config`] at set time. Not persisted — re-seeded on spawn.
+    overrides: Mutex<HashMap<String, CostBudgetConfig>>,
     store: Arc<dyn BudgetStore>,
 }
 
 impl ConversationBudget {
     /// Build a budget façade around the given config and store.
     pub fn new(config: CostBudgetConfig, store: Arc<dyn BudgetStore>) -> Self {
-        Self { config, store }
+        Self {
+            config,
+            overrides: Mutex::new(HashMap::new()),
+            store,
+        }
     }
 
     /// Convenience: an in-memory budget with the supplied caps.
@@ -207,9 +229,46 @@ impl ConversationBudget {
         Self::new(config, Arc::new(InMemoryBudgetStore::new()))
     }
 
-    /// Current config caps (read-only borrow).
+    /// Daemon-wide base config caps (read-only borrow).
     pub fn config(&self) -> &CostBudgetConfig {
         &self.config
+    }
+
+    /// Effective caps for `conv_id` — per-conv override if set, else base.
+    pub fn config_for(&self, conv_id: &str) -> CostBudgetConfig {
+        self.overrides
+            .lock()
+            .ok()
+            .and_then(|g| g.get(conv_id).cloned())
+            .unwrap_or_else(|| self.config.clone())
+    }
+
+    /// Install (or replace) a per-conversation cap override (WEFT-631).
+    ///
+    /// Each dimension is **clamped** to the daemon base config so a
+    /// spawn hint cannot raise the ceiling above the process-wide
+    /// policy. Returns the effective config after clamping.
+    pub fn set_conv_config(&self, conv_id: &str, cfg: CostBudgetConfig) -> CostBudgetConfig {
+        let clamped = CostBudgetConfig {
+            max_tokens_per_conv: cfg
+                .max_tokens_per_conv
+                .min(self.config.max_tokens_per_conv),
+            max_usd_per_conv: cfg.max_usd_per_conv.min(self.config.max_usd_per_conv),
+            max_iterations_per_conv: cfg
+                .max_iterations_per_conv
+                .min(self.config.max_iterations_per_conv),
+        };
+        if let Ok(mut guard) = self.overrides.lock() {
+            guard.insert(conv_id.to_string(), clamped.clone());
+        }
+        clamped
+    }
+
+    /// Drop any per-conv override for `conv_id` (best-effort).
+    pub fn clear_conv_config(&self, conv_id: &str) {
+        if let Ok(mut guard) = self.overrides.lock() {
+            guard.remove(conv_id);
+        }
     }
 
     /// Current accumulator for `conv_id`. Defaults to zero when unset.
@@ -222,13 +281,14 @@ impl ConversationBudget {
     /// Returns [`BudgetDecision::Tripped`] when:
     ///   - the circuit is already open (a prior call tripped it), OR
     ///   - any cap (tokens / usd / iterations) is at or above its
-    ///     configured limit.
+    ///     configured limit (using the per-conv override when set).
     ///
     /// Note: the iteration cap is checked at `iterations >= limit`
     /// (i.e. the `limit`th call is rejected) so configuring `30`
     /// allows the first 30 calls and rejects the 31st. Matches the
     /// way `max_tool_iterations` is interpreted elsewhere.
     pub fn check_can_call(&self, conv_id: &str) -> BudgetDecision {
+        let cfg = self.config_for(conv_id);
         let u = self.store.load(conv_id);
         if u.circuit_open {
             // Re-surface the original tripping dimension so callers
@@ -238,15 +298,9 @@ impl ConversationBudget {
                 .clone()
                 .unwrap_or_else(|| "unknown".into());
             let (limit, used) = match dim.as_str() {
-                "tokens" => (
-                    self.config.max_tokens_per_conv as f64,
-                    u.total_tokens() as f64,
-                ),
-                "usd" => (self.config.max_usd_per_conv, u.usd),
-                "iterations" => (
-                    self.config.max_iterations_per_conv as f64,
-                    u.iterations as f64,
-                ),
+                "tokens" => (cfg.max_tokens_per_conv as f64, u.total_tokens() as f64),
+                "usd" => (cfg.max_usd_per_conv, u.usd),
+                "iterations" => (cfg.max_iterations_per_conv as f64, u.iterations as f64),
                 _ => (0.0, 0.0),
             };
             return BudgetDecision::Tripped {
@@ -255,28 +309,7 @@ impl ConversationBudget {
                 used,
             };
         }
-        if u.total_tokens() >= self.config.max_tokens_per_conv {
-            return BudgetDecision::Tripped {
-                dimension: "tokens".into(),
-                limit: self.config.max_tokens_per_conv as f64,
-                used: u.total_tokens() as f64,
-            };
-        }
-        if u.usd >= self.config.max_usd_per_conv {
-            return BudgetDecision::Tripped {
-                dimension: "usd".into(),
-                limit: self.config.max_usd_per_conv,
-                used: u.usd,
-            };
-        }
-        if u.iterations >= self.config.max_iterations_per_conv {
-            return BudgetDecision::Tripped {
-                dimension: "iterations".into(),
-                limit: self.config.max_iterations_per_conv as f64,
-                used: u.iterations as f64,
-            };
-        }
-        BudgetDecision::Allowed
+        Self::check_usage_against(&cfg, &u)
     }
 
     /// Record one completed LLM call's accounting against `conv_id`.
@@ -300,30 +333,37 @@ impl ConversationBudget {
     }
 
     /// Inspect the post-call usage and return a [`BudgetDecision`]
-    /// describing whether the *latest* update crossed any cap.
+    /// describing whether the *latest* update crossed any cap for
+    /// `conv_id` (honours per-conv overrides — WEFT-631).
     ///
     /// Distinct from [`Self::check_can_call`] in that this does NOT
-    /// honour `circuit_open` — the circuit is set BY this method via
-    /// [`Self::mark_open`] when the caller acts on the result.
-    pub fn check_after_call(&self, usage: &BudgetUsage) -> BudgetDecision {
-        if usage.total_tokens() >= self.config.max_tokens_per_conv {
+    /// honour `circuit_open` — the circuit is set by the caller via
+    /// [`Self::mark_open`] when acting on the result.
+    pub fn check_after_call(&self, conv_id: &str, usage: &BudgetUsage) -> BudgetDecision {
+        let cfg = self.config_for(conv_id);
+        Self::check_usage_against(&cfg, usage)
+    }
+
+    /// Shared cap comparison for pre-call and post-call checks.
+    fn check_usage_against(cfg: &CostBudgetConfig, usage: &BudgetUsage) -> BudgetDecision {
+        if usage.total_tokens() >= cfg.max_tokens_per_conv {
             return BudgetDecision::Tripped {
                 dimension: "tokens".into(),
-                limit: self.config.max_tokens_per_conv as f64,
+                limit: cfg.max_tokens_per_conv as f64,
                 used: usage.total_tokens() as f64,
             };
         }
-        if usage.usd >= self.config.max_usd_per_conv {
+        if usage.usd >= cfg.max_usd_per_conv {
             return BudgetDecision::Tripped {
                 dimension: "usd".into(),
-                limit: self.config.max_usd_per_conv,
+                limit: cfg.max_usd_per_conv,
                 used: usage.usd,
             };
         }
-        if usage.iterations >= self.config.max_iterations_per_conv {
+        if usage.iterations >= cfg.max_iterations_per_conv {
             return BudgetDecision::Tripped {
                 dimension: "iterations".into(),
-                limit: self.config.max_iterations_per_conv as f64,
+                limit: cfg.max_iterations_per_conv as f64,
                 used: usage.iterations as f64,
             };
         }
@@ -342,12 +382,15 @@ impl ConversationBudget {
 
     /// Reset the circuit and zero the accumulator (item 3 of WEFT-322).
     ///
-    /// Invoked by the daemon RPC `agent.chat.reset_budget`. Returns the
-    /// pre-reset snapshot so the caller can audit-log what was cleared.
+    /// Also clears any per-conv override so a subsequent re-spawn can
+    /// re-seed cleanly. Invoked by the daemon RPC `agent.chat.reset_budget`.
+    /// Returns the pre-reset snapshot so the caller can audit-log what
+    /// was cleared.
     pub fn reset(&self, conv_id: &str) -> Result<BudgetUsage, String> {
         let prev = self.store.load(conv_id);
         let cleared = BudgetUsage::default();
         self.store.save(conv_id, &cleared)?;
+        self.clear_conv_config(conv_id);
         Ok(prev)
     }
 }
@@ -384,7 +427,7 @@ mod tests {
         // Two calls of 60+0 tokens each → 120 input tokens > 100.
         b.record_call("c1", 60, 0, 0.0).unwrap();
         let u = b.record_call("c1", 60, 0, 0.0).unwrap();
-        let dec = b.check_after_call(&u);
+        let dec = b.check_after_call("c1", &u);
         assert!(
             matches!(dec, BudgetDecision::Tripped { ref dimension, .. } if dimension == "tokens")
         );
@@ -401,7 +444,7 @@ mod tests {
         let b = ConversationBudget::in_memory(cfg(10_000, 0.50, 100));
         b.record_call("c1", 10, 10, 0.30).unwrap();
         let u = b.record_call("c1", 10, 10, 0.30).unwrap();
-        let dec = b.check_after_call(&u);
+        let dec = b.check_after_call("c1", &u);
         match dec {
             BudgetDecision::Tripped {
                 dimension,
@@ -414,6 +457,75 @@ mod tests {
             }
             _ => panic!("expected USD trip, got {:?}", dec),
         }
+    }
+
+    #[test]
+    fn per_conv_override_trips_tighter_cap() {
+        // WEFT-631: child with tighter token cap trips while sibling under base stays open.
+        let b = ConversationBudget::in_memory(cfg(1_000, 10.0, 100));
+        let effective = b.set_conv_config(
+            "child",
+            CostBudgetConfig {
+                max_tokens_per_conv: 50,
+                max_usd_per_conv: 10.0,
+                max_iterations_per_conv: 100,
+            },
+        );
+        assert_eq!(effective.max_tokens_per_conv, 50);
+
+        b.record_call("child", 30, 0, 0.0).unwrap();
+        let u = b.record_call("child", 30, 0, 0.0).unwrap(); // 60 >= 50
+        let dec = b.check_after_call("child", &u);
+        assert!(
+            matches!(
+                dec,
+                BudgetDecision::Tripped {
+                    ref dimension,
+                    limit,
+                    ..
+                } if dimension == "tokens" && (limit - 50.0).abs() < 1e-9
+            ),
+            "got {:?}",
+            dec
+        );
+
+        // Parent/sibling under the base 1000-token cap remains allowed.
+        b.record_call("parent", 60, 0, 0.0).unwrap();
+        assert_eq!(b.check_can_call("parent"), BudgetDecision::Allowed);
+    }
+
+    #[test]
+    fn per_conv_override_clamped_to_base() {
+        let b = ConversationBudget::in_memory(cfg(100, 1.0, 10));
+        // Attempt to raise ceiling above base — must clamp down.
+        let effective = b.set_conv_config(
+            "c1",
+            CostBudgetConfig {
+                max_tokens_per_conv: 9_999,
+                max_usd_per_conv: 99.0,
+                max_iterations_per_conv: 999,
+            },
+        );
+        assert_eq!(effective.max_tokens_per_conv, 100);
+        assert!((effective.max_usd_per_conv - 1.0).abs() < 1e-9);
+        assert_eq!(effective.max_iterations_per_conv, 10);
+        assert_eq!(b.config_for("c1").max_tokens_per_conv, 100);
+    }
+
+    #[test]
+    fn reset_clears_override() {
+        let b = ConversationBudget::in_memory(cfg(1_000, 10.0, 100));
+        b.set_conv_config(
+            "c1",
+            CostBudgetConfig {
+                max_tokens_per_conv: 10,
+                max_usd_per_conv: 10.0,
+                max_iterations_per_conv: 100,
+            },
+        );
+        assert_eq!(b.config_for("c1").max_tokens_per_conv, 10);
+        b.reset("c1").unwrap();
+        assert_eq!(b.config_for("c1").max_tokens_per_conv, 1_000);
     }
 
     #[test]

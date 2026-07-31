@@ -2569,7 +2569,7 @@ impl<P: Platform> AgentLoop<P> {
                         // typed error before any tool dispatch — preserving
                         // the contract that no further LLM work happens
                         // once the budget trips.
-                        let post = budget.check_after_call(&usage);
+                        let post = budget.check_after_call(conv_id, &usage);
                         if let Some(err) = post.into_error(conv_id) {
                             warn!(
                                 conv_id,
