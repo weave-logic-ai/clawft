@@ -126,16 +126,27 @@ pub fn record_gate_denial_streak(
 /// Outcome of an [`EffectGate::check`] call.
 ///
 /// The `Permit` token is opaque — Phase D2's kernel-backed gate puts
-/// the TileZero permit bytes here (encoded as base64 for readability).
-/// Today the only producer is [`NoopGate`], which uses the literal
-/// string `"noop"`.
+/// the TileZero permit bytes here (hex-encoded for readability).
+/// [`NoopGate`] uses the literal string `"noop"`.
+///
+/// WEFT-341: the agent loop no longer discards this string. On
+/// `Permit` it mints a typed
+/// [`ToolPermitToken`](crate::tools::ToolPermitToken) via the
+/// registry's [`PermitIssuer`](crate::tools::PermitIssuer) and passes
+/// it to
+/// [`ToolRegistry::execute_with_permit`](crate::tools::registry::ToolRegistry::execute_with_permit)
+/// so tools can present proof-of-permission.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum GateDecision {
     /// Action permitted; carry the opaque token forward to the
-    /// witness chain entry the loop will write at audit time.
+    /// per-tool [`ToolPermitToken`](crate::tools::ToolPermitToken)
+    /// (and any witness chain entry written at audit time).
     Permit {
-        /// Opaque permit token — implementation defined.
+        /// Opaque gate payload — implementation defined (`"noop"`,
+        /// hex-encoded TileZero bytes, `"kernel-permit"`, …). Bound
+        /// into the per-tool permit MAC by
+        /// [`PermitIssuer::issue`](crate::tools::PermitIssuer::issue).
         token: String,
     },
     /// Decision deferred; carry the human-readable reason so the

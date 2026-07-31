@@ -2201,10 +2201,13 @@ impl<P: Platform> AgentLoop<P> {
     /// same policy enforcement. Returns the JSON-encoded tool result
     /// body (the same shape `run_tool_loop` previously inlined):
     ///
-    /// * `EffectGate::Permit` → tool executes, success result is
-    ///   serialized after [`crate::security::truncate_result`]
-    ///   clamps it to [`MAX_TOOL_RESULT_BYTES`]; failures become
-    ///   `{"error": "..."}`.
+    /// * `EffectGate::Permit` → mints a per-tool
+    ///   [`ToolPermitToken`](crate::tools::ToolPermitToken) (WEFT-341)
+    ///   and passes it to
+    ///   [`ToolRegistry::execute_with_permit`](crate::tools::registry::ToolRegistry::execute_with_permit);
+    ///   success result is serialized after
+    ///   [`crate::security::truncate_result`] clamps it to
+    ///   [`MAX_TOOL_RESULT_BYTES`]; failures become `{"error": "..."}`.
     /// * `EffectGate::Deny`   → no tool dispatch; returns
     ///   `{"denied": true, "reason": ...}` so the LLM sees a
     ///   policy decision distinct from a runtime fault.
@@ -2213,7 +2216,7 @@ impl<P: Platform> AgentLoop<P> {
     ///   [`FINISH_REASON_DEFERRED`] + [`DeferredActionEvent`] (WEFT-258).
     ///   With a [`super::defer::DeferInteractor`] (WEFT-331): suspends
     ///   until allow / deny / cancel / timeout; allow falls through
-    ///   to sandbox + dispatch.
+    ///   to sandbox + dispatch (token minted as `"defer-allow"`).
     /// * Sandbox denial       → returns `{"error": "sandbox denied: ..."}`.
     ///
     /// The helper applies the [`MAX_TOOL_RESULT_BYTES`] truncation
@@ -2235,10 +2238,11 @@ impl<P: Platform> AgentLoop<P> {
         // 1. EffectGate (policy) check.
         let ev = effect_for_tool(tool_name, input);
         let action = format!("tool.{tool_name}");
-        match self.gate.check(agent_id, &action, &ev).await {
-            GateDecision::Permit { .. } => {
-                // fallthrough to sandbox + dispatch
-            }
+        // Gate payload carried into the per-tool Permit token (WEFT-341).
+        // Human-allow on Defer uses a distinct sentinel so the proof
+        // still binds to this dispatch even without a gate receipt.
+        let gate_token: String = match self.gate.check(agent_id, &action, &ev).await {
+            GateDecision::Permit { token } => token,
             GateDecision::Deny { reason } => {
                 warn!(tool = %tool_name, reason = %reason, "gate: tool dispatch denied");
                 return serde_json::json!({
@@ -2284,6 +2288,7 @@ impl<P: Platform> AgentLoop<P> {
                         conv_id,
                         "defer allowed by human — proceeding with tool"
                     );
+                    "defer-allow".into()
                 } else {
                     warn!(tool = %tool_name, reason = %reason, "gate: tool dispatch deferred");
                     return serde_json::json!({
@@ -2293,7 +2298,7 @@ impl<P: Platform> AgentLoop<P> {
                     .to_string();
                 }
             }
-        }
+        };
 
         // 2. Sandbox (allowlist) check.
         if let Some(enforcer) = self.sandbox.as_ref()
@@ -2306,14 +2311,20 @@ impl<P: Platform> AgentLoop<P> {
             .to_string();
         }
 
-        // 3. Dispatch through the registry, with truncation applied
-        //    to success results. Errors stay short by definition.
+        // 3. Mint per-tool Permit token (WEFT-341) and dispatch through
+        //    the registry. The registry verifies MAC / tool / TTL when
+        //    a token is presented; tools may also re-present via
+        //    `tools::present_proof`. Success results are truncated.
         //    WEFT-651: InvalidArgs echoes the tool parameter schema so
         //    the model can correct the call instead of blind-retrying
         //    (the canvas missing-content ×20 incident).
+        let permit = self
+            .tools
+            .permit_issuer()
+            .issue(agent_id, tool_name, &gate_token);
         match self
             .tools
-            .execute(tool_name, input.clone(), permissions)
+            .execute_with_permit(tool_name, input.clone(), permissions, Some(&permit))
             .await
         {
             Ok(val) => {

@@ -62,10 +62,10 @@ impl KernelEffectGate {
 }
 
 /// Map the kernel's `Permit { token: Option<Vec<u8>> }` to core's
-/// `Permit { token: String }`. The token is opaque to the loop today
-/// (Phase D2 plan: "ignore the token; tracked as v1.1 follow-up");
-/// hex-encoding keeps the witness payload roundtrippable when a
-/// future commit threads it into `tools.execute`.
+/// `Permit { token: String }`. Hex-encoding keeps the witness payload
+/// roundtrippable; WEFT-341 threads the resulting string into a
+/// per-tool [`ToolPermitToken`](clawft_core::tools::ToolPermitToken)
+/// via `ToolRegistry::execute_with_permit`.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {

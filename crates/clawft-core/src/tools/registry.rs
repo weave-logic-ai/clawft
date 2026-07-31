@@ -16,6 +16,8 @@ use tracing::debug;
 
 use clawft_types::routing::UserPermissions;
 
+use super::permit::{present_proof_at, PermitIssuer, PermitProofError, ToolPermitToken};
+
 #[cfg(feature = "native")]
 use std::path::PathBuf;
 #[cfg(feature = "native")]
@@ -379,6 +381,14 @@ pub fn check_tool_permission(
     Ok(())
 }
 
+/// Map a [`PermitProofError`] into [`ToolError::PermissionDenied`].
+fn permit_to_tool_error(tool: &str, err: PermitProofError) -> ToolError {
+    ToolError::PermissionDenied {
+        tool: tool.to_string(),
+        reason: format!("permit proof failed: {err}"),
+    }
+}
+
 /// Extract permission metadata from an MCP tool declaration JSON.
 ///
 /// MCP tool declarations may include:
@@ -476,18 +486,64 @@ pub trait Tool: Send + Sync {
 ///
 /// Provides lookup, listing, schema generation in OpenAI function calling
 /// format, and dispatch-by-name execution.
+///
+/// # Proof-of-permission (WEFT-341)
+///
+/// After a gate check permits a tool, the agent loop issues a
+/// [`ToolPermitToken`] via [`Self::permit_issuer`] and passes it to
+/// [`Self::execute_with_permit`]. Verification is optional by default
+/// (`require_permit = false`): callers that pass `None` keep the
+/// pre-WEFT-341 behaviour. When a token *is* presented it is always
+/// checked (MAC, tool binding, agent binding, TTL).
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     metadata: HashMap<String, ToolMetadata>,
+    /// Shared issuer for minting / verifying per-tool permits.
+    permit_issuer: Arc<PermitIssuer>,
+    /// When `true`, [`Self::execute_with_permit`] rejects a missing
+    /// token. Default `false` for back-compat.
+    require_permit: bool,
 }
 
 impl ToolRegistry {
-    /// Create an empty tool registry.
+    /// Create an empty tool registry with an ephemeral permit issuer.
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
             metadata: HashMap::new(),
+            permit_issuer: Arc::new(PermitIssuer::ephemeral()),
+            require_permit: false,
         }
+    }
+
+    /// Replace the permit issuer (share one with the agent loop so
+    /// issued tokens verify against the same key).
+    pub fn with_permit_issuer(mut self, issuer: Arc<PermitIssuer>) -> Self {
+        self.permit_issuer = issuer;
+        self
+    }
+
+    /// Install a permit issuer after construction.
+    pub fn set_permit_issuer(&mut self, issuer: Arc<PermitIssuer>) {
+        self.permit_issuer = issuer;
+    }
+
+    /// Shared [`PermitIssuer`] for minting tokens that this registry
+    /// will accept.
+    pub fn permit_issuer(&self) -> Arc<PermitIssuer> {
+        Arc::clone(&self.permit_issuer)
+    }
+
+    /// Require a valid permit token on every
+    /// [`Self::execute_with_permit`] call (strict mode).
+    pub fn with_require_permit(mut self, require: bool) -> Self {
+        self.require_permit = require;
+        self
+    }
+
+    /// Whether a permit token is required on execute.
+    pub fn require_permit(&self) -> bool {
+        self.require_permit
     }
 
     /// Register a tool in the registry.
@@ -631,6 +687,9 @@ impl ToolRegistry {
 
     /// Execute a tool by name with optional permission enforcement.
     ///
+    /// Equivalent to [`Self::execute_with_permit`] with `permit = None`
+    /// (back-compat for callers that do not yet present a gate token).
+    ///
     /// When `permissions` is `None`, all tools are allowed (backward
     /// compatibility for StaticRouter mode and unit tests).
     /// When `Some`, permissions are checked before the tool runs.
@@ -651,11 +710,57 @@ impl ToolRegistry {
         args: serde_json::Value,
         permissions: Option<&UserPermissions>,
     ) -> Result<serde_json::Value, ToolError> {
+        self.execute_with_permit(name, args, permissions, None).await
+    }
+
+    /// Execute a tool by name with optional permission enforcement and
+    /// an optional per-tool [`ToolPermitToken`] (WEFT-341).
+    ///
+    /// # Proof-of-permission
+    ///
+    /// - `permit = None` and `require_permit = false` → skip (back-compat)
+    /// - `permit = None` and `require_permit = true`  →
+    ///   [`ToolError::PermissionDenied`] (missing)
+    /// - `permit = Some(_)` → verify MAC / tool / agent / TTL; any
+    ///   failure becomes [`ToolError::PermissionDenied`]
+    ///
+    /// Tools themselves may also call
+    /// [`super::permit::present_proof`] with the same token if they
+    /// re-check mid-execution; the registry check is the choke-point
+    /// so most tools can ignore the token.
+    pub async fn execute_with_permit(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        permissions: Option<&UserPermissions>,
+        permit: Option<&ToolPermitToken>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Look up the tool first (NotFound fires before PermissionDenied).
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
+
+        // WEFT-341: proof-of-permission (optional unless require_permit).
+        // Agent id for the check comes from the token when present so a
+        // forged agent cannot swap identities after issue; when no token
+        // is presented the agent_id argument is unused by present_proof.
+        let agent_for_proof = permit.map(|t| t.agent_id.as_str()).unwrap_or("");
+        if let Err(err) = present_proof_at(
+            &self.permit_issuer,
+            permit,
+            agent_for_proof,
+            name,
+            self.require_permit,
+            // Use live clock; tests drive time via issue_at + short TTLs
+            // or by constructing tokens directly against the issuer.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        ) {
+            return Err(permit_to_tool_error(name, err));
+        }
 
         // Permission check (only when permissions are provided).
         if let Some(perms) = permissions {
@@ -710,7 +815,12 @@ impl ToolRegistry {
     /// This is used by the kernel supervisor to create per-agent
     /// tool registries that respect capability restrictions.
     pub fn filtered_tools(&self, allow: &[String], deny: &[String]) -> Self {
-        let mut filtered = Self::new();
+        let mut filtered = Self {
+            tools: HashMap::new(),
+            metadata: HashMap::new(),
+            permit_issuer: Arc::clone(&self.permit_issuer),
+            require_permit: self.require_permit,
+        };
         for (name, tool) in &self.tools {
             // Check deny list first
             if deny.iter().any(|d| d == name) {
@@ -739,6 +849,8 @@ impl ToolRegistry {
         Self {
             tools: self.tools.clone(),
             metadata: self.metadata.clone(),
+            permit_issuer: Arc::clone(&self.permit_issuer),
+            require_permit: self.require_permit,
         }
     }
 }
@@ -1616,6 +1728,134 @@ mod tests {
             result.unwrap_err(),
             ToolError::PermissionDenied { .. }
         ));
+    }
+
+    // ── WEFT-341: per-tool Permit token on execute ─────────────────
+
+    #[tokio::test]
+    async fn execute_with_permit_allow_shape() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        let issuer = registry.permit_issuer();
+        let token = issuer.issue("agent-1", "echo", "noop");
+
+        let result = registry
+            .execute_with_permit(
+                "echo",
+                serde_json::json!({ "text": "hi" }),
+                None,
+                Some(&token),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["output"], "hi");
+    }
+
+    #[tokio::test]
+    async fn execute_with_permit_none_is_back_compat() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        let result = registry
+            .execute_with_permit("echo", serde_json::json!({ "text": "x" }), None, None)
+            .await
+            .unwrap();
+        assert_eq!(result["output"], "x");
+    }
+
+    #[tokio::test]
+    async fn execute_with_permit_deny_tool_mismatch() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        let issuer = registry.permit_issuer();
+        // Token bound to a different tool name.
+        let token = issuer.issue("agent-1", "write_file", "noop");
+
+        let err = registry
+            .execute_with_permit(
+                "echo",
+                serde_json::json!({ "text": "x" }),
+                None,
+                Some(&token),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "echo");
+                assert!(
+                    reason.contains("tool mismatch") || reason.contains("permit proof failed"),
+                    "reason={reason}"
+                );
+            }
+            other => panic!("expected PermissionDenied, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_with_permit_deny_invalid_mac() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        let issuer = registry.permit_issuer();
+        let mut token = issuer.issue("agent-1", "echo", "noop");
+        token.mac = "ff".repeat(32);
+
+        let err = registry
+            .execute_with_permit(
+                "echo",
+                serde_json::json!({ "text": "x" }),
+                None,
+                Some(&token),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
+        assert!(err.to_string().contains("MAC") || err.to_string().contains("permit"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_permit_expired_shape() {
+        let mut registry = ToolRegistry::new().with_permit_issuer(Arc::new(
+            PermitIssuer::from_key(b"reg-test").with_ttl_ns(1),
+        ));
+        registry.register(Arc::new(EchoTool));
+        let issuer = registry.permit_issuer();
+        // Issue with ttl_ns=1 at t=0; by wall clock (>> 1 ns later) it's expired.
+        let token = issuer.issue_at("agent-1", "echo", "noop", 0, 1);
+
+        let err = registry
+            .execute_with_permit(
+                "echo",
+                serde_json::json!({ "text": "x" }),
+                None,
+                Some(&token),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::PermissionDenied { reason, .. } => {
+                assert!(
+                    reason.contains("expired"),
+                    "expected expired shape in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected PermissionDenied, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_require_permit_missing_denies() {
+        let mut registry = ToolRegistry::new().with_require_permit(true);
+        registry.register(Arc::new(EchoTool));
+        let err = registry
+            .execute_with_permit("echo", serde_json::json!({ "text": "x" }), None, None)
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::PermissionDenied { reason, .. } => {
+                assert!(reason.contains("missing"), "reason={reason}");
+            }
+            other => panic!("expected PermissionDenied, got {other}"),
+        }
     }
 
     // ── WEFT-37: per-path advisory locks ───────────────────────────
