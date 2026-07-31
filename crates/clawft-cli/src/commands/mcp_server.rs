@@ -72,6 +72,7 @@ use clawft_services::mcp::session_cap::{
 
 use super::mcp_attach::{AttachToolProvider, DaemonAttachFacade};
 use super::mcp_profile::{filter_tools_by_profile, ProfileSet};
+use super::mcp_window::{WindowIntentToolProvider, WINDOW_TOOL_NAMES};
 use super::{load_config, CoreToolRegisterOpts};
 
 /// Arguments for the `weft mcp-server` subcommand.
@@ -225,6 +226,32 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
         None
     };
 
+    // ── WindowIntent tools (ADR-075 G3 / ADR-076 C4) ─────────────────
+    // Always register when the profile allows any window_* tool. Headless
+    // mcp-server still enqueues onto an in-process bus (submit_mcp) so
+    // clients get a stable wire; a live Agent Workspace drains the same
+    // ExternalIntentTx shape when co-located later.
+    let window_provider = {
+        let allows = |name: &str| profiles.allows_tool(name);
+        let (provider, _bus) = WindowIntentToolProvider::local_with_profile(allows);
+        let names: Vec<String> = provider.list_tools().iter().map(|t| t.name.clone()).collect();
+        if names.is_empty() {
+            info!(
+                profile = %profiles.label(),
+                catalog = ?WINDOW_TOOL_NAMES,
+                "window_* tools excluded by profile"
+            );
+            None
+        } else {
+            info!(
+                tools = ?names,
+                catalog = ?WINDOW_TOOL_NAMES,
+                "WindowIntent MCP tools registered (submit_mcp)"
+            );
+            Some(provider)
+        }
+    };
+
     let platform = Arc::new(NativePlatform::new());
     let config = load_config(&*platform, args.config.as_deref()).await?;
 
@@ -291,6 +318,9 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
     let mut composite = CompositeToolProvider::new();
     if let Some(ap) = attach_provider {
         composite.register(Box::new(ap));
+    }
+    if let Some(wp) = window_provider {
+        composite.register(Box::new(wp));
     }
     composite.register(Box::new(provider));
 

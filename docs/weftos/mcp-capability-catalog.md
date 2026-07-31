@@ -28,11 +28,12 @@ Status: `planned` = not yet stable on MCP wire; `partial` = exists under differe
 | `agents.spawn` | Write | `agent_spawn` | `agent.spawn` | — | control, default | no | planned | visible-agent policy ADR-073 |
 | `agents.stop` | Write | `agent_stop` | `agent.stop` | — | control, default | no | planned | |
 | `agents.chat` | Chat | `agent_chat` | `agent.chat` | — | control (opt) | no | planned | high token cost; profile flag |
-| `window.spawn` | Write | `window_spawn` | UI bus | — | control | yes (shell) | planned | WindowIntent |
-| `window.focus` | Write | `window_focus` | UI bus | — | control | yes | planned | |
-| `window.arrange` | Write | `window_arrange` | UI bus | — | control | yes | planned | |
-| `window.close` | Write | `window_close` | UI bus | — | control | yes | planned | |
-| `window.summarize` | Write | `window_summarize` | UI bus | — | control | yes | planned | |
+| `window.spawn` | Write | `window_spawn` | UI bus | — | control, default | yes (shell) | live | WindowIntent via submit_mcp (WEFT-695/702) |
+| `window.focus` | Write | `window_focus` | UI bus | — | control, default | yes | live | |
+| `window.arrange` | Write | `window_arrange` | UI bus | — | control, default | yes | live | |
+| `window.close` | Write | `window_close` | UI bus | — | control, default | yes | live | |
+| `window.summarize` | Write | `window_summarize` | UI bus | — | control, default | yes | live | |
+| `window.attach` | Write | `window_attach` | UI bus | — | control, default | yes | live | tool pane ↔ agent pane |
 | `substrate.read` | Read | `substrate_read` | `substrate.read` | — | control | no | planned | |
 | `substrate.list` | Read | `substrate_list` | `substrate.list` | — | control | no | planned | |
 | `mcp.list` | Read | `mcp_list` | `mcp.list` | — | control | no | planned | registry inspect |
@@ -102,3 +103,4 @@ When adding a tool or weave method:
 
 - 2026-07-30: Seeded from ADR-076 audit (Grok MCP surface review).
 - 2026-07-30: WEFT-700 (C2) — public wire: flat names, `process_spawn`, skill façades, `--reexport-mcp`.
+- 2026-07-31: WEFT-695 / WEFT-702 (C4) — `window_*` MCP tools → `WindowIntent` (`submit_mcp`); media profile gating for `voice_*`/`render_ui` asserted; catalog rows `live`.

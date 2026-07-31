@@ -26,6 +26,8 @@ pub mod mcp_attach;
 pub mod mcp_profile;
 #[cfg(feature = "services")]
 pub mod mcp_server;
+#[cfg(feature = "services")]
+pub mod mcp_window;
 pub mod memory_cmd;
 pub mod onboard;
 pub mod plugin_registry;

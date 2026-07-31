@@ -58,6 +58,8 @@ pub mod secret;
 pub mod security;
 pub mod session;
 pub mod skill;
+/// WindowIntent bus (ADR-073 Phase D / WEFT-688) — shared by GUI + MCP.
+pub mod window_intent;
 pub mod workspace;
 
 pub use audio_buffer::{

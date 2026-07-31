@@ -180,6 +180,7 @@ clawft-app = { workspace = true }
 clawft-surface = { workspace = true }
 # WEFT-427: shared canon primitives (re-exported as `crate::canon`).
 clawft-canon = { workspace = true }
+clawft-types = { workspace = true }
 # ── Native-only dependencies ─────────────────────────────────────────
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

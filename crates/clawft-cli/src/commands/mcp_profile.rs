@@ -212,6 +212,8 @@ mod tests {
             "agent_spawn",
             "status",
             "skill_get",
+            "window_spawn",
+            "window_focus",
             "claude-flow__swarm_init",
         ]
         .into_iter()
@@ -277,6 +279,8 @@ mod tests {
         assert!(n.contains(&"agent_spawn"));
         assert!(n.contains(&"status"));
         assert!(n.contains(&"skill_get"));
+        assert!(n.contains(&"window_spawn"));
+        assert!(n.contains(&"window_focus"));
 
         assert!(!n.contains(&"voice_listen"));
         assert!(!n.contains(&"voice_speak"));
@@ -327,6 +331,13 @@ mod tests {
             "memory_write",
             "web_search",
             "web_fetch",
+            // WEFT-695 / WEFT-702 — window_* on control ∪ default
+            "window_spawn",
+            "window_focus",
+            "window_arrange",
+            "window_close",
+            "window_summarize",
+            "window_attach",
         ];
         for name in catalog_default_live {
             assert!(
