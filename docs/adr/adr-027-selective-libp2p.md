@@ -69,3 +69,12 @@ A node can be built with `mesh` only (manual peer configuration, no DHT) or `mes
 - The full libp2p framework remains available as a future option if the selective composition becomes too costly to maintain; migration would involve replacing the custom glue with libp2p's `Swarm`
 - iroh could be reconsidered if WeftOS drops non-QUIC transports in a future major version
 - The `libp2p-kad` and `libp2p-mdns` versions (0.46) should track libp2p releases to benefit from upstream bug fixes and Kademlia protocol improvements
+
+## WEFT-111 confirmation (2026-07-31)
+
+K5 symposium Q4 asked whether to stick with full `libp2p-kad` or build a
+lighter custom DHT. **Decision: keep selective `libp2p-kad` as specified
+above.** A lighter DHT is not scheduled for 0.8.x / early 0.9.x; re-open
+only after K6 mesh has field telemetry showing that kad cost or protocol
+friction justifies a custom design. See
+`docs/plans/decisions/0.8-decision-batch-open-questions.md` (WEFT-111).

@@ -886,6 +886,52 @@ mod tests {
         assert!(svc.validate_token(&token.token_id).is_ok());
     }
 
+    /// WEFT-544: canonical "may rotate but not revoke" policy —
+    /// separate gate actions `auth.credential.rotate` (allow) vs
+    /// `auth.token.revoke` (deny). Existing DSL is sufficient; no new
+    /// construct. See docs/plans/decisions/0.8-decision-batch-open-questions.md.
+    #[cfg(feature = "exochain")]
+    #[test]
+    fn rotate_allowed_revoke_denied_policy() {
+        use crate::gate::{GateBackend, GateDecision};
+        use std::sync::Arc;
+
+        struct RotateAllowRevokeDeny;
+        impl GateBackend for RotateAllowRevokeDeny {
+            fn check(&self, _source: &str, action: &str, _ctx: &serde_json::Value) -> GateDecision {
+                if action == "auth.token.revoke" {
+                    GateDecision::Deny {
+                        reason: "policy: agent may rotate but not revoke".into(),
+                        receipt: None,
+                    }
+                } else {
+                    // auth.credential.rotate, auth.token.issue, register, …
+                    GateDecision::Permit { token: None }
+                }
+            }
+        }
+
+        let svc = AuthService::new_default()
+            .with_governance_gate(Arc::new(RotateAllowRevokeDeny) as Arc<dyn GateBackend>);
+        svc.register_credential("cred", CredentialType::ApiKey, b"old", vec![])
+            .unwrap();
+        let req = make_request("cred", "agent", 1);
+        let token = svc.request_token(&req).unwrap();
+
+        // Rotate succeeds under this policy.
+        svc.rotate_credential("cred", b"new").unwrap();
+
+        // Revoke is denied; token remains valid.
+        let err = svc.revoke_token(&token.token_id).unwrap_err();
+        match err {
+            KernelError::GovernanceDenied(msg) => {
+                assert!(msg.contains("token revocation denied"), "got: {msg}");
+            }
+            other => panic!("expected GovernanceDenied, got {other:?}"),
+        }
+        assert!(svc.validate_token(&token.token_id).is_ok());
+    }
+
     #[test]
     fn credential_rotation_preserves_tokens() {
         let svc = AuthService::new_default();

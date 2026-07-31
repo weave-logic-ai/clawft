@@ -2,7 +2,9 @@
 //!
 //! A faithful port of `nanobot/config/schema.py`. All structs support
 //! both `snake_case` and `camelCase` field names in JSON via `#[serde(alias)]`.
-//! Unknown fields are silently ignored for forward compatibility.
+//! Unknown fields are silently ignored for forward compatibility by default.
+//! Opt-in top-level strict mode: [`Config::from_json_str_strict`] /
+//! env `WEFT_CONFIG_DENY_UNKNOWN=1` (WEFT-20).
 //!
 //! # Module Structure
 //!
@@ -106,6 +108,91 @@ pub struct Config {
     /// Skill discovery and autonomous skill-generation settings (WEFT-67).
     #[serde(default)]
     pub skills: SkillsConfig,
+}
+
+/// Known top-level keys of [`Config`] (snake_case + camelCase aliases).
+///
+/// Used by WEFT-20 opt-in `deny_unknown` mode. Nested objects still ignore
+/// unknown keys for forward compatibility.
+pub const CONFIG_TOP_LEVEL_KEYS: &[&str] = &[
+    "agents",
+    "channels",
+    "providers",
+    "gateway",
+    "tools",
+    "delegation",
+    "routing",
+    "agent_routing",
+    "agentRouting",
+    "voice",
+    "kernel",
+    "pipeline",
+    "plugins",
+    "skills",
+];
+
+/// Whether to reject unknown **top-level** config keys (WEFT-20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DenyUnknown {
+    /// Silent ignore (default; forward-compat).
+    #[default]
+    No,
+    /// Reject unknown top-level keys with [`ConfigParseError::UnknownField`].
+    Yes,
+}
+
+/// Errors from [`Config::from_json_str`] / strict parse helpers.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigParseError {
+    /// JSON syntax or type mismatch from serde.
+    #[error("config JSON parse error: {0}")]
+    Serde(#[from] serde_json::Error),
+    /// Opt-in deny-unknown: stray top-level key (WEFT-20).
+    #[error("unknown top-level config key `{0}` (set WEFT_CONFIG_DENY_UNKNOWN only when you want this check)")]
+    UnknownField(String),
+}
+
+impl Config {
+    /// Parse config JSON with default behaviour (unknown top-level keys ignored).
+    pub fn from_json_str(s: &str) -> Result<Self, ConfigParseError> {
+        Self::from_json_str_with(s, DenyUnknown::No)
+    }
+
+    /// Parse config JSON rejecting unknown top-level keys (WEFT-20).
+    pub fn from_json_str_strict(s: &str) -> Result<Self, ConfigParseError> {
+        Self::from_json_str_with(s, DenyUnknown::Yes)
+    }
+
+    /// Parse config JSON with explicit [`DenyUnknown`] policy.
+    pub fn from_json_str_with(s: &str, deny: DenyUnknown) -> Result<Self, ConfigParseError> {
+        let value: serde_json::Value = serde_json::from_str(s)?;
+        if deny == DenyUnknown::Yes
+            && let serde_json::Value::Object(map) = &value
+        {
+            for key in map.keys() {
+                if !CONFIG_TOP_LEVEL_KEYS.contains(&key.as_str()) {
+                    return Err(ConfigParseError::UnknownField(key.clone()));
+                }
+            }
+        }
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// True when env requests strict top-level key checking (WEFT-20).
+    ///
+    /// Honours `WEFT_CONFIG_DENY_UNKNOWN` or legacy `CLAWFT_CONFIG_DENY_UNKNOWN`.
+    /// Values `1`, `true`, `yes` (case-insensitive) enable strict mode.
+    pub fn deny_unknown_from_env() -> DenyUnknown {
+        for var in ["WEFT_CONFIG_DENY_UNKNOWN", "CLAWFT_CONFIG_DENY_UNKNOWN"] {
+            if let Ok(v) = std::env::var(var) {
+                let t = v.trim();
+                if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
+                    return DenyUnknown::Yes;
+                }
+            }
+        }
+        DenyUnknown::No
+    }
 }
 
 // ── Pipeline ────────────────────────────────────────────────────────────
@@ -1054,6 +1141,29 @@ mod tests {
         assert_eq!(cfg.agents.defaults.model, "test");
         assert!(!cfg.channels.telegram.enabled);
         assert_eq!(cfg.providers.anthropic.api_key.expose(), "k");
+        // WEFT-20 default path: helper also ignores.
+        let cfg2 = Config::from_json_str(json).unwrap();
+        assert_eq!(cfg2.agents.defaults.model, "test");
+    }
+
+    /// WEFT-20: strict mode rejects unknown top-level keys.
+    #[test]
+    fn unknown_fields_rejected_when_deny_unknown() {
+        let json = r#"{
+            "agents": { "defaults": { "model": "test" } },
+            "unknown_top_level": true
+        }"#;
+        let err = Config::from_json_str_strict(json).unwrap_err();
+        match err {
+            ConfigParseError::UnknownField(k) => assert_eq!(k, "unknown_top_level"),
+            other => panic!("expected UnknownField, got {other:?}"),
+        }
+        // Known keys still parse under strict mode.
+        let ok = Config::from_json_str_strict(
+            r#"{ "agents": { "defaults": { "model": "m" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(ok.agents.defaults.model, "m");
     }
 
     #[test]

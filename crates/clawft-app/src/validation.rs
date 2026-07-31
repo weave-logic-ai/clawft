@@ -78,12 +78,10 @@ pub enum ValidationError {
     #[error("narration key `{key}` is not in `subscriptions`")]
     NarrationKeyNotSubscribed { key: String },
 
-    /// ADR-015 rule 1 (value set) — a `supported_modes` entry used an
-    /// unknown variant. Mirrors serde's own rejection and is here for
-    /// callers constructing manifests in Rust who might bypass the
-    /// deserialiser later.
-    #[error("unknown mode variant `{0}`")]
-    UnknownMode(String),
+    // WEFT-410: `UnknownMode` removed. `Mode` is a closed Rust enum;
+    // serde rejects unknown wire values at parse time, and Rust-built
+    // manifests cannot hold an unknown variant. See
+    // docs/plans/decisions/0.8-decision-batch-open-questions.md.
 }
 
 /// Validate a manifest against ADR-015 §Validation rules 1–9 using

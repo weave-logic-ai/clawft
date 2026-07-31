@@ -106,6 +106,13 @@ pub struct FitnessScorerWeights {
 }
 
 impl Default for FitnessScorerWeights {
+    /// Hand-tuned Level-1 GEPA defaults (WEFT-53).
+    ///
+    /// **Frozen for 0.8.x** — do not replace with EML online learning
+    /// without a measured offline (task, component) dataset and an
+    /// explicit 0.9.x+ design. Operators may override via
+    /// [`FitnessScorerConfig`]; the constants below remain the product
+    /// baseline. See `docs/plans/decisions/0.8-decision-batch-open-questions.md`.
     fn default() -> Self {
         Self {
             task_completion: 0.4,
