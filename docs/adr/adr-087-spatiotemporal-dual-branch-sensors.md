@@ -82,13 +82,18 @@ This is **optional** and must respect the tick budget (ADR-047). It does **not**
 require GraphSAGE in-kernel for v0 of the EML path — feature split + EML fusion
 is enough for an experiment.
 
-### 4. Relationship to BVH / world model
+### 4. Relationship to BVH / world model / Graph Views
 
 - **ADR-056 BVH** answers geometric queries; this ADR answers **learned**
   spatio-temporal representation for sensors.
 - They compose: BVH / spatial index can supply neighborhoods; dual-branch model
   scores or estimates properties over those neighborhoods.
 - **Not** a replacement for HNSW semantic search (ADR-011).
+- **Operational home for fusion:** dual-branch outputs are **features on a
+  purpose-scoped Graph View** (live multi-source graph — ADR-095 §1b,
+  `docs/research/graph-views.md` F1–F10), not a free-floating global GNN over
+  every sensor. Batch identity (WCC) remains structural; dual-branch is the
+  *learned* branch of fusion inside that View.
 
 ### 5. Explicit non-goals
 

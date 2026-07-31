@@ -82,15 +82,23 @@ WeftOS **adopts** the following split as the long-horizon architecture for graph
 
 **Write-back contract:** batch jobs produce **node features** (e.g. `component_id`, `pagerank`, community label) that re-enter hot indexes as metadata / payload fields — never raw billion-edge dumps into LLM context or the cognitive tick.
 
-### 1b. Graph Views as the unit of composition (research stance)
+### 1b. Graph Views as the unit of composition — and of **sensor fusion**
 
 Product and sensor work will often need graphs that are **not** “the whole
 forest” and **not** a single source structure. **Graph Views** (capital V —
-see `docs/research/graph-views.md`) are the intended unit:
+see `docs/research/graph-views.md`) are the intended unit.
+
+**Operational doctrine (research stance, product-facing):**
+
+> **Sensor fusion works by creating and maintaining Graph Views** — not by
+> maintaining one unbounded global multi-sensor graph. Capture, train, and
+> structure-extract pipelines are **sources**; fusion **happens in the View**
+> (live attach + caps + optional batch identity/rank), then **promotes**
+> stable results into BVH/chain world-model leaves (ADR-078).
 
 | Property | Meaning |
 |----------|---------|
-| **Purpose-built** | Created for a job (conversation, room identity, monorepo assessment, mesh health) |
+| **Purpose-built** | Created for a job (room/region identity, array fusion, conversation, monorepo assessment, mesh health) |
 | **Multi-source** | May attach forest trees, BVH regions, graphify KGs, sensor streams, peer Views, foreign edge lists |
 | **Live or snapshot** | May subscribe to impulses/events or freeze for audit/export |
 | **Plane-aware** | Small/live Views stay on the **hot** plane; large association Views export columnar edge tables to the **batch** plane |
@@ -109,6 +117,9 @@ see `docs/research/graph-views.md`) are the intended unit:
 5. Graph Views are **usually projections** over ADR-046 forest sources — not a
    replacement for durable domain trees — unless a View is later promoted to a
    first-class `StructureTag` (open question in the research note).
+6. **Sensor fusion plans and docs should describe F1–F10-style View lifecycle**
+   (`docs/research/graph-views.md` §4b), not a free-floating “fusion engine”
+   disconnected from Views.
 
 **0.8.x:** no mandatory `view.*` RPC surface. Capture the concept so sensor
 fusion, Urth, and multi-source agent context designs share vocabulary.

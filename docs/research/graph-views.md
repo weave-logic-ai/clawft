@@ -4,17 +4,60 @@
 **Date:** 2026-07-31  
 **Companions:** ADR-095 (hot vs batch planes), ADR-046 (forest of trees),  
 ADR-058 (`SessionView`), ADR-067 (conversation graph **UI** view), ADR-069  
-(atom primary index / panopticon),  
+(atom primary index / panopticon), ADR-078 (splat → world model),  
+ADR-087 (spatio-temporal sensor dual-branch),  
 `docs/research/batch-graph-analytics-disk-spill.md`,  
-`docs/research/diskann-and-large-scale-indexes.md`
+`docs/research/diskann-and-large-scale-indexes.md`,  
+`docs/weftos/splat-to-world-model.md`, `docs/weftos/splat-multimodal-sensing.md`
+
+---
+
+## 0. Operational thesis (sensor fusion)
+
+> **Sensor fusion, operationally, is the construction and maintenance of Graph Views.**
+
+Not a separate mega-pipeline that magically merges every modality into one
+global tensor. Operationally:
+
+1. **Create a View** for a purpose (this room, this array, this rescan job,
+   this Urth region).
+2. **Attach sources** (RGB/depth streams, BVH leaves, co-observe edges,
+   pose tracks, ANN soft-edges, peer Views, imports).
+3. **Feed live** where sensors run; **window and cap** so the hot set stays
+   bounded.
+4. **Fuse inside the View** — geometry join (BVH), feature join
+   (`VectorRef` / HNSW / DiskANN), structural identity (edges + optional
+   batch WCC), learned dual-branch scores (ADR-087) as node/edge features.
+5. **Publish results** outward: promote stable object leaves into the world
+   model (ADR-078 BVH + chain), write features back, export for agents/UI.
+
+Appearance fusion (multi-cam train, free-form quilt) remains a **source
+pipeline** into Views and SOG artifacts. **Identity / structure / multi-modal
+association** — the part agents and governance need — lives in Graph Views.
+
+```text
+ sensors · cameras · ToF · IMU · mesh peers · imports
+              │ live attach (capped)
+              ▼
+     ┌────────────────────┐
+     │  Fusion Graph View │  purpose: room-12-identity / array-7 / …
+     │  (hot + optional   │
+     │   batch analytics) │
+     └─────────┬──────────┘
+               │ promote / write-back
+       ┌───────┴────────┐
+       ▼                ▼
+  BVH + chain      agents / GUI
+  (world model)    (query the View)
+```
 
 ---
 
 ## 1. Motivation
 
 We already have many **source graphs** (forest members, BVH, graphify KG,
-sensor association edges, ExoChain-derived links). Product work is drifting
-toward something different:
+sensor association edges, ExoChain-derived links). Product work needs
+something different:
 
 > A **View** — a graph that is **created for a purpose**, may be **fed live**,
 > and may **pull or project** graph data from other sources (and other Views).
@@ -23,15 +66,17 @@ Examples of purpose:
 
 | View intent | Likely sources | Live? |
 |-------------|----------------|-------|
+| **Sensor fusion (primary)** — room / region identity | BVH leaves, co-observe, tracks, ANN, multi-cam | Yes (sensor) |
 | This conversation’s causal walk | CausalGraph + CrossRefs + SessionView | Yes (tick) |
-| “Room 12 identity” (objects across cameras/sessions) | BVH leaves, co-observe edges, ANN candidates | Yes (sensor) |
 | Code assessment of monorepo X | graphify extract | Mostly batch rebuild |
 | Agent task: “what depends on auth?” | graphify + ADR-084 pipelines | On demand |
 | Mesh peer health influence | SWIM / mesh events | Yes (gossip) |
 | Urth region LOD association | multi-site structure + base maps | Mixed |
 
 Without a View concept, every consumer either (a) hits the global forest raw
-and drowns in irrelevant edges, or (b) reimplements ad-hoc subgraph filters.
+and drowns in irrelevant edges, or (b) reimplements ad-hoc subgraph filters —
+and sensor fusion becomes an unscoped “merge everything” job that cannot be
+capped, audited, or batch-analyzed.
 
 **Naming hygiene:** ADR-067’s “conversation graph view” is a **UI surface**.
 This note uses **Graph View** (capital V) for the **data/product object**.
@@ -123,6 +168,33 @@ Live Views must declare:
   same lifecycle ideas as ADR-062 Speculative→Committed→Pruned).
 - **Backpressure** (drop, sample, or spill to batch tier when rate exceeds
   hot budget — ADR-095 / ADR-047).
+
+---
+
+## 4b. Sensor fusion loop (canonical operational sequence)
+
+This is the intended **runtime story** for multi-modal / multi-device fusion
+(ADR-078 structure path, multi-cam / free-form quilt, sensor heads, arrays).
+
+| Step | Action | Notes |
+|------|--------|--------|
+| **F1 Create** | `view.create` purpose = fusion scope (room, region, array, job) | ACL + retention set here |
+| **F2 Bind geometry** | Attach BVH region / tag filter as hard spatial source | “Where” substrate (ADR-056) |
+| **F3 Bind sensors** | Attach live streams: frames, ToF, IMU-derived pose, co-observe, tracks | Windowed; rate limits |
+| **F4 Bind appearance / codes** | Soft edges from visual (or other) embeddings via HNSW/DiskANN | Candidates only until confirmed |
+| **F5 Bind structure extract** | WM partition outputs, instance proposals, free-space volumes | From splat/structure pipeline |
+| **F6 Hot fuse** | Incremental edge admission: co-location, track continuity, human confirm | Tick-friendly; caps |
+| **F7 Batch fuse (when needed)** | Export View edges → WCC / PageRank / large CC under memory cap | ADR-095; identity components |
+| **F8 Dual-branch score (optional)** | Spatial vs temporal features + α fusion (ADR-087) | Features on View nodes/edges |
+| **F9 Promote** | Stable components → BVH object leaves + chain evidence events | World model SoT (ADR-078) |
+| **F10 Serve** | Agents/UI query the View (k-hop, spatial-first join) or read promoted leaves | Do not dump raw multi-sensor graph into LLM |
+
+**What is *not* sensor fusion operationally:** a single global always-on graph of
+every sensor on the mesh with no purpose, no caps, and no View identity.
+
+**Appearance-only paths** (one SOG train, quilt layer list) still matter for
+humans and backdrops; they **feed** fusion Views (and BVH structure stages)
+rather than replace them.
 
 ---
 
@@ -230,10 +302,12 @@ caps:
 
 | Now (research hold) | Later (when product pulls) |
 |---------------------|----------------------------|
-| Keep this doc + ADR-095 § Views | `view.*` RPCs / weave commands |
-| Use purpose-scoped exports for experiments | Live attach for sensor identity Views |
+| Treat **Graph Views as the operational model for sensor fusion** in planning | `view.*` RPCs / weave commands for F1–F10 |
+| Keep this doc + ADR-095 §1b | First shipping fusion View: room/region identity |
+| Use purpose-scoped exports for experiments | Live attach for multi-cam / sensor-head feeds |
 | Conversation UI continues ADR-067 path | Unify under Graph View id for data feed |
-| DiskANN cold tier for embeddings | Batch WCC/PageRank **per View** edge table |
+| DiskANN cold tier for embeddings | Batch WCC/PageRank **per fusion View** edge table |
+| Structure extract still → BVH (ADR-078) | Promote step F9 wires View components → leaves |
 
 ---
 
@@ -242,3 +316,4 @@ caps:
 | Date | Change |
 |------|--------|
 | 2026-07-31 | Initial note — Graph Views as purpose-built multi-source live/snapshot graphs; ties to ADR-095 planes |
+| 2026-07-31 | **Sensor fusion operational thesis** + F1–F10 loop; primary product use of Views |

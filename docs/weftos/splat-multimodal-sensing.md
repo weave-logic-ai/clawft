@@ -14,9 +14,18 @@
 | [splat-pipeline-design.md](./splat-pipeline-design.md) | Host splatd stages |
 | [splat-harness.md](./splat-harness.md) | Train/view harness + quality notes |
 | [android-splat-capture-edge-node.md](../plans/android-splat-capture-edge-node.md) | Phone app plan |
+| [graph-views.md](../research/graph-views.md) | **Graph Views** — operational model for multi-sensor fusion (live multi-source graphs → promote to BVH) |
+| [ADR-095](../adr/adr-095-batch-graph-analytics-plane.md) | Hot vs batch analytics on View edge tables |
 | Galaxy S25 sensor notes | §8 below |
 
 Gaussian splatting (and COLMAP before it) mostly care about one thing first: **many views of the same surface, with consistent appearance and known geometry**. Extra wavelengths and sensors help when they **add constraints** (pose, scale, texture where RGB fails)—not when they replace multi-view RGB.
+
+**Operational fusion:** modalities and devices do not merge into one global
+unbounded graph. They **attach to a purpose-scoped Graph View** (room, region,
+array, job); that View is where association/identity fusion runs (capped live
+path + optional batch WCC/rank), then stable objects **promote** into the world
+model. Capture quality rules below still apply — they feed better sources into
+the View.
 
 ---
 

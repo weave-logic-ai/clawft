@@ -19,6 +19,15 @@
 
 **Also relates:** LeWM / latent world-model ADRs (sensor-primary latent model under ECC — greenfield); BVH is the **explicit geometric** half; latent codes are optional later.
 
+**Sensor fusion (operational):** multi-source association and identity run as
+**Graph Views** — purpose-built live graphs that attach capture/structure/ANN
+sources, fuse under caps, optionally batch-analyze, then **promote** into BVH +
+chain. See [ADR-078 §5b](../adr/adr-078-splat-feeds-world-model.md),
+[ADR-095 §1b](../adr/adr-095-batch-graph-analytics-plane.md), and
+[`docs/research/graph-views.md`](../research/graph-views.md) (F1–F10 loop).
+This doc’s structure extract remains the geometric leaf minting path; Views
+own *how sensors and sessions link those leaves over time*.
+
 ---
 
 ## 1. Problem

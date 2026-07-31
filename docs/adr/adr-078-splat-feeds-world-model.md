@@ -4,7 +4,7 @@
 **Status**: Accepted  
 **Deciders**: product + ECC / spatial (owner: reconstruction is input to BVH entities—objects, surfaces, volumes—not only a SOG for viewing)  
 **Depends-On**: ADR-056 (BVH), splat pipeline design, multi-modal capture design  
-**Relates-To**: ADR-077 (capture edge), ADR-073 (workspace visualizes; BVH is truth), LeWM latent world-model track (compose later), **ADR-095** (batch graph analytics research hold — multi-sensor identity / association at edge-table scale; DiskANN for vector relief — see `docs/research/diskann-and-large-scale-indexes.md`)
+**Relates-To**: ADR-077 (capture edge), ADR-073 (workspace visualizes; BVH is truth), LeWM latent world-model track (compose later), **ADR-095** (batch graph analytics + Graph Views — multi-sensor identity / association; DiskANN for vector relief), **`docs/research/graph-views.md`** (Graph Views = **operational model for sensor fusion**)
 
 ## Context
 
@@ -78,6 +78,23 @@ Structure (objects/volumes) **gains multi-evidence** in both modes; free-form ma
 - Spark / harness viewer: appearance ± AABB overlays  
 - Agent Workspace: may open SOG and object lists  
 - **Source of truth for “what is where”:** BVH + chain, not the SOG file alone  
+
+### 5b. Sensor fusion is operationally Graph Views (research stance)
+
+Multi-modal / multi-device **association and identity** (same object across
+cameras, sessions, modalities) is **not** specified as a separate unbounded
+fusion daemon. Per ADR-095 §1b and `docs/research/graph-views.md`:
+
+1. A **purpose-scoped Graph View** is created (room, region, job, array).  
+2. Capture, structure extract, co-observe, tracks, and ANN candidates **attach**
+   as sources (live where appropriate, with caps).  
+3. Fusion logic runs **in that View** (hot incremental + optional batch WCC /
+   rank when the edge table cliffs).  
+4. **Stable results promote** into BVH object leaves + chain evidence (this ADR’s
+   structure path remains the durable world-model SoT).
+
+Appearance fusion modes (§4b multi-cam / free-form quilt) remain valid **input
+pipelines**; they feed Views and structure stages rather than replacing them.
 
 ### 6. Latent world models compose later
 
