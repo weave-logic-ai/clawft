@@ -147,9 +147,12 @@ to the command palette.
 
 - No voice input — VSCode webviews can't expose `allow="microphone"`
   yet (microsoft/vscode#303293). Capture sidecar lands next.
-- No typed active-radar return schema — webview currently posts
-  plain RPC-request / RPC-response messages only, no `variant-id`
-  yet.
+- Typed active-radar return schema + `variant-id` echo shipped
+  (WEFT-283 / ADR-007): `radar-return` / `radar-return-ack` on the
+  postMessage bridge, optional `variant-id` on plain RPC echoed by
+  the host. Full `ux/returns` substrate publish + ECC consumption
+  still deferred to the M2 radar loop. Unit tests:
+  `npm run test:active-radar`.
 - No `ThreadDock` primitive for per-agent parallel output.
 - Panel does not yet speak WSP-0.1 verbs (protocol-spec.md); raw
   kernel.* RPC only. WSP verbs land in M3.

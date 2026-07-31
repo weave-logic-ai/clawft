@@ -10,8 +10,9 @@
 //   .planning/symposiums/compositional-ui/adrs/adr-011-dev-panel-embedding-hybrid.md
 //
 // Out of scope for M1: WSP-0.1 verbs (raw kernel.* RPC only),
-// voice/capture sidecar (M2), workspace editor topics (M2),
-// active-radar typed return channel (M2).
+// voice/capture sidecar (M2), workspace editor topics (M2).
+// WEFT-283: typed active-radar return schema + variant-id echo is in;
+// full ux/returns substrate publish remains M2 loop wiring.
 
 import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
@@ -37,6 +38,14 @@ import {
     renderChipA11yHtml,
     type ChipStripSnapshot,
 } from "./chipA11y";
+import {
+    RADAR_RETURN_TYPE,
+    buildRadarReturnAck,
+    buildRpcResponse,
+    extractVariantId,
+    parseRadarReturn,
+    type VariantId,
+} from "./activeRadar";
 
 const VIEW_TYPE = "weft.panel";
 
@@ -170,13 +179,23 @@ interface WasmRpcRequest {
     id: number;
     method: string;
     params?: unknown;
+    /** Optional pulse attribution — echoed on rpc-response (WEFT-283). */
+    "variant-id"?: VariantId;
 }
 
 interface WebviewReadyMessage {
     type: "ready";
 }
 
-type WebviewInbound = WasmRpcRequest | WebviewReadyMessage;
+/** Discriminator-only stand-in; full shape validated by parseRadarReturn. */
+interface WebviewRadarReturnMessage {
+    type: typeof RADAR_RETURN_TYPE;
+}
+
+type WebviewInbound =
+    | WasmRpcRequest
+    | WebviewReadyMessage
+    | WebviewRadarReturnMessage;
 
 export function activate(context: vscode.ExtensionContext): void {
     const openCmd = vscode.commands.registerCommand("weft.openPanel", () => {
@@ -313,6 +332,15 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
                 });
                 return;
             }
+            if (msg.type === RADAR_RETURN_TYPE) {
+                // WEFT-283 / ADR-007: typed active-radar observation.
+                // Host validates the envelope, echoes variant-id on the
+                // ack. Substrate publish to ux/returns is deferred to
+                // the full M2 radar loop; ack is enough for the channel
+                // contract + renderer-side correlation tests.
+                handleRadarReturn(panel, raw);
+                return;
+            }
             if (msg.type === "rpc-request") {
                 await handleRpc(panel, socketPath, msg, panelSession, multiUser);
             }
@@ -423,6 +451,29 @@ function timeoutForMethod(method: string): number | undefined {
     return undefined; // fall through to rpcCall's default
 }
 
+/**
+ * WEFT-283: validate a radar-return observation and post an ack that
+ * always echoes `variant-id`. Malformed shapes (missing variant-id,
+ * bad return-type) get a failure ack only when a variant-id can still
+ * be extracted; otherwise the message is dropped (same as non-object
+ * webview traffic).
+ */
+function handleRadarReturn(panel: vscode.WebviewPanel, raw: unknown): void {
+    const parsed = parseRadarReturn(raw);
+    if (parsed) {
+        void panel.webview.postMessage(buildRadarReturnAck(parsed, true));
+        return;
+    }
+    // Best-effort: if the sender stamped a variant-id on a broken
+    // envelope, still echo it so the renderer can correlate the NACK.
+    const variantId = extractVariantId(raw);
+    if (variantId !== undefined) {
+        void panel.webview.postMessage(
+            buildRadarReturnAck({ "variant-id": variantId }, false, "malformed radar-return"),
+        );
+    }
+}
+
 async function handleRpc(
     panel: vscode.WebviewPanel,
     socketPath: string,
@@ -430,16 +481,23 @@ async function handleRpc(
     panelSession?: PanelSession,
     multiUser = false,
 ): Promise<void> {
+    // WEFT-283: optional pulse id from the webview — echoed on every
+    // response path (allow/deny/error/success) so invoke-under-pulse
+    // stays correlatable. Absent → plain rpc-response (backward compat).
+    const variantId = extractVariantId(req);
+
     // WEFT-496: denylist wins over allowlist (and over WEFT-250 union).
     if (!isMethodAllowed(req.method, ALLOWED_METHODS, WEBVIEW_DENIED_METHODS)) {
-        void panel.webview.postMessage({
-            type: "rpc-response",
-            id: req.id,
-            ok: false,
-            error: WEBVIEW_DENIED_METHODS.has(req.method)
-                ? `method denied for webview: ${req.method}`
-                : `method not allowed: ${req.method}`,
-        });
+        void panel.webview.postMessage(
+            buildRpcResponse({
+                id: req.id,
+                ok: false,
+                error: WEBVIEW_DENIED_METHODS.has(req.method)
+                    ? `method denied for webview: ${req.method}`
+                    : `method not allowed: ${req.method}`,
+                variantId,
+            }),
+        );
         return;
     }
 
@@ -449,12 +507,14 @@ async function handleRpc(
     if (multiUser) {
         const decision = authorizePanelRpc(panelSession, req.method);
         if (!decision.ok) {
-            void panel.webview.postMessage({
-                type: "rpc-response",
-                id: req.id,
-                ok: false,
-                error: decision.error,
-            });
+            void panel.webview.postMessage(
+                buildRpcResponse({
+                    id: req.id,
+                    ok: false,
+                    error: decision.error,
+                    variantId,
+                }),
+            );
             return;
         }
         auth = decision.auth;
@@ -471,25 +531,29 @@ async function handleRpc(
             },
             timeoutForMethod(req.method),
         );
-        void panel.webview.postMessage({
-            type: "rpc-response",
-            id: req.id,
-            ok: resp.ok,
-            result: resp.result ?? null,
-            error: resp.error,
-            // WEFT-334: forward structured error_kind so the webview can
-            // branch on timeout / gate_deny / llm_error without parsing
-            // the legacy string field.
-            error_kind: resp.error_kind,
-        });
+        void panel.webview.postMessage(
+            buildRpcResponse({
+                id: req.id,
+                ok: resp.ok,
+                result: resp.result ?? null,
+                error: resp.error,
+                // WEFT-334: forward structured error_kind so the webview can
+                // branch on timeout / gate_deny / llm_error without parsing
+                // the legacy string field.
+                error_kind: resp.error_kind,
+                variantId,
+            }),
+        );
     } catch (err) {
         const message = err instanceof RpcError ? err.message : String(err);
-        void panel.webview.postMessage({
-            type: "rpc-response",
-            id: req.id,
-            ok: false,
-            error: message,
-        });
+        void panel.webview.postMessage(
+            buildRpcResponse({
+                id: req.id,
+                ok: false,
+                error: message,
+                variantId,
+            }),
+        );
     }
 }
 
@@ -648,13 +712,47 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
 
     // Bridge exposed to the wasm module. clawft_gui_egui::live::wasm_live
     // looks up window.__weftPostToHost and calls it with a JSON value.
-    // Request shape:  { type: "rpc-request", id, method, params }
-    // Response shape: { type: "rpc-response", id, ok, result?, error? }
+    //
+    // Plain RPC (backward compatible):
+    //   Request:  { type: "rpc-request", id, method, params }
+    //   Response: { type: "rpc-response", id, ok, result?, error? }
+    //
+    // WEFT-283 active-radar (ADR-007) — optional pulse attribution:
+    //   Request:  { type: "rpc-request", id, method, params, "variant-id"? }
+    //   Response: { type: "rpc-response", id, ok, ..., "variant-id"? }  // echoed
+    //   Return:   { type: "radar-return", "variant-id", kind, "return-type", ... }
+    //   Ack:      { type: "radar-return-ack", "variant-id", ok, error? }
     window.__weftPostToHost = (payload) => {
       try {
         vscode.postMessage(payload);
       } catch (e) {
         console.error("postMessage failed", e);
+      }
+    };
+
+    // Webview-side helper for typed active-radar returns (WEFT-283).
+    // Wasm / future UI can call this without hand-rolling the envelope.
+    // Host validates + acks with the same variant-id.
+    window.__weftPostRadarReturn = (observation) => {
+      try {
+        if (!observation || typeof observation !== "object") {
+          console.error("radar-return: expected object");
+          return false;
+        }
+        const payload = Object.assign({ type: "radar-return" }, observation);
+        if (payload["variant-id"] == null && payload.variantId != null) {
+          payload["variant-id"] = payload.variantId;
+          delete payload.variantId;
+        }
+        if (payload["return-type"] == null && payload.returnType != null) {
+          payload["return-type"] = payload.returnType;
+          delete payload.returnType;
+        }
+        vscode.postMessage(payload);
+        return true;
+      } catch (e) {
+        console.error("radar-return postMessage failed", e);
+        return false;
       }
     };
 

@@ -95,5 +95,6 @@ Or palette → `Developer: Install Extension from Location…`.
 
 If you see the fallback "Failed to load the wasm bundle" card, step 1
 of Build wasn't run. See `SMOKE.md` for the full smoke test and the
-known gaps (voice/capture sidecar, typed active-radar channel, WSP
-verbs — all deferred to M2/M3).
+known gaps (voice/capture sidecar, full ux/returns substrate publish,
+WSP verbs — M2/M3). Typed active-radar envelope + variant-id echo is
+in (WEFT-283); see `src/activeRadar.ts`.

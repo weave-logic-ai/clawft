@@ -87,8 +87,12 @@ pub(super) fn spawn() -> Arc<Live> {
 }
 
 /// Install a `message` event listener on the window that routes
-/// `{ type: "rpc-response", id, ok, result?, error? }` shapes into
-/// the pending-RPC registry, and any other shapes into the snapshot.
+/// `{ type: "rpc-response", id, ok, result?, error?, variant-id? }`
+/// shapes into the pending-RPC registry. Optional `variant-id` is
+/// WEFT-283 pulse attribution (echoed by the extension host); plain
+/// RPC without the field remains valid. `radar-return-ack` is accepted
+/// and currently ignored at the Live layer (channel contract only —
+/// full ECC/GEPA consumption lands with the M2 radar loop).
 fn install_message_listener(live: Arc<Live>, pending: Arc<PLMutex<HashMap<u64, ReplySlot>>>) {
     let window = web_sys::window().expect("no global window");
 
@@ -104,6 +108,9 @@ fn install_message_listener(live: Arc<Live>, pending: Arc<PLMutex<HashMap<u64, R
                 "rpc-response" => {
                     let id = value.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
                     let ok = value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    // variant-id may be present (string or number); ignored
+                    // for snapshot routing but must not break parse.
+                    let _variant_id = value.get("variant-id");
                     let result = if ok {
                         Ok(value.get("result").cloned().unwrap_or(Value::Null))
                     } else {
@@ -126,6 +133,9 @@ fn install_message_listener(live: Arc<Live>, pending: Arc<PLMutex<HashMap<u64, R
                         live.write(|s| s.last_error = Some(e.clone()));
                     }
                 }
+                // WEFT-283: host ack for typed radar-return. No Live
+                // state yet — drop so unknown-message path stays quiet.
+                "radar-return-ack" => {}
                 _ => { /* ignore unknown messages */ }
             }
         });
@@ -216,12 +226,61 @@ fn install_poll_timer(
 }
 
 fn post_rpc(id: u64, method: &str, params: Value) -> bool {
-    let payload = json!({
+    // Plain RPC (no variant-id) — backward compatible. Callers that
+    // need pulse attribution use `post_rpc_with_variant`.
+    post_rpc_with_variant(id, method, params, None)
+}
+
+/// WEFT-283: optional `variant-id` on rpc-request is echoed by the
+/// extension host on the matching rpc-response (ADR-007 discipline).
+fn post_rpc_with_variant(
+    id: u64,
+    method: &str,
+    params: Value,
+    variant_id: Option<Value>,
+) -> bool {
+    let mut payload = json!({
         "type": "rpc-request",
         "id": id,
         "method": method,
         "params": params,
     });
+    if let Some(vid) = variant_id {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("variant-id".into(), vid);
+        }
+    }
+    let s = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
+    post_to_host(&s)
+}
+
+/// Emit a typed active-radar return observation (WEFT-283 / ADR-007).
+/// Prefers `window.__weftPostRadarReturn` when the bootstrap installed
+/// it; falls back to generic `__weftPostToHost`.
+#[allow(dead_code)] // public surface for future egui return-signal path
+pub(super) fn post_radar_return(observation: Value) -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    // Prefer the typed helper so camelCase → kebab-case normalization
+    // happens in the bootstrap (variantId → variant-id, etc.).
+    if let Ok(host_fn) = js_sys::Reflect::get(&window, &JsValue::from_str("__weftPostRadarReturn"))
+    {
+        if let Some(func) = host_fn.dyn_ref::<js_sys::Function>() {
+            let s = serde_json::to_string(&observation).unwrap_or_else(|_| "{}".into());
+            if let Ok(parsed) = js_sys::JSON::parse(&s) {
+                return func
+                    .call1(&JsValue::NULL, &parsed)
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+            }
+        }
+    }
+    let mut payload = observation;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("type".into(), json!("radar-return"));
+    }
     let s = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
     post_to_host(&s)
 }

@@ -43,7 +43,8 @@
     "pretest": "npm run compile && npm run compile-tests",
     "test": "node ./out-test/runTest.js",
     "test:panel-auth": "npm run compile && node scripts/test-panel-auth.mjs",
-    "test:chip-a11y": "npx --yes tsx --test src/chipA11y.test.ts"
+    "test:chip-a11y": "npx --yes tsx --test src/chipA11y.test.ts",
+    "test:active-radar": "npx --yes tsx --test src/activeRadar.test.ts"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
