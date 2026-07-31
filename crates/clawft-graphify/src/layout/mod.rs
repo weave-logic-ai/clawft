@@ -4,6 +4,7 @@
 pub mod force_layout;
 pub mod positioned;
 pub mod slicer;
+pub mod sugiyama;
 pub mod tree_layout;
 pub mod triage;
 
@@ -51,7 +52,7 @@ pub fn layout_graph(
     // Compute positions based on geometry.
     let positions: HashMap<EntityId, (f64, f64)> = match root_geometry {
         Geometry::Tree | Geometry::Radial => layout_as_tree(kg, width, height),
-        Geometry::Layered => layout_as_tree(kg, width, height), // TODO: Sugiyama
+        Geometry::Layered => layout_as_layered(kg, width, height),
         _ => layout_as_force(kg, width, height),
     };
 
@@ -259,6 +260,34 @@ fn layout_as_tree(kg: &KnowledgeGraph, width: f64, _height: f64) -> HashMap<Enti
     }
 
     all_positions
+}
+
+/// Lay out the graph with Sugiyama hierarchical (layered digraph) layout.
+///
+/// Uses **all** directed edges (not only `Contains`). Cycle edges are reversed
+/// for ranking; nodes receive discrete layer ranks so edges flow top→bottom.
+/// This is intentionally distinct from [`layout_as_tree`] (Reingold–Tilford on
+/// the `Contains` forest).
+fn layout_as_layered(kg: &KnowledgeGraph, width: f64, height: f64) -> HashMap<EntityId, (f64, f64)> {
+    let entities: Vec<_> = kg.entities().collect();
+    let node_ids: Vec<EntityId> = entities.iter().map(|e| e.id.clone()).collect();
+    let id_to_idx: HashMap<&EntityId, usize> =
+        node_ids.iter().enumerate().map(|(i, id)| (id, i)).collect();
+
+    let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
+    for (src, tgt, _) in kg.edges() {
+        if let (Some(&si), Some(&ti)) = (id_to_idx.get(&src.id), id_to_idx.get(&tgt.id)) {
+            edge_pairs.push((si, ti));
+        }
+    }
+
+    sugiyama::layout(
+        &node_ids,
+        &edge_pairs,
+        width,
+        height,
+        &sugiyama::LayeredConfig::default(),
+    )
 }
 
 /// Lay out the graph using force-directed simulation.
@@ -479,5 +508,138 @@ modes:
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"node_type\":\"function\""));
         assert!(json.contains("\"schema_name\":\"test\""));
+    }
+
+    #[test]
+    fn layout_layered_chain_ranks_top_to_bottom() {
+        // Calls edges form a chain; Layered must place sources above sinks.
+        let mut kg = KnowledgeGraph::new();
+        let a = entity("a", EntityType::Function);
+        let b = entity("b", EntityType::Function);
+        let c = entity("c", EntityType::Function);
+        kg.add_entity(a.clone());
+        kg.add_entity(b.clone());
+        kg.add_entity(c.clone());
+        kg.add_relationship(calls(&a, &b));
+        kg.add_relationship(calls(&b, &c));
+
+        let mut schema = test_schema();
+        schema.modes.structure.root_geometry = Geometry::Layered;
+        let result = layout_graph(&kg, &schema, 800.0, 600.0);
+
+        assert_eq!(result.nodes.len(), 3);
+        let pos = |label: &str| {
+            let n = result.nodes.iter().find(|n| n.label == label).unwrap();
+            (n.x, n.y)
+        };
+        let (_, ay) = pos("a");
+        let (_, by) = pos("b");
+        let (_, cy) = pos("c");
+        assert!(ay < by, "layered: a above b ({ay} < {by})");
+        assert!(by < cy, "layered: b above c ({by} < {cy})");
+    }
+
+    #[test]
+    fn layout_layered_not_silent_tree_fallback() {
+        // Graph with only Calls edges (no Contains). Tree layout walks
+        // Contains only and places disconnected roots in a horizontal strip;
+        // layered must rank the call DAG top→bottom and must not reuse that
+        // tree path (WEFT-362 AC: no silent tree fallback for Layered).
+        let mut kg = KnowledgeGraph::new();
+        let a = entity("src", EntityType::Function);
+        let b = entity("mid", EntityType::Function);
+        let c = entity("sink", EntityType::Function);
+        let d = entity("sink2", EntityType::Function);
+        kg.add_entity(a.clone());
+        kg.add_entity(b.clone());
+        kg.add_entity(c.clone());
+        kg.add_entity(d.clone());
+        kg.add_relationship(calls(&a, &b));
+        kg.add_relationship(calls(&b, &c));
+        kg.add_relationship(calls(&b, &d));
+
+        let mut layered_schema = test_schema();
+        layered_schema.modes.structure.root_geometry = Geometry::Layered;
+        let layered = layout_graph(&kg, &layered_schema, 800.0, 600.0);
+
+        let mut tree_schema = test_schema();
+        tree_schema.modes.structure.root_geometry = Geometry::Tree;
+        let tree = layout_graph(&kg, &tree_schema, 800.0, 600.0);
+
+        let y_of = |g: &PositionedGraph, label: &str| {
+            g.nodes
+                .iter()
+                .find(|n| n.label == label)
+                .map(|n| n.y)
+                .unwrap()
+        };
+
+        // Layered: src above mid above {sink, sink2} (siblings share a layer).
+        assert!(y_of(&layered, "src") < y_of(&layered, "mid"));
+        assert!(y_of(&layered, "mid") < y_of(&layered, "sink"));
+        assert!(
+            (y_of(&layered, "sink") - y_of(&layered, "sink2")).abs() < 1.0,
+            "layered siblings share a rank"
+        );
+
+        // Tree path (no Contains): every node is a root → all y ≈ 0 (horizontal).
+        // Layered must therefore differ (strict multi-rank y span).
+        let layered_y_span = {
+            let ys: Vec<f64> = layered.nodes.iter().map(|n| n.y).collect();
+            ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - ys.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+        let tree_y_span = {
+            let ys: Vec<f64> = tree.nodes.iter().map(|n| n.y).collect();
+            ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - ys.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+        assert!(
+            layered_y_span > tree_y_span + 10.0,
+            "layered must produce multi-rank y span (got layered={layered_y_span}, tree={tree_y_span}); \
+             silent tree fallback would collapse ranks"
+        );
+
+        assert_eq!(layered.nodes.len(), 4);
+        assert!(layered
+            .nodes
+            .iter()
+            .all(|n| n.x.is_finite() && n.y.is_finite()));
+    }
+
+    #[test]
+    fn layout_layered_diamond_with_contains_and_calls() {
+        // Mix Contains + Calls; layered must use all edges for ranking.
+        let mut kg = KnowledgeGraph::new();
+        let m = entity("mod", EntityType::Module);
+        let f1 = entity("f1", EntityType::Function);
+        let f2 = entity("f2", EntityType::Function);
+        let f3 = entity("f3", EntityType::Function);
+        kg.add_entity(m.clone());
+        kg.add_entity(f1.clone());
+        kg.add_entity(f2.clone());
+        kg.add_entity(f3.clone());
+        kg.add_relationship(contains(&m, &f1));
+        kg.add_relationship(contains(&m, &f2));
+        kg.add_relationship(calls(&f1, &f3));
+        kg.add_relationship(calls(&f2, &f3));
+
+        let mut schema = test_schema();
+        schema.modes.structure.root_geometry = Geometry::Layered;
+        let result = layout_graph(&kg, &schema, 900.0, 700.0);
+
+        assert_eq!(result.nodes.len(), 4);
+        assert_eq!(result.edges.len(), 4);
+
+        let y = |label: &str| {
+            result
+                .nodes
+                .iter()
+                .find(|n| n.label == label)
+                .unwrap()
+                .y
+        };
+        // Module contains f1/f2; f1/f2 call f3 → mod is above leaves.
+        assert!(y("mod") < y("f3"), "module should rank above deepest callee");
     }
 }
