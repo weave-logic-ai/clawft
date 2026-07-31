@@ -84,6 +84,10 @@ pub mod causal;
 #[cfg(feature = "ecc")]
 pub mod causal_predict;
 #[cfg(feature = "ecc")]
+pub mod ecc_segment;
+#[cfg(feature = "ecc")]
+pub mod lewm_invariant;
+#[cfg(feature = "ecc")]
 pub mod cognitive_tick;
 #[cfg(feature = "ecc")]
 pub mod coherence;
@@ -174,6 +178,8 @@ pub mod app;
 pub mod assessment;
 pub mod boot;
 pub mod capability;
+/// Cross-node signed capability advertisements (WEFT-147).
+pub mod capability_claim;
 #[cfg(feature = "exochain")]
 pub mod chain;
 #[cfg(feature = "exochain")]
@@ -335,11 +341,27 @@ pub use capability::{
     AgentCapabilities, CapabilityChecker, CapabilityElevationRequest, ElevationResult, IpcScope,
     ResourceLimits, ResourceType, SandboxPolicy, ToolPermissions,
 };
+pub use capability_claim::{
+    CAPABILITY_ALLOWLIST, CapabilityClaim, CapabilityClaimError, SignedCapabilityAdvertisement,
+    validate_capabilities, validate_capability,
+};
+#[cfg(any(feature = "mesh", feature = "exochain"))]
+pub use capability_claim::{apply_verified_capabilities, sign_claim, verify_signed_advertisement};
 #[cfg(feature = "ecc")]
 pub use causal::{
     CausalEdge, CausalEdgeType, CausalGraph, CausalNode, ChangeEvent, ChangePrediction,
     CouplingPair, SPECTRAL_EML_MIN_NODES, SPECTRAL_RFF_MIN_NODES, SpectralMethod, SpectralResult,
     select_spectral_method,
+};
+#[cfg(feature = "ecc")]
+pub use ecc_segment::{
+    CalibrationProfileSegment, EccSegment, EccSegmentCodec, EccSegmentError, EccSegmentType,
+    SpectralCheckpoint, decode_ecc_segment, encode_ecc_segment, segment_from_wire, segment_to_wire,
+};
+#[cfg(feature = "ecc")]
+pub use lewm_invariant::{
+    DecouplingRule, InvariantCheck, WmWriteKind, WorldModelFacade, check_wm_write,
+    local_ecc_sufficient_without_wm,
 };
 #[cfg(feature = "ecc")]
 pub use causal_predict::{

@@ -13,12 +13,97 @@
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "exochain")]
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// ComponentIndex — incremental undirected connected components (WEFT-510)
+// ---------------------------------------------------------------------------
+
+/// Union-find index over causal nodes for O(1) component-count reads.
+///
+/// Unions on edge add are amortised nearly-constant. Edge/node removals
+/// rebuild the index from the adjacency lists (O(n+m)) so the count stays
+/// exact; the hot path (`GraphFeatures::from_causal_graph`) only reads
+/// [`ComponentIndex::count`].
+#[derive(Debug, Default)]
+struct ComponentIndex {
+    parent: HashMap<NodeId, NodeId>,
+    rank: HashMap<NodeId, u8>,
+    /// Number of distinct undirected components among registered nodes.
+    count: u64,
+}
+
+impl ComponentIndex {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn clear(&mut self) {
+        self.parent.clear();
+        self.rank.clear();
+        self.count = 0;
+    }
+
+    /// Register a new isolated node (a new component).
+    fn add(&mut self, id: NodeId) {
+        if self.parent.contains_key(&id) {
+            return;
+        }
+        self.parent.insert(id, id);
+        self.rank.insert(id, 0);
+        self.count += 1;
+    }
+
+    fn find(&mut self, id: NodeId) -> Option<NodeId> {
+        if !self.parent.contains_key(&id) {
+            return None;
+        }
+        // Path compression.
+        let mut root = id;
+        while self.parent[&root] != root {
+            root = self.parent[&root];
+        }
+        let mut cur = id;
+        while cur != root {
+            let p = self.parent[&cur];
+            self.parent.insert(cur, root);
+            cur = p;
+        }
+        Some(root)
+    }
+
+    /// Union two nodes. Returns `true` if two previously-distinct components
+    /// were merged (count decreased by one).
+    fn union(&mut self, a: NodeId, b: NodeId) -> bool {
+        let Some(ra) = self.find(a) else {
+            return false;
+        };
+        let Some(rb) = self.find(b) else {
+            return false;
+        };
+        if ra == rb {
+            return false;
+        }
+        let rank_a = self.rank[&ra];
+        let rank_b = self.rank[&rb];
+        if rank_a < rank_b {
+            self.parent.insert(ra, rb);
+        } else if rank_a > rank_b {
+            self.parent.insert(rb, ra);
+        } else {
+            self.parent.insert(rb, ra);
+            self.rank.insert(ra, rank_a + 1);
+        }
+        self.count = self.count.saturating_sub(1);
+        true
+    }
+}
 
 /// Numeric identifier for causal graph nodes.
 ///
@@ -127,6 +212,11 @@ pub struct CausalGraph {
     next_node_id: AtomicU64,
     node_count: AtomicU64,
     edge_count: AtomicU64,
+    /// Incremental undirected connected-component count (WEFT-510).
+    ///
+    /// Guarded by a mutex so concurrent `link`/`add_node` calls serialise
+    /// union-find updates; the graph's DashMap adjacency remains lock-free.
+    components: Mutex<ComponentIndex>,
     /// Optional chain manager for ExoChain event logging.
     #[cfg(feature = "exochain")]
     chain_manager: Option<Arc<crate::chain::ChainManager>>,
@@ -145,6 +235,7 @@ impl CausalGraph {
             next_node_id: AtomicU64::new(1),
             node_count: AtomicU64::new(0),
             edge_count: AtomicU64::new(0),
+            components: Mutex::new(ComponentIndex::new()),
             #[cfg(feature = "exochain")]
             chain_manager: None,
             #[cfg(feature = "exochain")]
@@ -177,6 +268,9 @@ impl CausalGraph {
         self.forward_edges.insert(id, Vec::new());
         self.reverse_edges.insert(id, Vec::new());
         self.node_count.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut idx) = self.components.lock() {
+            idx.add(id);
+        }
 
         #[cfg(feature = "exochain")]
         if let Some(ref cm) = self.chain_manager {
@@ -347,6 +441,8 @@ impl CausalGraph {
         }
 
         self.node_count.fetch_sub(1, Ordering::SeqCst);
+        // Edge deletion can split components; rebuild for exact count (WEFT-510).
+        self.rebuild_component_index();
 
         #[cfg(feature = "exochain")]
         if let Some(ref cm) = self.chain_manager {
@@ -398,6 +494,10 @@ impl CausalGraph {
         }
 
         self.edge_count.fetch_add(1, Ordering::SeqCst);
+        // Undirected union for connected-component count (WEFT-510).
+        if let Ok(mut idx) = self.components.lock() {
+            let _ = idx.union(source, target);
+        }
 
         #[cfg(feature = "exochain")]
         if let Some(ref cm) = self.chain_manager {
@@ -433,6 +533,10 @@ impl CausalGraph {
         }
 
         self.edge_count.fetch_sub(count as u64, Ordering::SeqCst);
+        if count > 0 {
+            // Unlink can split components; rebuild (WEFT-510).
+            self.rebuild_component_index();
+        }
 
         #[cfg(feature = "exochain")]
         if let Some(ref cm) = self.chain_manager {
@@ -448,6 +552,37 @@ impl CausalGraph {
         }
 
         count
+    }
+
+    /// O(1) undirected connected-component count (WEFT-510).
+    ///
+    /// Maintained incrementally on `add_node`/`link`; rebuilt after removals.
+    /// Prefer this over `connected_components().len()` in hot paths such as
+    /// EML coherence feature extraction.
+    pub fn component_count_fast(&self) -> u64 {
+        self.components
+            .lock()
+            .map(|idx| idx.count)
+            .unwrap_or_else(|_| self.connected_components().len() as u64)
+    }
+
+    /// Rebuild the union-find index from current adjacency (O(n+m)).
+    fn rebuild_component_index(&self) {
+        let Ok(mut idx) = self.components.lock() else {
+            return;
+        };
+        idx.clear();
+        let ids = self.node_ids();
+        for &id in &ids {
+            idx.add(id);
+        }
+        for &id in &ids {
+            // Drop the lock over get_forward_edges? We hold the mutex already;
+            // DashMap reads don't conflict with our UF lock.
+            for edge in self.get_forward_edges(id) {
+                let _ = idx.union(edge.source, edge.target);
+            }
+        }
     }
 
     /// Return all edges originating from `id`.
@@ -525,6 +660,9 @@ impl CausalGraph {
         self.reverse_edges.clear();
         self.node_count.store(0, Ordering::SeqCst);
         self.edge_count.store(0, Ordering::SeqCst);
+        if let Ok(mut idx) = self.components.lock() {
+            idx.clear();
+        }
         // Note: next_node_id is intentionally NOT reset so IDs remain unique
         // across clear cycles.
 
@@ -1997,6 +2135,7 @@ impl CausalGraph {
             next_node_id: AtomicU64::new(snapshot.next_node_id),
             node_count: AtomicU64::new(0),
             edge_count: AtomicU64::new(0),
+            components: Mutex::new(ComponentIndex::new()),
             #[cfg(feature = "exochain")]
             chain_manager: None,
             #[cfg(feature = "exochain")]
@@ -2027,6 +2166,7 @@ impl CausalGraph {
             }
         }
         graph.edge_count.store(total_edges, Ordering::SeqCst);
+        graph.rebuild_component_index();
 
         graph
     }
@@ -2893,6 +3033,45 @@ mod tests {
         assert_eq!(cc.len(), 2);
         assert_eq!(cc[0].len(), 2);
         assert_eq!(cc[1].len(), 2);
+    }
+
+    /// WEFT-510: incremental count matches BFS components through add/link/unlink.
+    #[test]
+    fn component_count_fast_matches_connected_components() {
+        let g = make_graph();
+        assert_eq!(g.component_count_fast(), 0);
+
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        assert_eq!(g.component_count_fast(), 3);
+        assert_eq!(g.component_count_fast() as usize, g.connected_components().len());
+
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        assert_eq!(g.component_count_fast(), 2);
+
+        g.link(b, c, CausalEdgeType::Causes, 1.0, 0, 0);
+        assert_eq!(g.component_count_fast(), 1);
+        assert_eq!(g.component_count_fast() as usize, g.connected_components().len());
+
+        // Second edge between same pair must not change count.
+        g.link(a, b, CausalEdgeType::Enables, 0.5, 0, 0);
+        assert_eq!(g.component_count_fast(), 1);
+
+        // Unlink all a→b edges; a-b-c still connected via a-b? Wait, still one
+        // edge a→b left if we only unlink once... unlink removes all a→b.
+        g.unlink(a, b);
+        // Still connected: a—b? no edges left a-b; path is a? only b-c remains
+        // a is isolated, b-c connected → 2 components.
+        assert_eq!(g.component_count_fast(), 2);
+        assert_eq!(g.component_count_fast() as usize, g.connected_components().len());
+
+        g.unlink(b, c);
+        assert_eq!(g.component_count_fast(), 3);
+
+        g.remove_node(c);
+        assert_eq!(g.component_count_fast(), 2);
+        assert_eq!(g.component_count_fast() as usize, g.connected_components().len());
     }
 
     // 26

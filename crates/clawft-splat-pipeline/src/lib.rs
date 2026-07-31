@@ -17,6 +17,7 @@
 
 pub mod config;
 pub mod job;
+pub mod multi_cam;
 pub mod pipeline;
 pub mod run;
 pub mod session;
@@ -25,6 +26,10 @@ pub mod world_model;
 
 pub use config::PipelineConfig;
 pub use job::{JobDirs, JobRecord, JobStatus, Metrics, Stage};
+pub use multi_cam::{
+    CAMERAS_JSON, CameraEntry, CamerasDocument, MULTICAM_PROTOCOL_V1, MultiCamSession,
+    flatten_frames, is_multi_cam_session, parse_cameras_json, parse_multi_cam_session,
+};
 pub use pipeline::{now_ms, run_job};
 pub use session::{
     CAPTURE_PROTOCOL_V1, InputKind, JobInput, PoseLine, SESSION_DIR_NAME, SessionLayout,

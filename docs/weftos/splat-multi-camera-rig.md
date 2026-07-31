@@ -1,6 +1,6 @@
 # Multi-camera fixed rigs (known positions)
 
-**Status:** Design (2026-07-30)  
+**Status:** M0 schema shipped (WEFT-711, 2026-07-31) — design + `cameras.json` parse / multi-folder layout in `clawft-splat-pipeline::multi_cam`  
 **Mode:** Infrastructure / room install — *not* free-walk phone capture  
 
 **Related:**
@@ -188,12 +188,23 @@ New camera must:
 
 ```
 session-<uuid>/
-  cameras.json           # id, model, K, T_world_cam, sync
+  cameras.json           # protocol weft.multicam.v1; id, model, K, T_world_cam, sync
   cam_a/frames/...
   cam_b/frames/...
   poses optional if moving heads
   session.json
 ```
+
+### M0 implementation (WEFT-711)
+
+| Piece | Location |
+|-------|----------|
+| Schema types | `clawft_splat_pipeline::{CamerasDocument, CameraEntry}` |
+| Parse / detect | `parse_cameras_json`, `is_multi_cam_session`, `parse_multi_cam_session` |
+| Protocol id | `weft.multicam.v1` (`MULTICAM_PROTOCOL_V1`) |
+| Dry-run flatten | `flatten_frames` → ordered list for existing image-set train path |
+
+**Manual 2-cam dry-run:** build a directory with `cameras.json` (≥2 entries) and `cam_a/frames`, `cam_b/frames` image files; call `parse_multi_cam_session`. Full splatd multi-folder ingest job API is M1.
 
 ---
 
@@ -215,7 +226,7 @@ Both share: **known camera stats**, one world frame, world-model leaves. Differ 
 
 | Phase | Plane | Work |
 |-------|-------|------|
-| **M0** | **WEFT-711** | Spec cameras.json + multi-folder ingest in splatd |
+| **M0** | **WEFT-711** | ✅ Spec `cameras.json` + multi-folder parse in `clawft-splat-pipeline` (splatd job API still single-session; M1 wires multi-folder ingest) |
 | **M1** | *(later)* | 2-cam known-pose prototype (room corner) |
 | **M2** | 3–4 cam room; locked extrinsics; single train |
 | **M3** | Live frustums + coverage map of FOV union |
@@ -226,4 +237,5 @@ Both share: **known camera stats**, one world frame, world-model leaves. Differ 
 
 ## 11. History
 
+- 2026-07-31: M0 — `cameras.json` schema + multi-folder parse (WEFT-711) in `clawft-splat-pipeline::multi_cam`.
 - 2026-07-30: Split from multi-cam discussion into standalone infrastructure capture mode.

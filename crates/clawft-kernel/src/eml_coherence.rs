@@ -111,7 +111,8 @@ impl GraphFeatures {
             0.0
         };
 
-        let component_count = graph.connected_components().len() as f64;
+        // WEFT-510: O(1) incremental component count (union-find on CausalGraph).
+        let component_count = graph.component_count_fast() as f64;
 
         Self {
             node_count: n,
