@@ -1,0 +1,33 @@
+[package]
+name = "weftos-worldmodel"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LeWM latent world-model facade: re-exports core traits + default impls (single entrypoint for consumers). WEFT-522."
+keywords = ["weftos", "lewm", "world-model", "jepa", "facade"]
+categories = ["science", "algorithms"]
+
+[features]
+default = []
+# Optional host-side marker (crate is no_std + alloc by default).
+std = ["weftos-worldmodel-core/std", "weftos-worldmodel-impls/std"]
+# Forward optional candle ML skeleton from impls (no weights / no training).
+# Default CI never enables this — see weftos-worldmodel-impls README.
+candle = ["weftos-worldmodel-impls/candle", "std"]
+
+[dependencies]
+weftos-worldmodel-core = { workspace = true, default-features = false }
+weftos-worldmodel-impls = { workspace = true, default-features = false }
+
+[dev-dependencies]
+weftos-worldmodel-core = { workspace = true, default-features = false }
+weftos-worldmodel-impls = { workspace = true, default-features = false }
+
+[package.metadata.docs.rs]
+all-features = false
+features = ["std"]
+rustdoc-args = ["--cfg", "docsrs"]

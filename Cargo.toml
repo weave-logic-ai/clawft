@@ -34,6 +34,8 @@ members = [
     "crates/weftos-worldmodel-core",
     # WEFT-521: LeWM trait impls (null/stub default; optional candle skeleton).
     "crates/weftos-worldmodel-impls",
+    # WEFT-522: LeWM facade — re-exports core traits + default impls (single entrypoint).
+    "crates/weftos-worldmodel",
     # `weftos-leaf-display` removed from the workspace in Phase E
     # (2026-05-15) — superseded by `weftos-leaf-scene`,
     # `weftos-leaf-renderer`, and `weftos-scene-builder`. The directory
@@ -323,6 +325,7 @@ clawft-wasm-host = { version = "0.6.20", path = "crates/clawft-wasm-host" }
 clawft-plugin-treesitter = { version = "0.6.20", path = "crates/clawft-plugin-treesitter" }
 weftos-worldmodel-core = { version = "0.6.20", path = "crates/weftos-worldmodel-core", default-features = false }
 weftos-worldmodel-impls = { version = "0.6.20", path = "crates/weftos-worldmodel-impls", default-features = false }
+weftos-worldmodel = { version = "0.6.20", path = "crates/weftos-worldmodel", default-features = false }
 clawft-graphify = { version = "0.6.20", path = "crates/clawft-graphify", default-features = false }
 clawft-security = { version = "0.6.20", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.20", path = "crates/clawft-kernel", default-features = false }

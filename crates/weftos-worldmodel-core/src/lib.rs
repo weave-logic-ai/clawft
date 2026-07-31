@@ -2,7 +2,7 @@
 //!
 //! First crate of the LeWM 7-crate batch (WEFT-520). Defines the no_std surface
 //! that impls (`weftos-worldmodel-impls`, WEFT-521) and the facade
-//! (`weftos-worldmodel`, WEFT-522) will satisfy.
+//! (`weftos-worldmodel`, WEFT-522) satisfy.
 //!
 //! # Latent contract (WEFT-543)
 //!

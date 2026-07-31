@@ -1,0 +1,117 @@
+---
+title: "LeWM — Latent World Model"
+description: "User-facing facade for the LeWM latent world model: core traits, default stubs, SIGReg latent contract (192-dim), and the crate split for sensor/service work."
+---
+
+WeftOS ships a **latent world model (LeWM)** stack for mesh sensor perception,
+prediction (`pred_φ`), CEM-style planning, and lattice query APIs. Consumers
+depend on a single facade crate rather than wiring core traits and
+implementations separately.
+
+**Source**: `crates/weftos-worldmodel/` (facade) · `weftos-worldmodel-core` · `weftos-worldmodel-impls`
+**Tickets**: WEFT-520 (core) · WEFT-521 (impls) · **WEFT-522** (facade)
+**Phase**: research / 0.9.x LeWM batch (ws17)
+
+## Crate split
+
+| Crate | Role |
+|-------|------|
+| [`weftos-worldmodel`](https://crates.io/crates/weftos-worldmodel) | **Facade** — re-exports traits + default stubs; single entrypoint |
+| [`weftos-worldmodel-core`](https://crates.io/crates/weftos-worldmodel-core) | `no_std` traits, `LATENT_DIM = 192`, errors, lattice method names |
+| [`weftos-worldmodel-impls`](https://crates.io/crates/weftos-worldmodel-impls) | Null/hash stubs, `StubLattice`, optional candle skeleton |
+
+Downstream work (sensor pipeline, service binary, LatticeApi hosts) should
+`use weftos_worldmodel::…` only. Pinning core/impls directly is reserved for
+crate authors inside the LeWM batch.
+
+## Latent contract (WEFT-543)
+
+SIGReg manifold is isotropic Gaussian `N(0, I)` in **192** dimensions for
+`mesh.sensor.v1`:
+
+```text
+LATENT_DIM     = 192
+LATENT_DIM_U16 = 192   # wire-friendly
+```
+
+Changing width requires a **wire major-version bump**. Receivers must reject
+mismatched `latent_dim` on observation frames.
+
+## Quick start (weight-free stubs)
+
+Default builds pull **no candle, no model files**. Stubs satisfy the traits so
+service scaffolding and integration tests can land before trained weights.
+
+```rust
+use weftos_worldmodel::{
+    default_stub_lattice, Action, DefaultWorldModel, LatticeApi,
+    ObservationFrame, LATENT_DIM_U16,
+};
+
+// Composed lattice (encoder + predictor + planner)
+let mut lattice = default_stub_lattice();
+let z = lattice
+    .observe(ObservationFrame {
+        bytes: b"sensor-frame",
+        latent_dim: LATENT_DIM_U16,
+        timestamp_ms: 0,
+    })
+    .expect("observe");
+assert_eq!(z.len(), 192);
+
+let _plan = lattice.plan(&z, 4).expect("plan");
+let _pred = lattice.predict(&z, &Action::null()).expect("predict");
+
+// Or the full stub stack (encoder, action encoder, SIGReg, …)
+let mut wm = DefaultWorldModel::new();
+let (z2, health) = wm
+    .observe(ObservationFrame {
+        bytes: b"frame",
+        latent_dim: LATENT_DIM_U16,
+        timestamp_ms: 1,
+    })
+    .expect("wm observe");
+assert!(health.is_healthy());
+let _ = z2;
+```
+
+### Cargo dependency
+
+```toml
+weftos-worldmodel = { workspace = true }                    # stubs only
+weftos-worldmodel = { workspace = true, features = ["std"] }
+# experimental — skeleton only, no trained weights:
+# weftos-worldmodel = { workspace = true, features = ["candle"] }
+```
+
+## Feature flags
+
+| Feature | Effect |
+|---------|--------|
+| **default** | Null/hash stubs, `no_std` + `alloc` |
+| **std** | Host marker on core + impls |
+| **candle** | Forwards ViT-tiny / AdaLN **skeleton** from impls (implies `std`). Without loaded weights, encoder/predictor return `WorldModelError::Unavailable`. **Not** enabled in default CI. |
+
+## Lattice API (7 methods)
+
+`LatticeApi` is the service-facing surface (see WEFT-527 for production wiring):
+
+1. `observe` / `observe_node` — sensor → latent
+2. `predict` — `pred_φ(z_t, a_t) → ẑ_{t+1}`
+3. `plan` — CEM-shaped horizon plan (stub today; WEFT-529)
+4. `recall` — latent nearest-neighbor (empty under stubs)
+5. `subscribe_surprise` / `subscribe_drift` — event handles
+
+## What is deliberately out of scope
+
+- **No ML training** in the facade (or default impls path).
+- Full ViT-tiny weights, AdaLN bake-off, and production CEM → WEFT-529 + training follow-ups.
+- Sensor pipeline + wire framing → WEFT-523.
+- Service binary topologies → WEFT-524.
+- Kernel injection / `lewm_invariant` seams stay at the host boundary (ADR-090 / WEFT-519); this facade does **not** depend on `clawft-kernel`.
+
+## Related
+
+- Research streams: `.planning/reviews/0.7.0-release-gate/17-research-streams.md` (T19–T21)
+- Impls honesty table: `crates/weftos-worldmodel-impls/README.md`
+- Spatial / BVH composition (future): ADR-056

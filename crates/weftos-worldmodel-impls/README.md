@@ -62,6 +62,6 @@ let _ = z_hat;
 
 - WEFT-520 — `weftos-worldmodel-core` traits (landed)
 - **WEFT-521** — this crate
-- WEFT-522 — facade re-export
+- WEFT-522 — facade re-export (`weftos-worldmodel`) — landed; prefer that for consumers
 - WEFT-529 — production pred_φ + CEM planner
 - WEFT-543 — latent dim = 192 contract

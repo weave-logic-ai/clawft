@@ -18,6 +18,7 @@
     "ecc",
     "eml",
     "eml-attention",
+    "lewm-worldmodel",
     "quantum",
     "quantum-nvidia",
     "democritus",

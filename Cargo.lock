@@ -10251,6 +10251,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "weftos-worldmodel"
+version = "0.6.20"
+dependencies = [
+ "weftos-worldmodel-core",
+ "weftos-worldmodel-impls",
+]
+
+[[package]]
 name = "weftos-worldmodel-core"
 version = "0.6.20"
 
