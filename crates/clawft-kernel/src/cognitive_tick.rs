@@ -413,12 +413,11 @@ pub async fn run_democritus_loop_with_chain(
         if needs_exact {
             // ── THINK (exact path) ─────────────────────────────────────
             // On steady state this runs once every `exact_every_n`
-            // ticks (or when EML drift exceeds threshold). We use the
-            // random-Fourier-features Laplacian estimator (O(m) per
-            // feature vector, ~3–6x faster than Lanczos at large m)
-            // as the routine path; ground-truth Lanczos stays
-            // available for whoever wants it. (Finding #4)
-            let spectral = causal.spectral_analysis_rff(64, 50);
+            // ticks (or when EML drift exceeds threshold). Path is
+            // size-dispatched (WEFT-361 / KG-004): Lanczos for n < 10K,
+            // RFF for larger graphs. Ground-truth Lanczos remains
+            // available via `spectral_analysis`. (Finding #4)
+            let (_method, spectral) = causal.spectral_analysis_auto();
             let exact_lambda_2 = spectral.lambda_2;
 
             let is_first = last_exact_coherence.is_none();

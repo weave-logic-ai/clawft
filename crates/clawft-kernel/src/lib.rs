@@ -304,7 +304,8 @@ pub use capability::{
 #[cfg(feature = "ecc")]
 pub use causal::{
     CausalEdge, CausalEdgeType, CausalGraph, CausalNode, ChangeEvent, ChangePrediction,
-    CouplingPair, SpectralResult,
+    CouplingPair, SPECTRAL_EML_MIN_NODES, SPECTRAL_RFF_MIN_NODES, SpectralMethod, SpectralResult,
+    select_spectral_method,
 };
 #[cfg(feature = "ecc")]
 pub use causal_predict::{

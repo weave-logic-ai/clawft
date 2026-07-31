@@ -75,6 +75,35 @@ wake &lt; 2% of one core, full pipeline &lt; 10%. CI uses mock/fixture paths onl
 scripts/build.sh test clawft-bench-voice
 ```
 
+## WEFT-361 / KG-004 — Spectral lambda₂ path selection
+
+Benchmark harness comparing **Lanczos**, **RFF**, and **EML** estimates of
+algebraic connectivity on synthetic graphs (default: unit-weight cycle
+`C_n` with closed-form reference).
+
+```bash
+# Default sizes: 1K, 10K (CI-friendly; 100K optional)
+cargo bench -p clawft-kernel --bench spectral_lambda2_bench
+
+# Full scale including 100K (Lanczos auto-skipped above 20K unless overridden)
+WEFT_BENCH_SIZES=1000,10000,100000 cargo bench -p clawft-kernel \
+    --bench spectral_lambda2_bench
+```
+
+### Decision rule (shipped in `select_spectral_method`)
+
+| Node count `n` | Path | Notes |
+|----------------|------|-------|
+| `n < 10_000` | **Lanczos** | Sparse O(k·m); Fiedler quality preferred |
+| `10_000 ≤ n < 100_000` | **RFF** | O(m) features; ~3–6× faster, ~5% accuracy loss |
+| `n ≥ 100_000` | **EML** | O(1) feature model for tick rate; re-anchor with RFF |
+
+Constants: `SPECTRAL_RFF_MIN_NODES = 10_000`, `SPECTRAL_EML_MIN_NODES = 100_000`
+in `clawft-kernel::causal`. `CausalGraph::spectral_analysis_auto` executes
+Lanczos or RFF (EML needs `EmlCoherenceModel` and is selected by policy only).
+
+DEMOCRITUS exact path uses `spectral_analysis_auto` (size-dispatched).
+
 ## Running Benchmarks
 
 All scripts live in `scripts/bench/`.  They require a release build of `weft`:

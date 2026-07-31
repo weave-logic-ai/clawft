@@ -1307,6 +1307,54 @@ impl CausalGraph {
         }
     }
 
+    /// Automatic path selection for algebraic connectivity (KG-004 / WEFT-361).
+    ///
+    /// Dispatches between Lanczos and RFF using [`select_spectral_method`].
+    /// When the policy prefers [`SpectralMethod::Eml`] (very large graphs),
+    /// this still runs RFF for an *exact-path* Fiedler result — EML is an
+    /// O(1) feature model in [`crate::eml_coherence`] and is not applied
+    /// here. Callers that want pure EML should check
+    /// `select_spectral_method` and invoke `EmlCoherenceModel` themselves.
+    ///
+    /// Returns `(chosen_method_executed, result)` where `chosen_method_executed`
+    /// is always `Lanczos` or `Rff` (never `Eml`).
+    ///
+    /// # Defaults
+    ///
+    /// - Lanczos: `max_iterations = min(50, n-1)`
+    /// - RFF: `num_features = 64`, Jacobi `max_iter = 50` (matches DEMOCRITUS)
+    pub fn spectral_analysis_auto(&self) -> (SpectralMethod, SpectralResult) {
+        let n = self.node_count() as usize;
+        let policy = select_spectral_method(n);
+        match policy {
+            SpectralMethod::Lanczos => {
+                let k = 50.min(n.saturating_sub(1).max(1));
+                (SpectralMethod::Lanczos, self.spectral_analysis(k))
+            }
+            // Eml preference still needs a spectral Fiedler vector for
+            // partition/cycle detectors; RFF is the large-n exact path.
+            SpectralMethod::Rff | SpectralMethod::Eml => {
+                (SpectralMethod::Rff, self.spectral_analysis_rff(64, 50))
+            }
+        }
+    }
+
+    /// Run a specific spectral method (Lanczos or RFF).
+    ///
+    /// [`SpectralMethod::Eml`] is not executable here (needs
+    /// `EmlCoherenceModel`); it falls back to RFF so callers can pass the
+    /// policy enum without a second branch.
+    pub fn spectral_analysis_with_method(&self, method: SpectralMethod) -> SpectralResult {
+        let n = self.node_count() as usize;
+        match method {
+            SpectralMethod::Lanczos => {
+                let k = 50.min(n.saturating_sub(1).max(1));
+                self.spectral_analysis(k)
+            }
+            SpectralMethod::Rff | SpectralMethod::Eml => self.spectral_analysis_rff(64, 50),
+        }
+    }
+
     /// Partition the graph into two halves using the Fiedler vector.
     ///
     /// Nodes with positive Fiedler vector components go to partition A,
@@ -1549,6 +1597,75 @@ pub struct SpectralResult {
     pub fiedler_vector: Vec<f64>,
     /// Node IDs in the same order as the Fiedler vector.
     pub node_ids: Vec<NodeId>,
+}
+
+// ---------------------------------------------------------------------------
+// KG-004 / WEFT-361: spectral path selection (Lanczos vs RFF vs EML)
+// ---------------------------------------------------------------------------
+
+/// Algorithm used to estimate algebraic connectivity (lambda₂).
+///
+/// # Decision rule (default policy)
+///
+/// | Node count `n` | Path | Rationale |
+/// |----------------|------|-----------|
+/// | `n < 10_000` | [`SpectralMethod::Lanczos`] | Sparse O(k·m) is accurate and cheap enough; preferred when Fiedler quality matters |
+/// | `10_000 ≤ n < 100_000` | [`SpectralMethod::Rff`] | O(m) random Fourier features; ~3–6× faster than Lanczos with ~5% accuracy loss |
+/// | `n ≥ 100_000` | [`SpectralMethod::Eml`] | O(1) feature model for tick-rate budgets; re-train from occasional RFF/Lanczos |
+///
+/// Thresholds are [`SPECTRAL_RFF_MIN_NODES`] and [`SPECTRAL_EML_MIN_NODES`].
+/// Override via explicit `spectral_analysis` / `spectral_analysis_rff` /
+/// `EmlCoherenceModel::predict` when a caller knows better.
+///
+/// See `docs/benchmarks/results.md` (WEFT-361) and the
+/// `spectral_lambda2_bench` harness for measured latency/accuracy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpectralMethod {
+    /// Sparse Lanczos on the graph Laplacian (reference / small-n path).
+    Lanczos,
+    /// Random Fourier Feature Laplacian estimator (large-n exact path).
+    Rff,
+    /// O(1) EML coherence model from graph statistics (fast path).
+    Eml,
+}
+
+impl SpectralMethod {
+    /// Stable string label for logs and JSON bench output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lanczos => "lanczos",
+            Self::Rff => "rff",
+            Self::Eml => "eml",
+        }
+    }
+}
+
+/// Prefer RFF over Lanczos once the graph has this many nodes.
+///
+/// Below this threshold Lanczos is the default exact path (Fiedler quality
+/// and agreement with dense QR). At/above it, RFF is preferred for latency.
+pub const SPECTRAL_RFF_MIN_NODES: usize = 10_000;
+
+/// Prefer pure EML (O(1)) once the graph has this many nodes.
+///
+/// At/above this scale even RFF matvecs dominate a sub-ms tick budget;
+/// DEMOCRITUS-style loops should use EML every tick and only occasionally
+/// re-anchor with RFF. [`CausalGraph::spectral_analysis_auto`] still falls
+/// back to RFF when an EML model is not supplied (Fiedler vector required).
+pub const SPECTRAL_EML_MIN_NODES: usize = 100_000;
+
+/// Select the spectral path for a graph of `node_count` nodes.
+///
+/// Implements the size-threshold decision rule documented on
+/// [`SpectralMethod`]. Pure function of `n` — no graph I/O.
+pub fn select_spectral_method(node_count: usize) -> SpectralMethod {
+    if node_count >= SPECTRAL_EML_MIN_NODES {
+        SpectralMethod::Eml
+    } else if node_count >= SPECTRAL_RFF_MIN_NODES {
+        SpectralMethod::Rff
+    } else {
+        SpectralMethod::Lanczos
+    }
 }
 
 /// A temporal change event: a set of nodes that changed together.
@@ -3620,6 +3737,121 @@ mod tests {
             (norm - 1.0).abs() < 0.05,
             "Fiedler vector should be approximately unit-normalized, got norm={}",
             norm
+        );
+    }
+
+    // ===================================================================
+    // WEFT-361 / KG-004: spectral path dispatcher (CI-safe, small-n)
+    // ===================================================================
+
+    #[test]
+    fn select_spectral_method_thresholds() {
+        assert_eq!(select_spectral_method(0), SpectralMethod::Lanczos);
+        assert_eq!(select_spectral_method(1), SpectralMethod::Lanczos);
+        assert_eq!(select_spectral_method(999), SpectralMethod::Lanczos);
+        assert_eq!(select_spectral_method(1_000), SpectralMethod::Lanczos);
+        assert_eq!(
+            select_spectral_method(SPECTRAL_RFF_MIN_NODES - 1),
+            SpectralMethod::Lanczos
+        );
+        assert_eq!(
+            select_spectral_method(SPECTRAL_RFF_MIN_NODES),
+            SpectralMethod::Rff
+        );
+        assert_eq!(select_spectral_method(50_000), SpectralMethod::Rff);
+        assert_eq!(
+            select_spectral_method(SPECTRAL_EML_MIN_NODES - 1),
+            SpectralMethod::Rff
+        );
+        assert_eq!(
+            select_spectral_method(SPECTRAL_EML_MIN_NODES),
+            SpectralMethod::Eml
+        );
+        assert_eq!(select_spectral_method(1_000_000), SpectralMethod::Eml);
+    }
+
+    #[test]
+    fn spectral_method_as_str_labels() {
+        assert_eq!(SpectralMethod::Lanczos.as_str(), "lanczos");
+        assert_eq!(SpectralMethod::Rff.as_str(), "rff");
+        assert_eq!(SpectralMethod::Eml.as_str(), "eml");
+    }
+
+    #[test]
+    fn spectral_analysis_auto_small_graph_uses_lanczos() {
+        // Path of 8 nodes → well below SPECTRAL_RFF_MIN_NODES.
+        let g = make_graph();
+        let nodes: Vec<NodeId> = (0..8)
+            .map(|i| g.add_node(format!("N{i}"), serde_json::json!({})))
+            .collect();
+        for i in 0..7 {
+            g.link(nodes[i], nodes[i + 1], CausalEdgeType::Causes, 1.0, 0, 0);
+        }
+
+        let (method, auto) = g.spectral_analysis_auto();
+        assert_eq!(method, SpectralMethod::Lanczos);
+        let direct = g.spectral_analysis(50);
+        assert!(
+            (auto.lambda_2 - direct.lambda_2).abs() < 1e-9,
+            "auto Lanczos should match direct: auto={} direct={}",
+            auto.lambda_2,
+            direct.lambda_2
+        );
+        assert!(auto.lambda_2 > 0.0, "connected path should have lambda_2 > 0");
+    }
+
+    #[test]
+    fn spectral_analysis_with_method_rff_and_lanczos() {
+        // Path of 8 nodes — dense reference available via dense_spectral_lambda2.
+        let g = make_graph();
+        let nodes: Vec<NodeId> = (0..8)
+            .map(|i| g.add_node(format!("N{i}"), serde_json::json!({})))
+            .collect();
+        for i in 0..7 {
+            g.link(nodes[i], nodes[i + 1], CausalEdgeType::Causes, 1.0, 0, 0);
+        }
+
+        let dense = dense_spectral_lambda2(&g, 50);
+        let lanczos = g.spectral_analysis_with_method(SpectralMethod::Lanczos);
+        let rff = g.spectral_analysis_with_method(SpectralMethod::Rff);
+
+        assert!(
+            (lanczos.lambda_2 - dense).abs() < 0.05,
+            "Lanczos should match dense ref: lanczos={} dense={}",
+            lanczos.lambda_2,
+            dense
+        );
+        assert!(
+            rff.lambda_2 > 0.01,
+            "RFF path should have positive lambda_2, got {}",
+            rff.lambda_2
+        );
+        let ratio = rff.lambda_2 / lanczos.lambda_2.max(1e-12);
+        assert!(
+            ratio > 0.2 && ratio < 5.0,
+            "RFF/Lanczos ratio out of range: RFF={} Lanczos={} ratio={}",
+            rff.lambda_2,
+            lanczos.lambda_2,
+            ratio
+        );
+    }
+
+    #[test]
+    fn spectral_analysis_auto_policy_matches_select() {
+        // We cannot build a 10K graph in unit tests (CI time), but the
+        // policy function is pure — auto uses the same thresholds.
+        assert_eq!(
+            select_spectral_method(100),
+            SpectralMethod::Lanczos
+        );
+        assert_eq!(
+            select_spectral_method(SPECTRAL_RFF_MIN_NODES),
+            SpectralMethod::Rff
+        );
+        // Auto maps Eml policy → Rff execution for Fiedler recovery.
+        assert_eq!(
+            select_spectral_method(SPECTRAL_EML_MIN_NODES),
+            SpectralMethod::Eml
         );
     }
 

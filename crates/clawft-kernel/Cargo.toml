@@ -165,3 +165,9 @@ rand_distr = "0.4"
 name = "vector_backend_bench"
 harness = false
 required-features = ["ecc"]
+
+# WEFT-361 / KG-004: RFF vs Lanczos vs EML lambda₂ at 1K/10K/100K.
+[[bench]]
+name = "spectral_lambda2_bench"
+harness = false
+required-features = ["ecc"]
