@@ -19,7 +19,8 @@ from pptx.oxml.ns import qn
 from lxml import etree
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# scripts/dev/<this file> → repo root is parents[2]
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / ".planning" / "clients" / "qsr" / "qsr-vp-briefing.pptx"
 
 # ---------------------------------------------------------------------------

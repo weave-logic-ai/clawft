@@ -13,6 +13,15 @@ time, then add a matching `[X.Y.Z]: ...compare/...` link to the
 footnote block at the bottom of the file. The release runbook documents
 the cut-over (`docs/deployment/release.md`).
 
+### Changed
+
+- **Scripts audit (WEFT-465)**: disposition for top-level “orphan”
+  scripts recorded in `docs/development/scripts-audit.md`. Wake unit
+  files and `dev_server.py` kept (live CLI / `build.sh serve`);
+  `weave-init.sh` kept (Claude agent install, distinct from
+  `weaver init`); one-shot `build_vp_deck.py` moved to
+  `scripts/dev/build_vp_deck.py`.
+
 ### Fixed
 
 - **Release CI (WEFT-593)**: cargo-dist plan job no longer loses its
