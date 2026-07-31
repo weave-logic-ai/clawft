@@ -392,7 +392,15 @@ impl ModelDownloadManager {
 
     /// List available TTS models. See [`Self::available_stt_models`] re: hash pinning.
     pub fn available_tts_models() -> Vec<ModelInfo> {
-        vec![ModelInfo {
+        vec![
+ModelInfo {
+                id: "chatterbox-clone-am_onyx".into(),
+                // Placeholder URL: refused without sha256_hint (see module integrity rules).
+                url: "https://example.invalid/weftos/chatterbox-clone-am_onyx-NOT-AVAILABLE".into(),
+                sha256_hint: None,
+                size_bytes: 0,
+            },
+ModelInfo {
             id: "vits-piper-en_US-amy-medium".into(),
             url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-medium.tar.bz2".into(),
             sha256_hint: None,
@@ -401,12 +409,22 @@ impl ModelDownloadManager {
     }
 
     /// List available VAD models. See [`Self::available_stt_models`] re: hash pinning.
+    ///
+    /// Silero VAD v5 ONNX (`silero_vad.onnx`, ~2.3 MB) stages for
+    /// `clawft-voice-onnx::SileroVoiceness` under
+    /// `~/.weftos/models/silero-vad/` (WEFT-644). After `ensure_model`, call
+    /// `clawft_voice_onnx::stage_silero_model_file` (or re-copy the cache file)
+    /// so runtime discovery finds the weights at the canonical path.
     pub fn available_vad_models() -> Vec<ModelInfo> {
         vec![ModelInfo {
             id: "silero-vad-v5".into(),
-            url: "https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx".into(),
-            sha256_hint: None,
-            size_bytes: 2_000_000,
+            // Upstream moved from files/ → src/silero_vad/data/ (v5+ packaging).
+            url: "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx".into(),
+            // Pinned 2026-07-31 against snakers4/silero-vad master silero_vad.onnx.
+            sha256_hint: Some(
+                "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3".into(),
+            ),
+            size_bytes: 2_327_524,
         }]
     }
 
@@ -625,9 +643,21 @@ mod tests {
     fn canonical_catalog_is_discoverable() {
         let all = ModelDownloadManager::all_canonical_models();
         assert!(all.len() >= 3);
-        // Until hashes are release-pinned, catalog entries must not pretend
-        // to be integrity-safe (is_cached / ensure refuse placeholders).
+        // STT/TTS stay unpinned until release tooling commits digests.
+        // Silero VAD (WEFT-644) is production-pinned so `weft voice setup`
+        // can stage silero_vad.onnx for SileroVoiceness.
         for m in &all {
+            if m.id == "silero-vad-v5" {
+                assert!(
+                    !is_placeholder_hash(m.sha256_hint.as_deref()),
+                    "silero-vad-v5 must carry a real SHA-256 pin"
+                );
+                assert!(
+                    m.url.contains("silero_vad.onnx"),
+                    "silero URL must point at silero_vad.onnx"
+                );
+                continue;
+            }
             assert!(
                 is_placeholder_hash(m.sha256_hint.as_deref()),
                 "catalog entry {} still needs a real pin or must stay unpinned",

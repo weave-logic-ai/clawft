@@ -809,6 +809,16 @@ pub struct TtsConfig {
     /// Speaking speed multiplier (1.0 = normal).
     #[serde(default = "default_speed")]
     pub speed: f32,
+
+    /// Native Talk-Mode **fast-tier** engine preference (WEFT-613 / ADR-061).
+    ///
+    /// Wire values: `"auto"` (default), `"kokoro"`, `"chatterbox"` (alias
+    /// `"clone"`). `auto` selects the cloned-voice path when native Chatterbox
+    /// (or equivalent) inference is runtime-ready; otherwise Kokoro preset.
+    /// In 0.8 clone inference is **not** implemented — `auto` always falls
+    /// through to Kokoro. Env override: `WEFTOS_FAST_TTS`.
+    #[serde(default = "default_fast_engine", alias = "fastEngine")]
+    pub fast_engine: String,
 }
 
 /// local Piper model default. Cloud proxy (`openai` / `elevenlabs`) requires
@@ -862,6 +872,13 @@ fn default_speed() -> f32 {
     1.0
 }
 
+/// Default native fast-tier preference (david profile intent: auto → clone when ready).
+pub const DEFAULT_TTS_FAST_ENGINE: &str = "auto";
+
+fn default_fast_engine() -> String {
+    DEFAULT_TTS_FAST_ENGINE.into()
+}
+
 impl Default for TtsConfig {
     fn default() -> Self {
         Self {
@@ -870,6 +887,7 @@ impl Default for TtsConfig {
             model: default_tts_model(),
             voice: String::new(),
             speed: default_speed(),
+            fast_engine: default_fast_engine(),
         }
     }
 }
@@ -1174,6 +1192,18 @@ mod tests {
     }
 
     /// WEFT-222: two configured personalities resolve distinct voice_id/speed/pitch.
+    #[test]
+    fn tts_fast_engine_defaults_to_auto() {
+        let cfg = TtsConfig::default();
+        assert_eq!(cfg.fast_engine, DEFAULT_TTS_FAST_ENGINE);
+        let json = r#"{"enabled":true}"#;
+        let parsed: TtsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.fast_engine, "auto");
+        let camel = r#"{"fastEngine":"chatterbox"}"#;
+        let c: TtsConfig = serde_json::from_str(camel).unwrap();
+        assert_eq!(c.fast_engine, "chatterbox");
+    }
+
     #[test]
     fn resolve_tts_for_agent_two_personalities() {
         let mut cfg = VoiceConfig::default();

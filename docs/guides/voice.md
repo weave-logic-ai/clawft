@@ -184,6 +184,34 @@ native talk or switch to a cloud provider.
 
 Alias: `"local-stub"` is accepted as local (stub / empty-audio engines).
 
+### 3.1.1 Native dual-layer fast tier (WEFT-613)
+
+Native Talk-Mode uses a dual-layer TTS (ADR-061): **fast** ack + **slow**
+expressive answer (Orpheus over Ollama → SNAC).
+
+| Fast engine | Status (0.8) | Notes |
+|-------------|--------------|--------|
+| **Kokoro** (ONNX preset) | **Default** | Works when model staged under `.weftos/models/kokoro/` |
+| **Chatterbox** (cloned voice) | Scaffold only | Bundle probe + selection; **no** native inference yet |
+
+```toml
+[voice.tts]
+provider = "local"
+# auto | kokoro | chatterbox  (env: WEFTOS_FAST_TTS)
+fast_engine = "auto"
+```
+
+- `auto` (default, david-profile intent): use Chatterbox when
+  `ChatterboxTts::is_runtime_available()`; otherwise Kokoro.
+- In 0.8, clone inference is gated off (`CHATTERBOX_INFERENCE_IMPLEMENTED =
+  false`), so `auto` always falls through to Kokoro — accepted **timbre split**
+  vs Orpheus until 0.9.x.
+- Optional staging (does not enable audio by itself):
+  `.weftos/models/chatterbox/{chatterbox.onnx,reference.wav}` or
+  `WEFTOS_CHATTERBOX_DIR`.
+
+See `docs/plans/wave-ws10-WEFT-613-result.md`.
+
 ### 3.2 Browser (UI Web Speech opt-in)
 
 Uses the Web Speech API built into the browser. No API key is needed.

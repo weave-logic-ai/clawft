@@ -18,9 +18,14 @@
 //!   (`POST /api/generate`, `raw`+`stream`), parses the `<custom_token_N>`
 //!   stream, and decodes it to gap-free PCM through a [`SnacDecode`]. Performs
 //!   paralinguistic tags (`<laugh>`) literally — text is never scrubbed.
-//! - [`KokoroTts`] — **fast** layer (`TtsTier::Fast`). A native ONNX TTS for the
-//!   Speculative ack (<1 s TTFA). Chatterbox stays a future backend behind the
-//!   same [`TtsEngine`] when an ONNX export exists.
+//! - [`KokoroTts`] — **fast** layer (`TtsTier::Fast`) **0.8 default**. A native
+//!   ONNX TTS for the Speculative ack (<1 s TTFA). Generic preset voice
+//!   (timbre may shift vs Orpheus).
+//! - [`ChatterboxTts`] — **fast** layer scaffold for the voicelab **cloned**
+//!   voice (david / `am_onyx`). Bundle discovery + readiness gate only;
+//!   native inference is **not** implemented in 0.8 (WEFT-613 → 0.9.x).
+//! - [`fast_tier`] — selects clone path when runtime-ready, else Kokoro
+//!   (`WEFTOS_FAST_TTS` / `voice.tts.fast_engine`).
 //!
 //! # SNAC
 //!
@@ -33,12 +38,22 @@
 //!
 //! - `onnx` — pull in `ort` for real SNAC + Kokoro inference. Without it the
 //!   token/frame front-end still compiles and is unit-tested; the decoders
-//!   return a clear [`clawft_channels::voice::types::VoiceError`].
+//!   return a clear [`clawft_channels::voice::types::VoiceError`]. Chatterbox
+//!   inference (when landed) will use the same gate.
 
+pub mod chatterbox;
+pub mod fast_tier;
 pub mod kokoro;
 pub mod orpheus;
 pub mod snac;
 
+pub use chatterbox::{
+    CHATTERBOX_INFERENCE_IMPLEMENTED, CHATTERBOX_SAMPLE_RATE, ChatterboxTts, DEFAULT_CLONE_VOICE_ID,
+};
+pub use fast_tier::{
+    FastEnginePreference, FastTierSelection, NativeFastEngineKind, build_native_fast_engine,
+    build_native_fast_engine_with, resolve_fast_engine, select_native_fast_tier,
+};
 pub use kokoro::KokoroTts;
 pub use orpheus::{OrpheusTts, parse_custom_token};
 pub use snac::{SnacDecode, SnacOnnxDecoder};

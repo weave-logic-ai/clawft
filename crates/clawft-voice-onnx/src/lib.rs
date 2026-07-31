@@ -21,6 +21,11 @@
 //!   TDT transducer greedy decode), satisfying
 //!   [`clawft_channels::voice::stt::SttBackend`]. Front-end: [`NemoMel`]
 //!   (NeMo 128-dim log-mel).
+//! - [`SileroVoiceness`] — Silero VAD v5 neural voice-activity detector,
+//!   satisfying [`clawft_channels::voice::voiceness::Voiceness`]. Stateful
+//!   512-sample windows with recurrent h/c state; falls back to
+//!   [`SpectralVoiceness`](clawft_channels::voice::voiceness::SpectralVoiceness)
+//!   when weights are absent. Select via [`preferred_voiceness`].
 //!
 //! # Feature flags
 //!
@@ -34,6 +39,7 @@ pub mod nemo_mel;
 pub mod parakeet;
 #[cfg(feature = "onnx")]
 mod parakeet_tdt;
+pub mod silero_vad;
 pub mod smart_turn;
 pub mod whisper_mel;
 
@@ -41,5 +47,10 @@ pub use ecapa::{EMBED_DIM, EcapaEmbedder};
 pub use fbank::{Fbank, N_MELS, SAMPLE_RATE};
 pub use nemo_mel::NemoMel;
 pub use parakeet::ParakeetStt;
+pub use silero_vad::{
+    CATALOG_ID as SILERO_CATALOG_ID, MODEL_ENV as SILERO_MODEL_ENV, MODEL_FILE as SILERO_MODEL_FILE,
+    SileroVoiceness, default_model_path as silero_default_model_path, home_model_dir as silero_home_model_dir,
+    preferred_voiceness, stage_model_file as stage_silero_model_file,
+};
 pub use smart_turn::SmartTurnEndpoint;
 pub use whisper_mel::WhisperMel;

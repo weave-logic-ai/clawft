@@ -391,6 +391,58 @@ jobs:
           fi
 
   # -------------------------------------------------------------------
+  # Experimental attention (eml-core) feature gate — WEFT-55.
+  #
+  # `experimental-attention` is OFF by default on eml-core. Default
+  # workspace check/test jobs never compile ToyEmlAttention,
+  # BaselineAttention, or the attention_* examples, so regressions
+  # under the flag would be silent. This job:
+  #
+  #   1. cargo check -p eml-core --features experimental-attention
+  #   2. cargo check the bench examples (attention_gate, attention_compare)
+  #   3. cargo test --lib under the feature (unit-level smoke; ~10s)
+  #
+  # We intentionally do NOT run `cargo run --example attention_gate`
+  # here: that go/no-go gate hardcodes ~15k CD trials and is a research
+  # criterion, not a PR-latency smoke. Compile + unit tests catch
+  # regressions; re-run the full gate locally when changing attention
+  # training:
+  #   cargo run -p eml-core --example attention_gate --features experimental-attention
+  # -------------------------------------------------------------------
+  experimental-attention:
+    name: Experimental attention feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-exp-attention-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-exp-attention-
+
+      - name: Check eml-core with experimental-attention
+        run: cargo check -p eml-core --features experimental-attention
+
+      - name: Check attention_gate example
+        run: cargo check -p eml-core --example attention_gate --features experimental-attention
+
+      - name: Check attention_compare example
+        run: cargo check -p eml-core --example attention_compare --features experimental-attention
+
+      - name: Unit-test attention modules (feature-gated smoke)
+        # Filter "attention" matches attention::* and baseline_attention::*.
+        run: cargo test -p eml-core --features experimental-attention --lib attention
+
+  # -------------------------------------------------------------------
   # UI: lint and type-check (when ui/ directory exists)
   # -------------------------------------------------------------------
   ui-check:

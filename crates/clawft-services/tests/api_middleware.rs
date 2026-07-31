@@ -158,6 +158,7 @@ fn make_state() -> (ApiState, Arc<TokenStore>) {
         routing_history: Arc::new(
             clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
         ),
+        rate_limiter: Arc::new(clawft_core::pipeline::rate_limiter::RateLimiter::new(60, 100)),
     };
     (state, auth)
 }
@@ -618,4 +619,103 @@ async fn admin_routing_stats_endpoint() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["count"], 1);
     assert_eq!(body["by_reason"]["rate_limited"], 1);
+}
+
+// ── WEFT-48/49: admin rate-limiter metrics + LRU flush ──────────────────
+
+#[tokio::test]
+async fn admin_rate_limiter_requires_auth() {
+    let (state, _auth) = make_state();
+    let app = build_router(state, &[], None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/rate-limiter")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let (state, _auth) = make_state();
+    let app = build_router(state, &[], None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/rate-limiter/flush")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_rate_limiter_metrics_endpoint() {
+    use http_body_util::BodyExt;
+
+    let (state, auth) = make_state();
+    // Seed traffic so metrics are non-zero.
+    assert!(state.rate_limiter.check("alice", 10));
+    assert!(state.rate_limiter.check("bob", 10));
+    assert!(state.rate_limiter.check("alice", 10));
+
+    let token = auth.generate_token(3600).unwrap();
+    let app = build_router(state, &[], None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/rate-limiter")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["window_seconds"], 60);
+    assert_eq!(body["global_rate_limit"], 100);
+    assert_eq!(body["tracked_senders"], 2);
+    assert_eq!(body["global_request_count"], 3);
+    assert_eq!(body["max_tracked_users"], 10_000);
+    assert!(body["global_utilization_pct"].as_f64().unwrap() > 0.0);
+}
+
+#[tokio::test]
+async fn admin_rate_limiter_flush_endpoint() {
+    use http_body_util::BodyExt;
+
+    let (state, auth) = make_state();
+    state.rate_limiter.check("alice", 10);
+    state.rate_limiter.check("bob", 10);
+    assert_eq!(state.rate_limiter.tracked_senders(), 2);
+
+    let token = auth.generate_token(3600).unwrap();
+    let app = build_router(state.clone(), &[], None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/rate-limiter/flush")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["flushed"], true);
+    assert_eq!(body["metrics"]["tracked_senders"], 0);
+    assert_eq!(body["metrics"]["global_request_count"], 0);
+    // Live Arc also cleared.
+    assert_eq!(state.rate_limiter.tracked_senders(), 0);
+    assert_eq!(state.rate_limiter.global_request_count(), 0);
 }

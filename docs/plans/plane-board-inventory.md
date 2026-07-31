@@ -1,6 +1,6 @@
 # Plane Board Inventory — WeftOS
 
-> Generated: 2026-07-31 03:28 UTC
+> Generated: 2026-07-31 04:48 UTC
 > Source: Plane workspace `weftos`
 > Machine-readable DAG: [`plane-dag.json`](./plane-dag.json)
 > Wave plan: [`plane-wave-plan.md`](./plane-wave-plan.md)
@@ -10,9 +10,9 @@
 | Metric | Count |
 |--------|------:|
 | Total tickets | 706 |
-| Open | 251 |
+| Open | 245 |
 | In Progress | 2 |
-| Done | 435 |
+| Done | 441 |
 | Cancelled | 20 |
 | Dependency edges | 56 |
 | Inferred domain edges | 23 |
@@ -20,19 +20,19 @@
 
 ### Open by cycle
 
-- **0.8.x**: 144
+- **0.8.x**: 138
 - **0.9.x**: 86
 - **1.0.x**: 21
 
 ### Open by workstream
 
 - **ws17-research**: 35
-- **ws02-kernel**: 26
+- **ws02-kernel**: 25
 - **ws12-knowledge-graph**: 25
-- **ws10-voice**: 23
 - **ws14-deployment**: 22
-- **ws09-clawft-dashboard**: 17
+- **ws10-voice**: 22
 - **ws16-browser-wasm**: 16
+- **ws09-clawft-dashboard**: 16
 - **ws11-agent-core-v1**: 15
 - **ws08-weftos-gui**: 14
 - **ws07-multi-agent**: 12
@@ -40,14 +40,14 @@
 - **ws15-mcp**: 9
 - **ws06-memory**: 8
 - **ws13-app-substrate**: 8
-- **ws05-channels**: 6
-- **ws01-core**: 5
+- **ws05-channels**: 5
+- **ws01-core**: 3
 
 ### Open by priority
 
 - **high**: 35
-- **medium**: 41
-- **low**: 160
+- **medium**: 36
+- **low**: 159
 - **none**: 15
 
 ---
@@ -61,8 +61,8 @@
 | WEFT-10 | Done | medium | 0.8.x | ws01-core | B | strong | — | — | ws01: bootstrap — split workspace from global at loader for PermissionResolver ceiling |
 | WEFT-11 | Todo | medium | 0.8.x | ws01-core | B | strong | — | — | ws01: rpc — implement Windows daemon transport (named pipes) for DaemonClient |
 | WEFT-12 | Done | low | 0.8.x | ws01-core | B | strong | — | — | ws01: rpc — replace version_check curl shell-out with reqwest |
-| WEFT-13 | Todo | medium | 0.8.x | ws01-core | G | strong | — | — | ws01: platform — implement OPFS-backed BrowserFileSystem persistence |
-| WEFT-14 | Todo | low | 0.8.x | ws01-core | G | strong | — | — | ws01: platform — land OPFS-or-equivalent BrowserEnvironment persistence |
+| WEFT-13 | Done | medium | 0.8.x | ws01-core | G | strong | — | — | ws01: platform — implement OPFS-backed BrowserFileSystem persistence |
+| WEFT-14 | Done | low | 0.8.x | ws01-core | G | strong | — | — | ws01: platform — land OPFS-or-equivalent BrowserEnvironment persistence |
 | WEFT-15 | In Progress | low | 0.9.x | ws01-core | B | strong | — | — | ws01: kernel-config — wire LogQuantizedStubConfig + SimdDistanceStubConfig runtime |
 | WEFT-16 | Done | medium | 0.7.x | ws01-core | B | strong | — | — | ws01: security — rationalize lenient validate_mcp_tool_name vs strict variant |
 | WEFT-17 | Cancelled | medium | 0.8.x | ws01-core | B | strong | — | — | ws01: rpc — add chain.append RPC for weaver soul promote |
@@ -183,7 +183,7 @@
 | WEFT-132 | Cancelled | medium | 0.9.x | ws02-kernel | B | strong | — | — | ws02: services-api — implement bridge.rs TODOs (skill, memory, config) |
 | WEFT-133 | Done | medium | 0.9.x | ws02-kernel | B | strong | — | — | ws02: services-api — add CSP middleware to API tower stack |
 | WEFT-134 | Done | high | 0.8.x | ws02-kernel | B | strong | — | — | ws02: tests — resolve test-suite hang in clawft-kernel --lib aggregate run |
-| WEFT-135 | Todo | medium | 0.8.x | ws02-kernel | B | strong | — | — | ws02: workspace — clean ~150 clippy errors (pre-existing debt) |
+| WEFT-135 | Done | medium | 0.8.x | ws02-kernel | B | strong | — | — | ws02: workspace — clean ~150 clippy errors (pre-existing debt) |
 | WEFT-136 | Done | medium | 0.8.x | ws02-kernel | B | strong | — | — | ws02: kernel — persist AppManager state to disk |
 | WEFT-137 | Done | medium | 0.8.x | ws02-kernel | B | strong | — | — | ws02: chain — implement chain-anchored anchoring beyond MockAnchor |
 | WEFT-138 | Done | low | 0.7.x | ws02-kernel | B | strong | — | — | ws02: docs — update docs/weftos/k-phases.md (K2.1/K3/K4/K5 mis-marked) |
@@ -218,7 +218,7 @@
 | WEFT-167 | Cancelled | medium | 0.7.x | ws05-channels | H | strong | — | — | ws05: Gateway — add per-endpoint rate limiting on auth/delegation/monitoring |
 | WEFT-168 | Done | medium | 0.7.x | ws05-channels | H | strong | — | — | ws05: Gateway bridge — implement skill install/uninstall, memory delete, config persist |
 | WEFT-169 | Done | medium | 0.8.x | ws05-channels | H | strong | — | — | ws05: Discord chunker — preserve fenced code, balance markdown, support Nitro/embeds/file  |
-| WEFT-170 | Todo | medium | 0.8.x | ws05-channels | H | strong | — | — | ws05: PluginHost C7 unification — migrate Telegram/Discord/Slack to ChannelAdapter |
+| WEFT-170 | Done | medium | 0.8.x | ws05-channels | H | strong | — | — | ws05: PluginHost C7 unification — migrate Telegram/Discord/Slack to ChannelAdapter |
 | WEFT-171 | Todo | medium | 0.9.x | ws05-channels | H | strong | — | — | ws05: Slash-command surface — decide consumer for ChannelHost::register_command |
 | WEFT-172 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Telegram — document or remove redundant 1s poll-interval sleep |
 | WEFT-173 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Discord — document intents bitmask default and cover privileged-intent rejection |
@@ -265,7 +265,7 @@
 | WEFT-214 | Done | medium | 0.8.x | ws10-voice | E | strong | WEFT-671 | — | ws10: voice_listen / voice_speak tools — wire to real STT/TTS with cloud fallback |
 | WEFT-215 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: weft voice setup — real model download with SHA-256 verify and progress UI |
 | WEFT-216 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WakeWordDetector — wire rustpotter or document an alternative |
-| WEFT-217 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP |
+| WEFT-217 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP |
 | WEFT-218 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WS voice:status — connect a real backend broadcaster |
 | WEFT-219 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: /api/voice/* — replace MSW-only mocks with real handlers in clawft-services |
 | WEFT-220 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: Windows install-service — automate schtasks or document manual route as final |
@@ -646,7 +646,7 @@
 | WEFT-595 | Done | high | 0.8.x | ws18-firmware | F | strong | — | — | ws08: leaf-display residual visual gap — single-buffer disambiguation (BUG-1) |
 | WEFT-596 | Done | high | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: ADR-057 substrate per-path read ACLs — implement (0.8.x mesh blocker) |
 | WEFT-597 | Done | medium | 0.8.x | ws02-kernel | B | strong | — | — | ws02: daemon tracing→ChainManager bridge — 12 ExoChain events bypass the chain |
-| WEFT-598 | Todo | medium | 0.8.x | ws09-clawft-dashboard | F | strong | — | — | ws09: Dependabot — triage 142 npm-side vulnerabilities (5 critical/41 high) |
+| WEFT-598 | Done | medium | 0.8.x | ws09-clawft-dashboard | F | strong | — | — | ws09: Dependabot — triage 142 npm-side vulnerabilities (5 critical/41 high) |
 | WEFT-599 | Todo | low | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: relax transitive wasm-bindgen =0.2.108 exact pin |
 | WEFT-600 | Done | high | 0.8.x | ws14-deployment | A | weak | — | WEFT-680 | ws14: workspace reqwest rustls-tls — fix static musl release build |
 | WEFT-601 | Done | medium | 0.8.x | ws01-core | B | weak | — | — | ws01: adopt cargo-nextest + fix 6 test/latent-bug flakes (gate 12/12 green) |
@@ -767,7 +767,7 @@
 
 ## Open tickets by workstream
 
-### ws01-core (5 open)
+### ws01-core (3 open)
 
 #### WEFT-11 — ws01: rpc — implement Windows daemon transport (named pipes) for DaemonClient
 
@@ -776,24 +776,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: Non-Unix DaemonClient::connect() returns None. Comment says "Windows named-pipe transport is planned for v0.2"; we are at 0.6.19 — slipped 4+ minor versions. Windows users cannot run the daemon at all.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-13 — ws01: platform — implement OPFS-backed BrowserFileSystem persistence
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: G · **AC**: strong
-- **Labels**: ws01-core, audit-finding, audit-0.7.0, stub, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: BrowserFileSystem is currently in-memory HashMap-backed. PWA users lose all state on reload. Comment says "acceptable for the current stub/MVP phase".
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-14 — ws01: platform — land OPFS-or-equivalent BrowserEnvironment persistence
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: G · **AC**: strong
-- **Labels**: ws01-core, audit-finding, audit-0.7.0, stub, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: BrowserEnvironment is in-memory only. Same UX consequence as the FS issue: env variables (e.g. API keys) are lost on reload.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-15 — ws01: kernel-config — wire LogQuantizedStubConfig + SimdDistanceStubConfig runtime
@@ -814,7 +796,7 @@
 - **Gap**: Config accepts both camelCase and snake_case via #[serde(alias)] and silently ignores unknown fields. Forward-compat is good; typo-resistance is bad. No off-by-default lint mode for typo detection.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws02-kernel (26 open)
+### ws02-kernel (25 open)
 
 #### WEFT-105 — ws02: mesh — implement K6.4 chain replay (LocalChain::tail_from + append_signed)
 
@@ -958,15 +940,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: LogQuantizedConfig::is_available() and SimdDistanceConfig::is_available() are hardwired false pending ruvector-core PR #352. Once that lands, flip the constants and the +14% QPS branch-free distance path opens.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-135 — ws02: workspace — clean ~150 clippy errors (pre-existing debt)
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws02-kernel, audit-finding, audit-0.7.0, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: scripts/build.sh check is green but scripts/build.sh clippy is red on ~150 pre-existing errors across clawft-types/src/goal.rs, clawft-rpc, eml-core, and older kernel/weave code. Blocks any clippy-as-gate aspiration.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-707 — ws14: ADR-077 A3 — WeftOS edge core in Android (identity UniFFI)
@@ -1142,16 +1115,7 @@
 - **Gap**: 10 EML opportunities for HNSW (adaptive ef, learned distance, cosine decomposition, search-path prediction, etc.). Items 3-10 are research; items 1-2 (adaptive beam, learned distance) are not yet implemented.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws05-channels (6 open)
-
-#### WEFT-170 — ws05: PluginHost C7 unification — migrate Telegram/Discord/Slack to ChannelAdapter
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: H · **AC**: strong
-- **Labels**: ws05-channels, audit-finding, audit-0.7.0, gap, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The trait shim (ChannelAdapterShim) exists, but Telegram, Discord, Slack still implement the legacy Channel trait directly. Migrating them to ChannelAdapter is the C7 deliverable; the migration changes the cancellation contract (poll-based plugin token vs tokio_util::sync::CancellationToken) and the inbound payload typ
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+### ws05-channels (5 open)
 
 #### WEFT-171 — ws05: Slash-command surface — decide consumer for ChannelHost::register_command
 
@@ -1510,7 +1474,7 @@
 - **Gap**: Umbrella item for the ADR-067 GUI phases G1 through G5 (conversation-graph GUI surface). Decompose into per-phase work items as each is picked up.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws09-clawft-dashboard (17 open)
+### ws09-clawft-dashboard (16 open)
 
 #### WEFT-301 — ws09: api-bridge — wire skill install/uninstall to real loader
 
@@ -1593,15 +1557,6 @@
 - **Gap**: WEFT-313 was closed as "scaffold shipped", but none of the six functional ACs landed. clawft-ui/src-tauri/src/lib.rs:1-16 explicitly lists the gaps: System tray with agent-status colour states (not shipped). Global hotkey Cmd+Shift+W / Ctrl+Shift+W (not shipped). weft-gateway side-car launch on app start, terminate on 
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-598 — ws09: Dependabot — triage 142 npm-side vulnerabilities (5 critical/41 high)
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws09-clawft-dashboard, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Dependabot reports 142 vulnerabilities (5 critical / 41 high) — heavily the npm side (root agentic-flow devdep + clawft-ui React/Vite). The cargo-audit gate (scripts/build.sh audit) only covers Rust deps; the npm surface is unaudited.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
 #### WEFT-312 — ws09: responsive — mobile sidebar drawer and chat input
 
 - **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: F · **AC**: strong
@@ -1665,16 +1620,7 @@
 - **Gap**: WEFT-315 shipped the bundle-size budget gate (scripts/bench/check-ui-bundle-size.sh) and an eslint-plugin-jsx-a11y static lint pass. The original AC explicitly required "axe-core integrated into the Playwright suite or run as a standalone script across all 14 routes" — that runtime axe-core scan is not in the tree. The
 - **Plan**: Wait for WEFT-561
 
-### ws10-voice (23 open)
-
-#### WEFT-217 — ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, bug, stub
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Both modules are passthroughs. EchoCanceller has a circular reference buffer that process() ignores; NoiseSuppressor tracks RMS noise floor via EMA but does not filter. The presence of computed-but-unused state is misleading.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+### ws10-voice (22 open)
 
 #### WEFT-613 — Voicelab parity: Chatterbox cloned-voice fast tier (native port)
 

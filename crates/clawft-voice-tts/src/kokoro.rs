@@ -6,9 +6,10 @@
 //! TTS (`thewh1teagle/kokoro-onnx` / sherpa-onnx export) that runs under `ort`.
 //! It is the **preset** layer, so paralinguistic markup is scrubbed
 //! ([`scrub_tags`]) — performing `<laugh>` is the slow expressive engine's job.
-//! Chatterbox / Piper are future backends behind this same
-//! [`TtsEngine`](clawft_channels::voice::tts::TtsEngine) once an ONNX export
-//! exists; this engine does not block on them.
+//! Chatterbox clone path is scaffolded in [`crate::chatterbox`] (WEFT-613);
+//! [`crate::fast_tier`] selects it when runtime-ready, else this Kokoro
+//! engine remains the 0.8 fast default. Piper may land later behind the same
+//! [`TtsEngine`](clawft_channels::voice::tts::TtsEngine).
 //!
 //! Inference mirrors the `ort` idiom in `clawft-voice-onnx`: a `tokens.txt`
 //! front-end (loaded if present), session build, positional tensor IO, and a

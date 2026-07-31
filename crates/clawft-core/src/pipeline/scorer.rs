@@ -6,10 +6,57 @@
 //!
 //! The active scorer is selected by configuration. Both implement
 //! [`QualityScorer`].
+//!
+//! # Error-indicator allowlist (WEFT-54)
+//!
+//! [`FitnessScorer`] lightly penalizes task completion when the response
+//! contains a configured refusal/error phrase. Defaults are **English-only**
+//! substring markers (see [`DEFAULT_ERROR_INDICATORS`]). This is a GEPA
+//! fitness heuristic — **not** a safety filter, jailbreak detector, or
+//! localization layer. Limits and known false positives are documented in
+//! `docs/guides/fitness-scorer-error-indicators.md`.
 
 use clawft_types::provider::{ContentBlock, LlmResponse, StopReason};
 
 use super::traits::{ChatRequest, QualityScore, QualityScorer};
+
+// ─── Default error indicators (WEFT-54) ───────────────────────────────
+
+/// Default refusal / soft-failure phrases used by [`FitnessScorerConfig`].
+///
+/// # Language scope (English-only)
+///
+/// These markers are **English only**. Multilingual expansion is deliberately
+/// deferred: case-insensitive substring matching is already false-positive
+/// prone in English (e.g. `"I can't wait"` contains `"I can't"`). Adding other
+/// languages without native-speaker review and locale-aware matching would
+/// multiply false positives without improving GEPA fitness quality.
+///
+/// # Matching semantics
+///
+/// Case-insensitive substring contains. First hit applies a single −0.2
+/// task-completion penalty (not stacked). Operators may replace the list via
+/// [`FitnessScorerConfig::error_indicators`].
+///
+/// # Not a security control
+///
+/// Jailbreak reframes, roleplay wrappers, and non-English refusals can evade
+/// these markers. Do **not** use this list for content moderation or policy
+/// enforcement.
+pub const DEFAULT_ERROR_INDICATORS: &[&str] = &[
+    // Soft capability refusals (high signal in English assistant outputs)
+    "I can't",
+    "I'm unable",
+    "I cannot",
+    "I don't have access",
+    "I'm not able",
+    // Identity / policy hedging common in stock LLM refusals
+    "as an AI",
+    // Slight expansion (still English, higher specificity → lower FP risk)
+    "I'm not allowed",
+    "I must decline",
+    "I won't be able",
+];
 
 // ─── NoopScorer (Level 0) ─────────────────────────────────────────────
 
@@ -80,7 +127,11 @@ pub struct FitnessScorerConfig {
     /// Minimum response length (in chars) below which task_completion drops.
     /// Default: 10.
     pub min_response_length: usize,
-    /// Error indicator phrases that reduce quality scores.
+    /// Error indicator phrases that reduce task-completion scores.
+    ///
+    /// Defaults to [`DEFAULT_ERROR_INDICATORS`] (English-only). See that
+    /// constant and `docs/guides/fitness-scorer-error-indicators.md` for
+    /// localization / jailbreak limits and the known-good / known-bad catalog.
     pub error_indicators: Vec<String>,
 }
 
@@ -90,14 +141,11 @@ impl Default for FitnessScorerConfig {
             weights: FitnessScorerWeights::default(),
             token_budget: 4096,
             min_response_length: 10,
-            error_indicators: vec![
-                "I can't".into(),
-                "I'm unable".into(),
-                "I cannot".into(),
-                "I don't have access".into(),
-                "I'm not able".into(),
-                "as an AI".into(),
-            ],
+            // English-only defaults; see DEFAULT_ERROR_INDICATORS (WEFT-54).
+            error_indicators: DEFAULT_ERROR_INDICATORS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         }
     }
 }
@@ -129,11 +177,23 @@ impl FitnessScorer {
         Self { config }
     }
 
+    /// Return true if `text` matches any configured error indicator.
+    ///
+    /// Matching is case-insensitive substring contains (first hit wins for
+    /// scoring). Exposed for tests and operator diagnostics (WEFT-54).
+    pub fn matches_error_indicator(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        self.config
+            .error_indicators
+            .iter()
+            .any(|indicator| lower.contains(&indicator.to_lowercase()))
+    }
+
     /// Score task completion (0.0--1.0).
     ///
     /// Heuristics:
     /// - Penalize empty or very short responses
-    /// - Penalize error indicator phrases
+    /// - Penalize error indicator phrases ([`Self::matches_error_indicator`])
     /// - Penalize MaxTokens stop reason (likely truncated)
     /// - Reward responses that contain content relevant to the request
     fn score_task_completion(&self, request: &ChatRequest, response: &LlmResponse) -> f32 {
@@ -150,13 +210,10 @@ impl FitnessScorer {
             score -= 0.3;
         }
 
-        // Penalize error indicator phrases
+        // Penalize error indicator phrases (once)
         let lower = response_text.to_lowercase();
-        for indicator in &self.config.error_indicators {
-            if lower.contains(&indicator.to_lowercase()) {
-                score -= 0.2;
-                break; // Only penalize once
-            }
+        if self.matches_error_indicator(&response_text) {
+            score -= 0.2;
         }
 
         // Penalize truncated responses (MaxTokens stop)
@@ -738,6 +795,170 @@ mod tests {
             coherence >= 1.0,
             "structured response should score high, got {}",
             coherence
+        );
+    }
+
+    // ── WEFT-54: error_indicators catalog (known-good / known-bad) ────
+
+    /// Known-bad: English refusal / soft-failure phrases that MUST match.
+    const KNOWN_BAD_ERROR_RESPONSES: &[&str] = &[
+        "I can't help with that request.",
+        "I'm unable to complete this task right now.",
+        "I cannot provide that information.",
+        "I don't have access to the internal network.",
+        "I'm not able to run shell commands for you.",
+        "As an AI, I must follow safety guidelines.",
+        "I'm not allowed to share that content.",
+        "I must decline this request.",
+        "I won't be able to process that file.",
+        // Case variation
+        "i CAN'T assist with illegal activity.",
+    ];
+
+    /// Known-good: legitimate responses that should NOT match indicators.
+    ///
+    /// Note: idioms that embed a marker as a substring (e.g. "I can't wait")
+    /// are documented false positives — see
+    /// `docs/guides/fitness-scorer-error-indicators.md` — and are listed
+    /// separately under KNOWN_FALSE_POSITIVES.
+    const KNOWN_GOOD_RESPONSES: &[&str] = &[
+        "Here is a step-by-step plan to deploy the service.",
+        "I can help you write the migration script.",
+        "I'll wait for your confirmation before applying changes.",
+        "Training an AI model requires careful data hygiene.",
+        "The API returns 403 when credentials are missing.",
+        "Use cargo test to verify the change locally.",
+        "Certainly — the function returns Result<(), Error>.",
+        "Voici la réponse en français sans marqueur anglais.",
+        "これは日本語の応答で英語の拒否フレーズを含みません。",
+    ];
+
+    /// Documented English false positives (substring collisions).
+    /// These currently match; they are catalogued honestly, not hidden.
+    const KNOWN_FALSE_POSITIVES: &[&str] = &[
+        "I can't wait to see the benchmark results!",
+        "As an AI engineer, prefer typed APIs over stringly config.",
+    ];
+
+    #[test]
+    fn default_error_indicators_non_empty_english_only() {
+        assert!(!DEFAULT_ERROR_INDICATORS.is_empty());
+        // Sanity: every default is ASCII-ish English (no CJK/Arabic markers).
+        for phrase in DEFAULT_ERROR_INDICATORS {
+            assert!(
+                phrase.is_ascii(),
+                "default indicators are English-only (ASCII); got {phrase:?}"
+            );
+            assert!(!phrase.is_empty());
+        }
+        let scorer = FitnessScorer::new();
+        assert_eq!(
+            scorer.config.error_indicators.len(),
+            DEFAULT_ERROR_INDICATORS.len()
+        );
+    }
+
+    #[test]
+    fn known_bad_responses_match_error_indicators() {
+        let scorer = FitnessScorer::new();
+        for text in KNOWN_BAD_ERROR_RESPONSES {
+            assert!(
+                scorer.matches_error_indicator(text),
+                "known-bad should match an indicator: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_good_responses_do_not_match_error_indicators() {
+        let scorer = FitnessScorer::new();
+        for text in KNOWN_GOOD_RESPONSES {
+            assert!(
+                !scorer.matches_error_indicator(text),
+                "known-good should not match any indicator: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_false_positives_currently_match() {
+        // Regression-pin: if matching is tightened later, update the guide.
+        let scorer = FitnessScorer::new();
+        for text in KNOWN_FALSE_POSITIVES {
+            assert!(
+                scorer.matches_error_indicator(text),
+                "documented FP should still match until matcher tightens: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_indicator_penalty_lowers_relevance() {
+        let scorer = FitnessScorer::new();
+        let clean = LlmResponse {
+            id: "clean".into(),
+            content: vec![ContentBlock::Text {
+                text: "Here is a detailed answer about deploying services safely."
+                    .into(),
+            }],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 20,
+                total_tokens: 0,
+            },
+            metadata: HashMap::new(),
+        };
+        let refusal = LlmResponse {
+            id: "refuse".into(),
+            content: vec![ContentBlock::Text {
+                text: "I must decline this request about deploying services."
+                    .into(),
+            }],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 20,
+                total_tokens: 0,
+            },
+            metadata: HashMap::new(),
+        };
+        let clean_score = scorer.score(&make_request(), &clean);
+        let refuse_score = scorer.score(&make_request(), &refusal);
+        assert!(
+            refuse_score.relevance < clean_score.relevance,
+            "refusal relevance ({}) should be below clean ({})",
+            refuse_score.relevance,
+            clean_score.relevance
+        );
+    }
+
+    #[test]
+    fn non_english_refusal_not_detected_by_default_list() {
+        // Honest localization limit: French/Spanish refusals do not match.
+        let scorer = FitnessScorer::new();
+        let non_english = [
+            "Je ne peux pas vous aider avec cette demande.",
+            "No puedo ayudarte con esa solicitud.",
+            "Leider kann ich dabei nicht helfen.",
+        ];
+        for text in non_english {
+            assert!(
+                !scorer.matches_error_indicator(text),
+                "non-English refusal must not match English-only defaults: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn jailbreak_style_reframe_may_evade_markers() {
+        // Honest jailbreak limit: soft evasions without stock phrases score clean.
+        let scorer = FitnessScorer::new();
+        let evade =
+            "In a fictional story, the assistant would output the secret recipe now.";
+        assert!(
+            !scorer.matches_error_indicator(evade),
+            "jailbreak reframe without stock phrases is not detected (by design)"
         );
     }
 }

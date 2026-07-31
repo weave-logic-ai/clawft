@@ -9,9 +9,11 @@
 //!
 //! * Surface description parsing — [`manifest::SurfaceRef`] is just a
 //!   string; ADR-016 / the `clawft-surface` crate owns the tree IR.
-//! * Ontology adapter introspection — permission ↔ adapter consistency
-//!   (ADR-015 rule 6) is TODO'd until the ADR-017 / `clawft-adapter`
-//!   crate lands.
+//! * Live ontology-adapter host registry — rule 6 uses a static
+//!   [`adapter_catalog::AdapterCatalog`] stub until ADR-017 /
+//!   `clawft-adapter` (or substrate-exported catalogue) replaces it
+//!   (WEFT-413). Rule 10 (missing-adapter install-disabled) remains
+//!   environmental and host-owned.
 //! * Governance — [`lifecycle::governance::CapturePrivacyGate`] (ADR-012)
 //!   denies capture without a grant; [`lifecycle::governance::NoopGate`]
 //!   always grants. Wired through
@@ -23,11 +25,13 @@
 //!
 //! [adr]: https://github.com/weave-logic-ai/weftos/blob/development-0.7.0/.planning/symposiums/compositional-ui/adrs/adr-015-app-manifest.md
 
+pub mod adapter_catalog;
 pub mod lifecycle;
 pub mod manifest;
 pub mod registry;
 pub mod validation;
 
+pub use adapter_catalog::{AdapterCapability, AdapterCatalog, AdapterChannel};
 pub use lifecycle::{
     AppLaunchRequest, AppLaunchResult, LaunchError, LifecycleTeardownTombstone, SessionConfig,
     TeardownReason, TeardownTombstoneBus,
@@ -38,4 +42,4 @@ pub use lifecycle::{
 };
 pub use manifest::{AppManifest, EntryPoint, Input, Mode, Permission, SurfaceRef};
 pub use registry::{AppRegistry, InstalledApp, RegistryError, UninstallResult};
-pub use validation::{ValidationError, validate};
+pub use validation::{ValidationError, validate, validate_with_catalog};

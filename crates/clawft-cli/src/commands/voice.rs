@@ -117,6 +117,10 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
 /// Cache directory: `~/.clawft/models/voice/`. Models without a real (non-
 /// placeholder) SHA-256 pin are **refused** rather than fetched blindly.
 /// Verified cache hits are reused with no network.
+///
+/// Silero VAD (`silero-vad-v5`) is additionally staged to
+/// `~/.weftos/models/silero-vad/silero_vad.onnx` for
+/// `clawft_voice_onnx::SileroVoiceness` discovery (WEFT-644).
 async fn handle_setup() -> anyhow::Result<()> {
     use clawft_plugin::voice::{
         EnsureOutcome, ModelDownloadManager, finish_stderr_progress, is_placeholder_hash,
@@ -150,11 +154,9 @@ async fn handle_setup() -> anyhow::Result<()> {
         }
 
         if mgr.is_cached(model) {
-            println!(
-                "  CACHED {}: {}",
-                model.id,
-                mgr.model_path(&model.id).display()
-            );
+            let path = mgr.model_path(&model.id);
+            println!("  CACHED {}: {}", model.id, path.display());
+            maybe_stage_silero_vad(&model.id, &path);
             ready += 1;
             continue;
         }
@@ -165,11 +167,13 @@ async fn handle_setup() -> anyhow::Result<()> {
             Ok(EnsureOutcome::Downloaded(path)) => {
                 finish_stderr_progress();
                 println!("  DOWNLOADED {}: {}", model.id, path.display());
+                maybe_stage_silero_vad(&model.id, &path);
                 ready += 1;
             }
             Ok(EnsureOutcome::Cached(path)) => {
                 finish_stderr_progress();
                 println!("  CACHED {}: {}", model.id, path.display());
+                maybe_stage_silero_vad(&model.id, &path);
                 ready += 1;
             }
             Err(e) => {
@@ -194,6 +198,32 @@ async fn handle_setup() -> anyhow::Result<()> {
 
     println!("\n=== Voice setup complete ===");
     Ok(())
+}
+
+/// WEFT-644: mirror catalog cache → `~/.weftos/models/silero-vad/silero_vad.onnx`
+/// so SileroVoiceness auto-discovery finds the weights without an env override.
+fn maybe_stage_silero_vad(model_id: &str, cache_path: &std::path::Path) {
+    if model_id != "silero-vad-v5" || !cache_path.is_file() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let dest_dir = home.join(".weftos/models/silero-vad");
+    let dest = dest_dir.join("silero_vad.onnx");
+    if dest.is_file() {
+        // Already staged — leave in place (operator may have pinned a variant).
+        println!("  STAGED silero-vad (already present): {}", dest.display());
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        eprintln!("  WARN could not create {}: {e}", dest_dir.display());
+        return;
+    }
+    match std::fs::copy(cache_path, &dest) {
+        Ok(_) => println!("  STAGED silero-vad → {}", dest.display()),
+        Err(e) => eprintln!("  WARN could not stage silero-vad to {}: {e}", dest.display()),
+    }
 }
 
 /// Run Talk Mode — the native ECC graph-walk voice conversation (ADR-062).

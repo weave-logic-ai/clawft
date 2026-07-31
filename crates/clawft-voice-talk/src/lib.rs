@@ -17,9 +17,9 @@
 //!   that writes the speculative→committed handoff onto the kernel ECC
 //!   `CausalGraph` (NodeState lifecycle in node metadata; no parallel
 //!   mechanism).
-//! - [`native_dual_layer`] — binds the native TTS node-renderers (Kokoro fast +
-//!   Orpheus/SNAC slow, from `clawft-voice-tts`) into the
-//!   [`DualLayerTts`](clawft_channels::voice::tts::DualLayerTts) that
+//! - [`native_dual_layer`] — binds the native TTS node-renderers (WEFT-613 fast
+//!   selection: Chatterbox clone when ready else Kokoro + Orpheus/SNAC slow)
+//!   into [`DualLayerTts`](clawft_channels::voice::tts::DualLayerTts) that
 //!   [`NodeRenderer`] drives (ADR-062 Phase 4).
 //!
 //! The fully-live end-to-end path (real mic/speaker + STT/TTS/ECAPA weights +
@@ -52,8 +52,13 @@ pub use llm::LocalProviderVoiceLlm;
 pub use native::native_components;
 pub use render::{ContradictionDetector, NeverContradicts, NodeRenderer, RenderOutcome};
 pub use session::{TalkComponents, TalkConfig, TalkSession};
-pub use tts::{native_dual_layer, native_dual_layer_with_ollama};
+pub use tts::{
+    native_dual_layer, native_dual_layer_with_fast_pref, native_dual_layer_with_ollama,
+};
 
 // Re-export the concrete native TTS node-renderers so callers can compose a
 // custom DualLayerTts (e.g. swap the fast backend) without a second dependency.
-pub use clawft_voice_tts::{KokoroTts, OrpheusTts, SnacDecode, SnacOnnxDecoder};
+pub use clawft_voice_tts::{
+    ChatterboxTts, FastEnginePreference, KokoroTts, OrpheusTts, SnacDecode, SnacOnnxDecoder,
+    build_native_fast_engine, build_native_fast_engine_with, select_native_fast_tier,
+};

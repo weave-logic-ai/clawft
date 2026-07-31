@@ -116,8 +116,10 @@ fn make_state_with_voice() -> (ApiState, Arc<TokenStore>, Arc<VoiceBridge>) {
         ProvidersConfig::default(),
     ));
     let state = ApiState {
-            routing_history: Arc::new(clawft_core::pipeline::decision_history::RoutingDecisionHistory::new()),
-
+        routing_history: Arc::new(
+            clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
+        ),
+        rate_limiter: Arc::new(clawft_core::pipeline::rate_limiter::RateLimiter::new(60, 0)),
         tools: Arc::new(StubTools),
         sessions: Arc::new(StubSessions),
         agents: Arc::new(StubAgents),

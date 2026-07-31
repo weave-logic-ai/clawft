@@ -5,11 +5,16 @@
 //! never reaches the registry (mirrors ADR-006's structural-rejection
 //! posture for primitive heads).
 //!
+//! Rule 6 (permission ↔ adapter consistency) uses the static
+//! [`crate::adapter_catalog::AdapterCatalog`] until a live ADR-017
+//! host registry / `clawft-adapter` crate replaces it (WEFT-413).
+//!
 //! Rule 10 (adapter dependency resolution) is deliberately out of
-//! scope here — it's *environmental*, not structural; the sibling
-//! `clawft-adapter` crate (M1.5-C / ADR-017) will own it.
+//! scope here — it's *environmental*, not structural; the host
+//! flags missing adapters and installs the app disabled.
 
-use crate::manifest::{AppManifest, EntryPoint, Input, Mode, Permission};
+use crate::adapter_catalog::AdapterCatalog;
+use crate::manifest::{AppManifest, EntryPoint, Input, Mode};
 
 /// All structural failure modes ADR-015 §Validation can return.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
@@ -37,6 +42,18 @@ pub enum ValidationError {
     /// IDE bridge in `ide` sessions.
     #[error("influence `{verb}` requires `ide` in supported_modes (ADR-018)")]
     IdeInfluenceWithoutIdeMode { verb: String },
+
+    /// ADR-015 rule 6 — a `permissions` entry has no subscribed
+    /// adapter that consumes that channel. Orphan capture / fs / net
+    /// grants are either a privacy leak (channel live, app never
+    /// reads) or a copy-paste error; either way, rejected.
+    #[error(
+        "permission `{permission}` has no subscribed adapter that consumes that channel (ADR-015 rule 6)"
+    )]
+    PermissionWithoutAdapterReader {
+        /// Wire form of the orphan permission (`"mic"`, `"fs:/tmp"`, …).
+        permission: String,
+    },
 
     /// ADR-015 rule 7 — `wake-word` entry point declared but `voice`
     /// is not in `supported_inputs`.
@@ -69,13 +86,24 @@ pub enum ValidationError {
     UnknownMode(String),
 }
 
-/// Validate a manifest against ADR-015 §Validation rules 1–9.
+/// Validate a manifest against ADR-015 §Validation rules 1–9 using
+/// the builtin adapter capability catalogue for rule 6.
 ///
 /// Returns on the **first** failure — callers that want all errors
 /// should iterate by re-running after fixing. This matches how TOML
 /// parse failures surface too (and keeps the error type an enum
 /// rather than a list).
 pub fn validate(manifest: &AppManifest) -> Result<(), ValidationError> {
+    validate_with_catalog(manifest, &AdapterCatalog::builtin())
+}
+
+/// Same as [`validate`], but rule 6 consults `catalog` instead of the
+/// builtin set. Hosts with a live ADR-017 registry (and unit tests
+/// that inject fixtures) pass a custom catalogue here.
+pub fn validate_with_catalog(
+    manifest: &AppManifest,
+    catalog: &AdapterCatalog,
+) -> Result<(), ValidationError> {
     // Rule 9 — IRI shape. Cheapest check, runs first so malformed
     // identity fails before anything else.
     if !is_well_formed_app_iri(&manifest.id) {
@@ -144,6 +172,18 @@ pub fn validate(manifest: &AppManifest) -> Result<(), ValidationError> {
         }
     }
 
+    // Rule 6 — permission-requires-adapter-reader (WEFT-413).
+    // Every declared permission must be consumed by at least one
+    // adapter resolved from `subscriptions` via the capability
+    // catalogue. See [`AdapterCatalog::permission_has_reader`].
+    for perm in &manifest.permissions {
+        if !catalog.permission_has_reader(perm, &manifest.subscriptions) {
+            return Err(ValidationError::PermissionWithoutAdapterReader {
+                permission: perm.to_token(),
+            });
+        }
+    }
+
     // Rule 7 — wake-word entry point requires voice input.
     if !has_voice {
         for ep in &manifest.entry_points {
@@ -152,14 +192,6 @@ pub fn validate(manifest: &AppManifest) -> Result<(), ValidationError> {
             }
         }
     }
-
-    // Rule 6 — permission-requires-adapter-reader. DELIBERATELY
-    // DEFERRED for M1.5. Enforcing this needs adapter introspection
-    // (ADR-017 / `clawft-adapter` crate, M1.5-C sibling stream). Once
-    // that crate exports its adapter-capability catalogue, wire the
-    // check in here. Until then every `permissions` entry is accepted
-    // structurally and governance at install time is the backstop.
-    let _ = Permission::Camera; // keep the enum in scope for TODO readers
 
     Ok(())
 }
@@ -188,7 +220,7 @@ mod tests {
     use semver::Version;
 
     use super::*;
-    use crate::manifest::{EntryPoint, SurfaceRef};
+    use crate::manifest::{EntryPoint, Permission, SurfaceRef};
 
     fn baseline() -> AppManifest {
         AppManifest {
@@ -341,5 +373,139 @@ mod tests {
                 "expected `{ok}` to be well-formed"
             );
         }
+    }
+
+    // ── ADR-015 rule 6 (WEFT-413) ────────────────────────────────────
+
+    #[test]
+    fn rule6_orphan_camera_rejected() {
+        let mut m = baseline();
+        m.permissions.push(Permission::Camera);
+        // subscriptions are kernel-only — no camera reader.
+        assert_eq!(
+            validate(&m),
+            Err(ValidationError::PermissionWithoutAdapterReader {
+                permission: "camera".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rule6_orphan_mic_rejected() {
+        let mut m = baseline();
+        m.permissions.push(Permission::Mic);
+        assert!(matches!(
+            validate(&m),
+            Err(ValidationError::PermissionWithoutAdapterReader { .. })
+        ));
+    }
+
+    #[test]
+    fn rule6_mic_with_mic_subscription_accepted() {
+        let mut m = baseline();
+        m.permissions.push(Permission::Mic);
+        m.subscriptions
+            .push("substrate/sensor/mic".to_string());
+        validate(&m).expect("mic + mic subscription must validate");
+    }
+
+    #[test]
+    fn rule6_mic_with_node_scoped_subscription_accepted() {
+        let mut m = baseline();
+        m.permissions.push(Permission::Mic);
+        m.subscriptions
+            .push("substrate/host-local/sensor/mic/rms".to_string());
+        validate(&m).expect("node-scoped mic topic must count as reader");
+    }
+
+    #[test]
+    fn rule6_fs_without_fs_reader_rejected() {
+        let mut m = baseline();
+        m.permissions
+            .push(Permission::FsPath("/var/log/weftos".into()));
+        // kernel subscriptions do not consume fs.
+        assert_eq!(
+            validate(&m),
+            Err(ValidationError::PermissionWithoutAdapterReader {
+                permission: "fs:/var/log/weftos".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rule6_fs_with_fs_subscription_accepted() {
+        let mut m = baseline();
+        m.permissions
+            .push(Permission::FsPath("/var/log/weftos".into()));
+        m.subscriptions.push("substrate/fs/watched".to_string());
+        validate(&m).expect("fs adapter subscription covers any fs: path");
+    }
+
+    #[test]
+    fn rule6_git_fs_mismatch_rejected() {
+        let mut m = baseline();
+        m.permissions
+            .push(Permission::FsPath("/var/log/weftos".into()));
+        m.subscriptions.push("substrate/git/status".to_string());
+        assert!(matches!(
+            validate(&m),
+            Err(ValidationError::PermissionWithoutAdapterReader { .. })
+        ));
+    }
+
+    #[test]
+    fn rule6_git_fs_match_accepted() {
+        let mut m = baseline();
+        m.permissions
+            .push(Permission::FsPath("/workspace/.git".into()));
+        m.subscriptions.push("substrate/git/branch".to_string());
+        validate(&m).expect("git adapter covers /workspace/.git");
+    }
+
+    #[test]
+    fn rule6_net_with_gh_subscription_accepted() {
+        let mut m = baseline();
+        m.permissions
+            .push(Permission::NetDomain("api.github.com".into()));
+        m.subscriptions.push("substrate/gh/issues".to_string());
+        validate(&m).expect("gh adapter covers api.github.com");
+    }
+
+    #[test]
+    fn rule6_net_domain_mismatch_rejected() {
+        let mut m = baseline();
+        m.permissions
+            .push(Permission::NetDomain("evil.example".into()));
+        m.subscriptions.push("substrate/gh/issues".to_string());
+        assert_eq!(
+            validate(&m),
+            Err(ValidationError::PermissionWithoutAdapterReader {
+                permission: "net:evil.example".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rule6_custom_catalog_injected() {
+        use crate::adapter_catalog::{AdapterCapability, AdapterChannel, AdapterCatalog};
+
+        let mut m = baseline();
+        m.permissions.push(Permission::Screen);
+        m.subscriptions.push("app/custom/screen".to_string());
+
+        // Builtin: custom topic is unknown → reject.
+        assert!(matches!(
+            validate(&m),
+            Err(ValidationError::PermissionWithoutAdapterReader { .. })
+        ));
+
+        let custom = AdapterCatalog::from_entries([AdapterCapability {
+            id: "custom-screen",
+            topic_prefixes: &["app/custom/screen"],
+            path_contains: &[],
+            channels: &[AdapterChannel::Screen],
+        }]);
+        validate_with_catalog(&m, &custom)
+            .expect("custom catalogue must accept matching screen reader");
     }
 }

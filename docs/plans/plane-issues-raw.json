@@ -3117,8 +3117,8 @@
     "weft": "WEFT-598",
     "name": "ws09: Dependabot \u2014 triage 142 npm-side vulnerabilities (5 critical/41 high)",
     "priority": "medium",
-    "state": "Todo",
-    "state_group": "unstarted",
+    "state": "Done",
+    "state_group": "completed",
     "labels": [
       "ws09-clawft-dashboard",
       "tech-debt"
@@ -3129,9 +3129,11 @@
     "description": "Source\nGitHub Dependabot (repo security tab), surfaced on push 2026-06-28.\nProblem / gap\nDependabot reports 142 vulnerabilities (5 critical / 41 high) \u2014 heavily the npm\nside (root agentic-flow devdep + clawft-ui React/Vite). The cargo-audit gate\n(scripts/build.sh audit) only covers Rust deps; the npm surface is unaudited.\nAcceptance criteria\n[ ] Triage the Dependabot alerts; bump/patch the criticals + highs on the npm side.\n[ ] Add an npm audit step (or Dependabot auto-merge policy) to keep it from drifting.",
     "parent": null,
     "created_at": "2026-06-29T01:53:19.030698Z",
-    "updated_at": "2026-06-29T01:53:18.970672Z",
-    "completed_at": null,
-    "assignees": [],
+    "updated_at": "2026-07-31T04:45:35.936845Z",
+    "completed_at": "2026-07-31T04:45:35.922986Z",
+    "assignees": [
+      "56233ec5-492d-46ed-861c-aef516057acf"
+    ],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []
@@ -13823,8 +13825,8 @@
     "weft": "WEFT-217",
     "name": "ws10: EchoCanceller and NoiseSuppressor \u2014 replace deceptive passthroughs with real DSP",
     "priority": "medium",
-    "state": "Todo",
-    "state_group": "unstarted",
+    "state": "Done",
+    "state_group": "completed",
     "labels": [
       "ws10-voice",
       "audit-finding",
@@ -13838,9 +13840,11 @@
     "description": "Source\naudit: 10-voice.md (P1 Task #12; orphaned: EchoCanceller.feed_reference unused; NoiseSuppressor.noise_floor unused; doc-comment markers in echo.rs:88, noise.rs:68)\ncode: crates/clawft-plugin/src/voice/echo.rs; crates/clawft-plugin/src/voice/noise.rs\nProblem / gap\nBoth modules are passthroughs. EchoCanceller has a circular reference buffer that process() ignores; NoiseSuppressor tracks RMS noise floor via EMA but does not filter. The presence of computed-but-unused state is misleading.\nAcceptance criteria\n[ ] EchoCanceller: NLMS or frequency-domain adaptive filter consuming the reference buffer\n[ ] NoiseSuppressor: spectral subtraction or RNNoise consuming noise_floor\n[ ] Either implementation, OR explicit removal of the dead reference state and a doc comment marking the modules as no-op-by-design\n[ ] Tests against fixture audio with known noise/echo\n[ ] scripts/build.sh test --features voice passes\nDependencies\nblocks: real Talk Mode quality\nblocked-by: cpal capture path\nNotes\nDefer to 0.8.x.",
     "parent": null,
     "created_at": "2026-04-28T23:17:34.401016Z",
-    "updated_at": "2026-04-28T23:17:34.335406Z",
-    "completed_at": null,
-    "assignees": [],
+    "updated_at": "2026-07-31T04:45:35.137294Z",
+    "completed_at": "2026-07-31T04:45:35.125680Z",
+    "assignees": [
+      "56233ec5-492d-46ed-861c-aef516057acf"
+    ],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []
@@ -15176,8 +15180,8 @@
     "weft": "WEFT-170",
     "name": "ws05: PluginHost C7 unification \u2014 migrate Telegram/Discord/Slack to ChannelAdapter",
     "priority": "medium",
-    "state": "Todo",
-    "state_group": "unstarted",
+    "state": "Done",
+    "state_group": "completed",
     "labels": [
       "ws05-channels",
       "audit-finding",
@@ -15191,9 +15195,11 @@
     "description": "Source\naudit: 05-channels.md (Deferred items: PluginHost C7 unification; Task List #11)\ncode: crates/clawft-channels/src/plugin_host.rs (ChannelAdapterShim, ChannelAdapterHostBridge)\nprior planning: Element 04 / C7\nProblem / gap\nThe trait shim (ChannelAdapterShim) exists, but Telegram, Discord, Slack still implement the legacy Channel trait directly. Migrating them to ChannelAdapter is the C7 deliverable; the migration changes the cancellation contract (poll-based plugin token vs tokio_util::sync::CancellationToken) and the inbound payload type.\nAcceptance criteria\n[ ] Telegram, Discord, Slack reimplemented on ChannelAdapter\n[ ] Decision: keep or retire ChannelAdapterShim (with a deprecation note if retained for third-party plugins)\n[ ] register_command migration plan resolved (see separate item)\n[ ] All existing tests still pass; new tests cover the migrated cancellation path\n[ ] scripts/build.sh test and clippy pass\nDependencies\nblocks: full PluginHost simplification\nblocked-by: slash-command surface decision\nNotes\nAffects every plugin-host call site. 0.8.x because it is invasive but not a broken-claim issue.",
     "parent": null,
     "created_at": "2026-04-28T23:15:59.087535Z",
-    "updated_at": "2026-04-28T23:15:59.020243Z",
-    "completed_at": null,
-    "assignees": [],
+    "updated_at": "2026-07-31T04:45:34.384925Z",
+    "completed_at": "2026-07-31T04:45:34.371041Z",
+    "assignees": [
+      "56233ec5-492d-46ed-861c-aef516057acf"
+    ],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []
@@ -16219,8 +16225,8 @@
     "weft": "WEFT-135",
     "name": "ws02: workspace \u2014 clean ~150 clippy errors (pre-existing debt)",
     "priority": "medium",
-    "state": "Todo",
-    "state_group": "unstarted",
+    "state": "Done",
+    "state_group": "completed",
     "labels": [
       "ws02-kernel",
       "audit-finding",
@@ -16233,9 +16239,11 @@
     "description": "Source\naudit: .planning/reviews/0.7.0-release-gate/02-kernel-governance.md Task List row #46\nprior: CHANGELOG 0.6.19 Known Issues\nProblem / gap\nscripts/build.sh check is green but scripts/build.sh clippy is red on ~150 pre-existing errors across clawft-types/src/goal.rs, clawft-rpc, eml-core, and older kernel/weave code. Blocks any clippy-as-gate aspiration.\nAcceptance criteria\n[ ] Errors triaged: trivial, mechanical, structural.\n[ ] Mechanical batch fixed.\n[ ] Remaining structural issues filed as smaller follow-ups.\n[ ] scripts/build.sh clippy green.\nDependencies\nblocked-by: none\nNotes\nM effort; sequence after 0.7.0 to avoid distracting churn.",
     "parent": null,
     "created_at": "2026-04-28T23:14:51.773960Z",
-    "updated_at": "2026-04-28T23:14:51.716294Z",
-    "completed_at": null,
-    "assignees": [],
+    "updated_at": "2026-07-31T04:45:33.231657Z",
+    "completed_at": "2026-07-31T04:45:33.221378Z",
+    "assignees": [
+      "56233ec5-492d-46ed-861c-aef516057acf"
+    ],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []
@@ -19773,8 +19781,8 @@
     "weft": "WEFT-14",
     "name": "ws01: platform \u2014 land OPFS-or-equivalent BrowserEnvironment persistence",
     "priority": "low",
-    "state": "Todo",
-    "state_group": "unstarted",
+    "state": "Done",
+    "state_group": "completed",
     "labels": [
       "ws01-core",
       "audit-finding",
@@ -19788,9 +19796,11 @@
     "description": "Source\n.planning/reviews/0.7.0-release-gate/01-core-platform.md \u2014 Task List row 13; code at crates/clawft-platform/src/browser/env.rs.\nProblem / gap\nBrowserEnvironment is in-memory only. Same UX consequence as the FS issue: env variables (e.g. API keys) are lost on reload.\nAcceptance criteria\n[ ] BrowserEnvironment persists to OPFS or IndexedDB.\n[ ] Round-trip test confirms env survives reload.\n[ ] BrowserPlatform::env() retains its async signature.\n[ ] Config sensitive values continue to redact in Debug.\nDependencies\nPairs with the BrowserFileSystem OPFS work; same upstream binding constraints.\nNotes\nLow priority because secrets-in-browser is a security smell anyway; document the trade-off.",
     "parent": null,
     "created_at": "2026-04-28T23:09:24.142924Z",
-    "updated_at": "2026-04-28T23:09:24.075065Z",
-    "completed_at": null,
-    "assignees": [],
+    "updated_at": "2026-07-31T04:45:32.334795Z",
+    "completed_at": "2026-07-31T04:45:32.322377Z",
+    "assignees": [
+      "56233ec5-492d-46ed-861c-aef516057acf"
+    ],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []
@@ -19801,8 +19811,8 @@
     "weft": "WEFT-13",
     "name": "ws01: platform \u2014 implement OPFS-backed BrowserFileSystem persistence",
     "priority": "medium",
-    "state": "Todo",
-    "state_group": "unstarted",
+    "state": "Done",
+    "state_group": "completed",
     "labels": [
       "ws01-core",
       "audit-finding",
@@ -19816,9 +19826,11 @@
     "description": "Source\n.planning/reviews/0.7.0-release-gate/01-core-platform.md \u2014 Task List row 6; header note at crates/clawft-platform/src/browser/fs.rs:1-9, companion at crates/clawft-platform/src/browser/mod.rs:7. Cross-references ws01 BrowserEnvironment item.\nProblem / gap\nBrowserFileSystem is currently in-memory HashMap-backed. PWA users lose all state on reload. Comment says \"acceptable for the current stub/MVP phase\".\nAcceptance criteria\n[ ] BrowserFileSystem reads/writes through OPFS (Origin Private File System) bindings.\n[ ] Falls back gracefully when OPFS unavailable.\n[ ] State survives page reload in a smoke test.\n[ ] Existing clawft-wasm tests pass.\n[ ] Documented in docs/guides/browser.md or equivalent.\nDependencies\nUpstream web-sys OPFS bindings stability (was unstable at port time).\nNotes\nPair with BrowserEnvironment persistence (separate item). Required for any real WeftOS PWA.",
     "parent": null,
     "created_at": "2026-04-28T23:09:23.377138Z",
-    "updated_at": "2026-04-28T23:09:23.324717Z",
-    "completed_at": null,
-    "assignees": [],
+    "updated_at": "2026-07-31T04:45:31.362231Z",
+    "completed_at": "2026-07-31T04:45:31.351622Z",
+    "assignees": [
+      "56233ec5-492d-46ed-861c-aef516057acf"
+    ],
     "sub_issues_count": 0,
     "estimate_point": null,
     "deps_mentioned": []

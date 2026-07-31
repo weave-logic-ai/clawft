@@ -34,7 +34,32 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::pipeline::traits::RateLimitable;
+
+// ── Metrics snapshot (WEFT-48) ───────────────────────────────────────────
+
+/// Point-in-time rate-limiter metrics for admin / ops surfaces.
+///
+/// Exposed via `GET /api/admin/rate-limiter` (WEFT-48). Counts are live
+/// snapshots under the per-sender read lock; they may race with concurrent
+/// `check()` calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RateLimiterMetrics {
+    /// Sliding-window duration in seconds.
+    pub window_seconds: u32,
+    /// Global requests-per-window cap. `0` = unlimited.
+    pub global_rate_limit: u32,
+    /// Requests recorded in the active global window.
+    pub global_request_count: u64,
+    /// Number of distinct sender_ids currently tracked.
+    pub tracked_senders: usize,
+    /// LRU eviction threshold (max distinct senders retained).
+    pub max_tracked_users: usize,
+    /// Global utilization in percent when `global_rate_limit > 0`, else `null`.
+    pub global_utilization_pct: Option<f64>,
+}
 
 // ── SlidingWindow ────────────────────────────────────────────────────────
 
@@ -63,10 +88,7 @@ struct SlidingWindow {
 pub struct RateLimiter {
     /// Per-sender sliding window entries. Key is `sender_id`.
     windows: RwLock<HashMap<String, SlidingWindow>>,
-    /// Window size in seconds. Stored for future config serialization
-    /// when the rate limiter is persisted or exposed via admin API.
-    /// TODO(Element-09): Expose via admin metrics endpoint (L2).
-    #[allow(dead_code)]
+    /// Window size in seconds (surfaced via [`Self::metrics`] / admin API).
     window_seconds: u32,
     /// Window size as a `Duration` (precomputed from `window_seconds`).
     window_duration: Duration,
@@ -252,9 +274,39 @@ impl RateLimiter {
         self.window_duration
     }
 
+    /// Configured window size in seconds (WEFT-48 metrics).
+    pub fn window_seconds(&self) -> u32 {
+        self.window_seconds
+    }
+
+    /// LRU eviction threshold (max tracked senders).
+    pub fn max_tracked_users(&self) -> usize {
+        self.max_tracked_users
+    }
+
+    /// Snapshot current metrics for admin / status surfaces (WEFT-48).
+    pub fn metrics(&self) -> RateLimiterMetrics {
+        let global_request_count = self.global_request_count();
+        let global_rate_limit = self.global_rate_limit;
+        let global_utilization_pct = if global_rate_limit > 0 {
+            Some((global_request_count as f64 / f64::from(global_rate_limit)) * 100.0)
+        } else {
+            None
+        };
+        RateLimiterMetrics {
+            window_seconds: self.window_seconds,
+            global_rate_limit,
+            global_request_count,
+            tracked_senders: self.tracked_senders(),
+            max_tracked_users: self.max_tracked_users,
+            global_utilization_pct,
+        }
+    }
+
     /// Remove all tracked entries and reset global counter.
     ///
-    /// Used for testing and configuration reloads.
+    /// Used for testing, configuration reloads, and admin LRU flush
+    /// (`POST /api/admin/rate-limiter/flush`, WEFT-49).
     pub fn clear(&self) {
         let mut windows = self.windows.write().unwrap();
         windows.clear();
@@ -262,6 +314,15 @@ impl RateLimiter {
         self.global_counter.store(0, Ordering::Relaxed);
         let mut reset = self.global_reset.write().unwrap();
         *reset = Instant::now();
+    }
+
+    /// Manual LRU map flush for admin maintenance (WEFT-49).
+    ///
+    /// Clears all per-sender sliding windows and resets the global
+    /// counter. Equivalent to [`Self::clear`]; named for the admin
+    /// maintenance surface.
+    pub fn flush_lru(&self) {
+        self.clear();
     }
 
     /// Evict the oldest-accessed entry from the map.
@@ -288,13 +349,11 @@ impl RateLimiter {
         }
     }
 
-    /// Evict oldest entries when max_tracked_users is exceeded.
+    /// Evict the oldest entry when `max_tracked_users` is exceeded.
     ///
-    /// This is the public-facing eviction trigger, called internally
-    /// but also available for external eviction triggers.
-    /// TODO(Element-09): Used by admin maintenance endpoint (L2).
-    #[allow(dead_code)]
-    fn evict_if_needed(&self) {
+    /// Public for admin maintenance / external eviction triggers (WEFT-49).
+    /// No-op when the map is at or under capacity.
+    pub fn evict_if_needed(&self) {
         let mut windows = self.windows.write().unwrap();
         self.evict_oldest(&mut windows);
     }
@@ -635,5 +694,53 @@ mod tests {
         // Rejected -- should NOT add a timestamp.
         assert!(!limiter.check("user_1", 2));
         assert_eq!(limiter.get_count("user_1"), 2);
+    }
+
+    // --- Test 22: metrics snapshot (WEFT-48) ---
+    #[test]
+    fn test_metrics_snapshot() {
+        let limiter = RateLimiter::new(60, 10).with_max_tracked_users(100);
+        limiter.check("alice", 5);
+        limiter.check("bob", 5);
+        let m = limiter.metrics();
+        assert_eq!(m.window_seconds, 60);
+        assert_eq!(m.global_rate_limit, 10);
+        assert_eq!(m.global_request_count, 2);
+        assert_eq!(m.tracked_senders, 2);
+        assert_eq!(m.max_tracked_users, 100);
+        assert!((m.global_utilization_pct.unwrap() - 20.0).abs() < f64::EPSILON);
+        // Unlimited global → null utilization.
+        let unlimited = RateLimiter::new(30, 0);
+        assert!(unlimited.metrics().global_utilization_pct.is_none());
+    }
+
+    // --- Test 23: flush_lru admin maintenance (WEFT-49) ---
+    #[test]
+    fn test_flush_lru() {
+        let limiter = RateLimiter::new(60, 100);
+        limiter.check("u1", 10);
+        limiter.check("u2", 10);
+        assert_eq!(limiter.tracked_senders(), 2);
+        assert!(limiter.global_request_count() > 0);
+        limiter.flush_lru();
+        assert_eq!(limiter.tracked_senders(), 0);
+        assert_eq!(limiter.global_request_count(), 0);
+        assert_eq!(limiter.get_count("u1"), 0);
+    }
+
+    // --- Test 24: public evict_if_needed ---
+    #[test]
+    fn test_evict_if_needed_public() {
+        let limiter = RateLimiter::new(60, 0).with_max_tracked_users(2);
+        limiter.check("a", 10);
+        limiter.check("b", 10);
+        // At capacity — public maintenance call is a no-op.
+        limiter.evict_if_needed();
+        assert_eq!(limiter.tracked_senders(), 2);
+        // Adding a third triggers check()-path eviction; call again stays bounded.
+        limiter.check("c", 10);
+        assert_eq!(limiter.tracked_senders(), 2);
+        limiter.evict_if_needed();
+        assert!(limiter.tracked_senders() <= 2);
     }
 }

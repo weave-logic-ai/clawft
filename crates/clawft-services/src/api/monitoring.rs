@@ -1,16 +1,18 @@
 //! Monitoring API routes.
 //!
 //! Provides endpoints for token usage tracking, cost breakdowns,
-//! pipeline run telemetry, and (WEFT-40) admin routing-decision history.
+//! pipeline run telemetry, (WEFT-40) admin routing-decision history,
+//! and (WEFT-48/49) rate-limiter metrics + LRU flush.
 
 use axum::{
     Json, Router,
     extract::{Query, State},
-    routing::get,
+    routing::{get, post},
 };
 use clawft_core::pipeline::decision_history::{
     DecisionHistoryFilter, RoutingAggregateStats, RoutingDecisionEntry,
 };
+use clawft_core::pipeline::rate_limiter::RateLimiterMetrics;
 use serde::{Deserialize, Serialize};
 
 use super::ApiState;
@@ -24,6 +26,9 @@ pub fn monitoring_routes() -> Router<ApiState> {
         // WEFT-40: admin surface for recent routing decisions.
         .route("/admin/routing/decisions", get(routing_decisions))
         .route("/admin/routing/stats", get(routing_stats))
+        // WEFT-48/49: rate-limiter metrics + manual LRU flush.
+        .route("/admin/rate-limiter", get(rate_limiter_metrics))
+        .route("/admin/rate-limiter/flush", post(rate_limiter_flush))
 }
 
 // ── Types ──────────────────────────────────────────────────────
@@ -316,4 +321,35 @@ async fn routing_decisions(
 /// `GET /api/admin/routing/stats` — aggregate counters only (WEFT-40).
 async fn routing_stats(State(state): State<ApiState>) -> Json<RoutingAggregateStats> {
     Json(state.routing_history.aggregate_stats())
+}
+
+// ── WEFT-48/49: rate-limiter admin surface ───────────────────────────────
+
+/// Response body for `POST /api/admin/rate-limiter/flush`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimiterFlushResponse {
+    /// Always true on success.
+    pub flushed: bool,
+    /// Metrics after the flush (should show zero tracked senders / global count).
+    pub metrics: RateLimiterMetrics,
+}
+
+/// `GET /api/admin/rate-limiter` — live rate-limiter metrics (WEFT-48).
+///
+/// Auth-gated via the `/api` nest (admin Bearer token). Returns window
+/// size, global cap/count, tracked sender count, and utilization.
+async fn rate_limiter_metrics(State(state): State<ApiState>) -> Json<RateLimiterMetrics> {
+    Json(state.rate_limiter.metrics())
+}
+
+/// `POST /api/admin/rate-limiter/flush` — manual LRU map flush (WEFT-49).
+///
+/// Clears all tracked senders and resets the global counter. Auth-gated
+/// via the `/api` nest (admin Bearer token).
+async fn rate_limiter_flush(State(state): State<ApiState>) -> Json<RateLimiterFlushResponse> {
+    state.rate_limiter.flush_lru();
+    Json(RateLimiterFlushResponse {
+        flushed: true,
+        metrics: state.rate_limiter.metrics(),
+    })
 }

@@ -139,6 +139,28 @@ weaver health                      # aggregated health across services
 weaver kernel logs                 # last N boot/runtime events
 ```
 
+### Windows transport (WEFT-11)
+
+Local RPC uses a platform transport in `clawft-rpc`:
+
+| Platform | Transport | `DaemonClient::connect` | Daemon accept loop |
+|----------|-----------|-------------------------|--------------------|
+| Unix     | UDS `kernel.sock` under the runtime dir | Connects or returns `None` | Wired (`clawft-weave::daemon`) |
+| Windows  | Named pipe `\\.\pipe\clawft-kernel-<hash>` derived from the logical socket path | Connects or returns `None` (WEFT-11) | **Not wired yet** (WEFT-559) |
+| Other    | — | Always `None`; `call` errors clearly | N/A |
+
+- Path derivation: `pipe_name_for_path(socket_path())` — project-local
+  runtimes stay isolated the same way UDS paths do.
+- Server helpers (`create_listener` / `create_listener_next`) compile on
+  Windows in `clawft_rpc::named_pipe` for residual daemon wiring.
+- Until WEFT-559, `weaver kernel start|stop|restart` on non-Unix bails
+  with an explicit message pointing here. cargo-dist does **not** ship
+  `x86_64-pc-windows-msvc` yet.
+
+Details and residual checklist:
+[`weftos-deferred-requirements.md`](./weftos-deferred-requirements.md)
+(Windows transport section).
+
 ### Mesh (K6)
 
 When the `mesh` feature is enabled, the kernel also listens on a

@@ -96,10 +96,15 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
     {
         match args.action {
             KernelAction::Start { .. } | KernelAction::Stop { .. } | KernelAction::Restart => {
+                // WEFT-11: DaemonClient dials Windows named pipes, but the
+                // weave daemon accept loop is still Unix-only. Residual
+                // server wiring is tracked under WEFT-559.
                 anyhow::bail!(
-                    "kernel daemon requires Unix (socket-based IPC). \
-                     Windows named-pipe transport is planned for v0.2. \
-                     Use `weft` for agent operations on Windows."
+                    "kernel daemon server is not yet wired on this platform.\n\
+                     Windows named-pipe *client* transport is available in clawft-rpc (WEFT-11);\n\
+                     the daemon accept-loop residual is WEFT-559.\n\
+                     On Unix: `weaver kernel start`. On Windows today: use remote/TCP relay \
+                     or a Unix host for the daemon."
                 );
             }
             _ => {} // Status/Ps/Logs fall through to ephemeral kernel below

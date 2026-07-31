@@ -1503,80 +1503,80 @@ All deferred items MUST pass these checks before merge:
 
 ---
 
-## Windows transport — named-pipe RPC (deferred to 0.8.x)
+## Windows transport — named-pipe RPC (0.8.x)
 
 ### Status
-**Deferred** — `x86_64-pc-windows-msvc` is excluded from the 0.7.0
-cargo-dist target list.
+**Partially landed (WEFT-11)** — client + server *helpers* ship in
+`clawft-rpc`. The weave daemon accept loop is still Unix-only
+(residual: WEFT-559). `x86_64-pc-windows-msvc` remains excluded from
+the cargo-dist target list until the server side accepts clients.
 
 ### Priority
-**Medium** — required to ship a usable Windows binary; not required
-for 0.7.0 because Linux (glibc + musl) and macOS (x86_64 + arm64)
-cover the supported deployment surface.
+**Medium** — required to ship a usable Windows binary; Linux (glibc +
+musl) and macOS (x86_64 + arm64) remain the supported deployment
+surface until WEFT-559 closes.
 
-### Code References
-- `crates/clawft-rpc/src/client.rs:55-80` — non-Unix `DaemonClient`
-  stub. `connect()` returns `None`; every RPC call bails with
-  "daemon not available on this platform".
-- `crates/clawft-weave/src/daemon.rs:1496-1564` — TCP relay path
-  (`ipc_tcp`) is the only cross-platform escape hatch today, and it
-  forwards to a Unix socket on the daemon side, so it does not help
-  Windows-native callers.
-- `Cargo.toml:240-250` (`[workspace.metadata.dist] targets = [...]`)
-  — Windows target commented out, with a pointer back here.
+### What shipped (WEFT-11)
 
-### Implementation steps
+| Piece | Location | Status |
+|-------|----------|--------|
+| Logical → pipe name mapping | `protocol::pipe_name_for_path` / `default_pipe_name` | Done |
+| `DaemonClient` over `NamedPipeClient` | `crates/clawft-rpc/src/client.rs` (`cfg(windows)`) | Done |
+| Server bind helpers | `crates/clawft-rpc/src/named_pipe.rs` (`create_listener`, `create_listener_next`) | Done |
+| Unit tests | `pipe_name_*` (all platforms); roundtrip under `cfg(windows)` | Done |
+| Daemon accept loop | `crates/clawft-weave/src/daemon.rs` | **Residual (WEFT-559)** |
+| cargo-dist Windows target | `Cargo.toml` `[workspace.metadata.dist]` | Still commented out |
+| CI Windows matrix job | `.github/workflows/` | Not yet (document-only note) |
 
-1. Add `tokio` features for named-pipe I/O on Windows:
-   ```toml
-   # crates/clawft-rpc/Cargo.toml
-   [target.'cfg(windows)'.dependencies]
-   tokio = { workspace = true, features = ["net"] }  # already inherits
-   windows-sys = { version = "0.59", features = [
-       "Win32_Foundation",
-       "Win32_System_Pipes",
-       "Win32_Storage_FileSystem",
-   ] }
-   ```
+### Code references
+- `crates/clawft-rpc/src/client.rs` — Unix UDS + Windows named-pipe
+  `DaemonClient`; other platforms return `None` with a clear error on
+  `call`.
+- `crates/clawft-rpc/src/named_pipe.rs` — server listener stubs /
+  helpers for the residual daemon wiring.
+- `crates/clawft-rpc/src/protocol.rs` — `pipe_name_for_path` (stable
+  hash of the logical `socket_path` under `\\.\pipe\clawft-kernel-…`).
+- `crates/clawft-weave/src/daemon.rs` — still binds `UnixListener` only.
+- `crates/clawft-weave/src/commands/kernel_cmd.rs` — non-Unix
+  `kernel start/stop/restart` bails with a pointer to WEFT-11/WEFT-559.
+- `Cargo.toml` `[workspace.metadata.dist]` — Windows target commented
+  out with status notes.
 
-2. Replace the `mod imp` stub in
-   `crates/clawft-rpc/src/client.rs:56-80` with a real client that
-   dials a named pipe (`\\.\pipe\clawft-kernel`):
-   ```rust
-   use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-   ```
+### Remaining implementation steps (WEFT-559)
 
-3. Mirror the unix-side pipe path in
-   `crates/clawft-weave/src/daemon.rs` — bind a
-   `ServerOptions::new().create(pipe_name)?` named-pipe server next
-   to the existing `UnixListener` accept loop. Reuse
-   `dispatch_json_line` / `handle_json_connection`.
-
-4. Update `crates/clawft-rpc/src/protocol.rs:21-56`
-   (`runtime_dir` / `socket_path`) to return the pipe name on
-   Windows. The `kernel.pid` / `kernel.log` files still belong on
-   the filesystem.
-
-5. Re-enable `x86_64-pc-windows-msvc` in `Cargo.toml`
+1. In `clawft-weave::daemon`, behind `cfg(windows)`, bind via
+   `clawft_rpc::named_pipe::create_listener` and loop with
+   `create_listener_next` after each accept. Reuse
+   `dispatch_json_line` / `handle_json_connection` (they are
+   stream-oriented; adapt over `NamedPipeServer` the same way the
+   Unix path uses `UnixStream`).
+2. Gate `kernel start/stop/restart` on Windows once the accept loop
+   works (today they bail in `kernel_cmd.rs`).
+3. Re-enable `x86_64-pc-windows-msvc` in `Cargo.toml`
    `[workspace.metadata.dist]`. Verify the powershell installer
    produces a working binary.
+4. Add a CI matrix job (or self-hosted Windows runner) that runs
+   `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` so the
+   `cfg(windows)` roundtrip test executes in CI.
 
 ### Verification
 
-- `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` passes.
-- `weft kernel start --foreground` on Windows accepts named-pipe
-  connections from `weft kernel status`.
-- The `cargo-dist`-built MSI / zip artefact installs and runs end-
-  to-end (CI matrix gate).
+- [x] `scripts/build.sh check` / `cargo test -p clawft-rpc` on Unix
+      (pipe-name tests + connect-none tests).
+- [ ] `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` on a
+      Windows host (named-pipe roundtrip).
+- [ ] `weft kernel start --foreground` on Windows accepts named-pipe
+      connections from `weft kernel status` (needs WEFT-559).
+- [ ] cargo-dist MSI/zip artefact installs and runs end-to-end.
 
 ### Tracking
 
-- Plane: WEFT-483 (deferred from 0.7.0).
-- Once landed, drop the `cfg(not(unix))` stub and update the
-  pointer in `crates/clawft-rpc/src/client.rs`.
+- Plane: **WEFT-11** (client + helpers — this work), **WEFT-483**
+  (0.7.0 deferral, closed by stub), **WEFT-559** (daemon accept loop
+  + re-enable dist/CI).
 
 ---
 
-**Last Updated**: 2026-04-28
+**Last Updated**: 2026-07-31
 **Maintainer**: Project Owner
 **Status**: Living document - update as items are completed

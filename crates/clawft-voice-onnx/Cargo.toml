@@ -7,8 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Native-Rust ONNX voice models for WeftOS (ECAPA speaker embedding, parakeet-tdt STT, smart-turn endpointing)"
-keywords = ["voice", "speaker", "stt", "onnx", "parakeet"]
+description = "Native-Rust ONNX voice models for WeftOS (ECAPA speaker embedding, parakeet-tdt STT, smart-turn endpointing, Silero VAD)"
+keywords = ["voice", "speaker", "stt", "onnx", "parakeet", "vad", "silero"]
 categories = ["multimedia::audio"]
 
 [features]

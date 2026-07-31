@@ -94,6 +94,10 @@ complete() stage 3.5 ──► evolve_prompt(system) ◄────────
 - Scorer false-positive rate still matters; operators should prefer
   `pipeline.scorer = "fitness"` with trajectory mode.
 - Background / RPC trigger and substrate-backed lineage deferred.
+- **WEFT-54**: `FitnessScorer.error_indicators` defaults are English-only
+  substring markers for GEPA fitness — not a safety filter. Catalog, FP
+  sanity tests, and jailbreak/localization limits:
+  `docs/guides/fitness-scorer-error-indicators.md`.
 
 ## Follow-ups
 

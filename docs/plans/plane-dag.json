@@ -1,15 +1,15 @@
 {
-  "generated_at": "2026-07-31T03:28:37.564659+00:00",
+  "generated_at": "2026-07-31T04:48:29.015758+00:00",
   "totals": {
     "all": 706,
-    "open": 251,
-    "done": 435,
+    "open": 245,
+    "done": 441,
     "cancelled": 20,
     "in_progress": 2
   },
   "state_counts": {
-    "Todo": 225,
-    "Done": 435,
+    "Todo": 219,
+    "Done": 441,
     "Cancelled": 20,
     "Backlog": 24,
     "In Progress": 2
@@ -23,37 +23,37 @@
   },
   "cycle_counts_open": {
     "0.9.x": 86,
-    "0.8.x": 144,
+    "0.8.x": 138,
     "1.0.x": 21
   },
   "workstream_open": {
     "ws17-research": 35,
-    "ws02-kernel": 26,
+    "ws02-kernel": 25,
     "ws14-deployment": 22,
     "ws15-mcp": 9,
     "ws08-weftos-gui": 14,
     "ws06-memory": 8,
-    "ws10-voice": 23,
+    "ws10-voice": 22,
     "ws11-agent-core-v1": 15,
     "ws07-multi-agent": 12,
     "ws13-app-substrate": 8,
     "ws16-browser-wasm": 16,
-    "ws09-clawft-dashboard": 17,
+    "ws09-clawft-dashboard": 16,
     "ws12-knowledge-graph": 25,
-    "ws05-channels": 6,
+    "ws05-channels": 5,
     "ws03-pipeline": 10,
-    "ws01-core": 5
+    "ws01-core": 3
   },
   "priority_open": {
-    "medium": 41,
+    "medium": 36,
     "high": 35,
-    "low": 160,
+    "low": 159,
     "none": 15
   },
   "ac_open": {
-    "strong": 246,
-    "weak": 3,
-    "ok": 2
+    "strong": 240,
+    "ok": 2,
+    "weak": 3
   },
   "inferred_edges": [
     {
@@ -2462,7 +2462,7 @@
       "id": "afa8433c-1055-458f-8028-0489fad80f63",
       "sequence_id": 644,
       "name": "SileroVoiceness: neural VAD behind the Voiceness trait (model staging + stateful ONNX + fallback)",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws10-voice",
@@ -3484,7 +3484,7 @@
       "id": "377d86c9-86c8-46dd-afdf-b7386fc02716",
       "sequence_id": 613,
       "name": "Voicelab parity: Chatterbox cloned-voice fast tier (native port)",
-      "state": "Backlog",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws10-voice",
@@ -3967,7 +3967,7 @@
       "id": "ffc11e67-d260-410f-95c5-619da2ad7cf2",
       "sequence_id": 598,
       "name": "ws09: Dependabot \u2014 triage 142 npm-side vulnerabilities (5 critical/41 high)",
-      "state": "In Progress",
+      "state": "Done",
       "priority": "medium",
       "labels": [
         "ws09-clawft-dashboard",
@@ -3990,8 +3990,8 @@
         "has_deps_section": false
       },
       "description": "Source\nGitHub Dependabot (repo security tab), surfaced on push 2026-06-28.\nProblem / gap\nDependabot reports 142 vulnerabilities (5 critical / 41 high) \u2014 heavily the npm\nside (root agentic-flow devdep + clawft-ui React/Vite). The cargo-audit gate\n(scripts/build.sh audit) only covers Rust deps; the npm surface is unaudited.\nAcceptance criteria\n[ ] Triage the Dependabot alerts; bump/patch the criticals + highs on the npm side.\n[ ] Add an npm audit step (or Dependabot auto-merge policy) to keep it from drifting.",
-      "open": true,
-      "updated_at": "2026-06-29T01:53:18.970672Z",
+      "open": false,
+      "updated_at": "2026-07-31T04:45:35.936845Z",
       "lane": "F"
     },
     "WEFT-597": {
@@ -10391,7 +10391,7 @@
       "id": "c3feaaa1-0bf4-41a5-babe-484f4a53c379",
       "sequence_id": 413,
       "name": "ws13: clawft-app \u2014 wire ADR-015 rule 6 once clawft-adapter exists",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws13-app-substrate",
@@ -17191,7 +17191,7 @@
       "id": "59ab0b0f-175c-4eba-bb02-2ff3e01421b8",
       "sequence_id": 217,
       "name": "ws10: EchoCanceller and NoiseSuppressor \u2014 replace deceptive passthroughs with real DSP",
-      "state": "In Progress",
+      "state": "Done",
       "priority": "medium",
       "labels": [
         "ws10-voice",
@@ -17217,8 +17217,8 @@
         "has_deps_section": true
       },
       "description": "Source\naudit: 10-voice.md (P1 Task #12; orphaned: EchoCanceller.feed_reference unused; NoiseSuppressor.noise_floor unused; doc-comment markers in echo.rs:88, noise.rs:68)\ncode: crates/clawft-plugin/src/voice/echo.rs; crates/clawft-plugin/src/voice/noise.rs\nProblem / gap\nBoth modules are passthroughs. EchoCanceller has a circular reference buffer that process() ignores; NoiseSuppressor tracks RMS noise floor via EMA but does not filter. The presence of computed-but-unused state is misleading.\nAcceptance criteria\n[ ] EchoCanceller: NLMS or frequency-domain adaptive filter consuming the reference buffer\n[ ] NoiseSuppressor: spectral subtraction or RNNoise consuming noise_floor\n[ ] Either implementation, OR explicit removal of the dead reference state and a doc comment marking the modules as no-op-by-design\n[ ] Tests against fixture audio with known noise/echo\n[ ] scripts/build.sh test --features voice passes\nDependencies\nblocks: real Talk Mode quality\nblocked-by: cpal capture path\nNotes\nDefer to 0.8.x.",
-      "open": true,
-      "updated_at": "2026-04-28T23:17:34.335406Z",
+      "open": false,
+      "updated_at": "2026-07-31T04:45:35.137294Z",
       "lane": "E"
     },
     "WEFT-216": {
@@ -18839,7 +18839,7 @@
       "id": "9e278eeb-007a-44b6-a60f-d317defd6f58",
       "sequence_id": 170,
       "name": "ws05: PluginHost C7 unification \u2014 migrate Telegram/Discord/Slack to ChannelAdapter",
-      "state": "In Progress",
+      "state": "Done",
       "priority": "medium",
       "labels": [
         "ws05-channels",
@@ -18865,8 +18865,8 @@
         "has_deps_section": true
       },
       "description": "Source\naudit: 05-channels.md (Deferred items: PluginHost C7 unification; Task List #11)\ncode: crates/clawft-channels/src/plugin_host.rs (ChannelAdapterShim, ChannelAdapterHostBridge)\nprior planning: Element 04 / C7\nProblem / gap\nThe trait shim (ChannelAdapterShim) exists, but Telegram, Discord, Slack still implement the legacy Channel trait directly. Migrating them to ChannelAdapter is the C7 deliverable; the migration changes the cancellation contract (poll-based plugin token vs tokio_util::sync::CancellationToken) and the inbound payload type.\nAcceptance criteria\n[ ] Telegram, Discord, Slack reimplemented on ChannelAdapter\n[ ] Decision: keep or retire ChannelAdapterShim (with a deprecation note if retained for third-party plugins)\n[ ] register_command migration plan resolved (see separate item)\n[ ] All existing tests still pass; new tests cover the migrated cancellation path\n[ ] scripts/build.sh test and clippy pass\nDependencies\nblocks: full PluginHost simplification\nblocked-by: slash-command surface decision\nNotes\nAffects every plugin-host call site. 0.8.x because it is invasive but not a broken-claim issue.",
-      "open": true,
-      "updated_at": "2026-04-28T23:15:59.020243Z",
+      "open": false,
+      "updated_at": "2026-07-31T04:45:34.384925Z",
       "lane": "H"
     },
     "WEFT-169": {
@@ -20073,7 +20073,7 @@
       "id": "55e62398-8ef2-42f9-afe9-3fa1dfe98fd3",
       "sequence_id": 135,
       "name": "ws02: workspace \u2014 clean ~150 clippy errors (pre-existing debt)",
-      "state": "In Progress",
+      "state": "Done",
       "priority": "medium",
       "labels": [
         "ws02-kernel",
@@ -20098,8 +20098,8 @@
         "has_deps_section": true
       },
       "description": "Source\naudit: .planning/reviews/0.7.0-release-gate/02-kernel-governance.md Task List row #46\nprior: CHANGELOG 0.6.19 Known Issues\nProblem / gap\nscripts/build.sh check is green but scripts/build.sh clippy is red on ~150 pre-existing errors across clawft-types/src/goal.rs, clawft-rpc, eml-core, and older kernel/weave code. Blocks any clippy-as-gate aspiration.\nAcceptance criteria\n[ ] Errors triaged: trivial, mechanical, structural.\n[ ] Mechanical batch fixed.\n[ ] Remaining structural issues filed as smaller follow-ups.\n[ ] scripts/build.sh clippy green.\nDependencies\nblocked-by: none\nNotes\nM effort; sequence after 0.7.0 to avoid distracting churn.",
-      "open": true,
-      "updated_at": "2026-04-28T23:14:51.716294Z",
+      "open": false,
+      "updated_at": "2026-07-31T04:45:33.231657Z",
       "lane": "B"
     },
     "WEFT-134": {
@@ -22918,7 +22918,7 @@
       "id": "21813b3d-f5a0-4af4-9b45-d1b8caf0c827",
       "sequence_id": 55,
       "name": "ws03: pipeline \u2014 verify experimental-attention CI build/test wiring",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "low",
       "labels": [
         "ws03-pipeline",
@@ -22953,7 +22953,7 @@
       "id": "4c08700b-77de-47f7-8f63-7148ef5e0737",
       "sequence_id": 54,
       "name": "ws03: pipeline \u2014 review FitnessScorer.error_indicators allowlist (localization, jailbreak)",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "low",
       "labels": [
         "ws03-pipeline",
@@ -23128,7 +23128,7 @@
       "id": "478d24c7-999f-4d6a-ae3a-7a307ce174ee",
       "sequence_id": 49,
       "name": "ws03: rate-limiter \u2014 expose rate-limiter LRU maintenance via admin endpoint (Element-09)",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "low",
       "labels": [
         "ws03-pipeline",
@@ -23163,7 +23163,7 @@
       "id": "2153acfd-bcae-4cb3-a1c9-05f74b6f27d4",
       "sequence_id": 48,
       "name": "ws03: rate-limiter \u2014 expose rate-limiter metrics via admin endpoint (Element-09)",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "low",
       "labels": [
         "ws03-pipeline",
@@ -24360,7 +24360,7 @@
       "id": "06c1634e-08ce-4802-935e-d1516acfc141",
       "sequence_id": 14,
       "name": "ws01: platform \u2014 land OPFS-or-equivalent BrowserEnvironment persistence",
-      "state": "In Progress",
+      "state": "Done",
       "priority": "low",
       "labels": [
         "ws01-core",
@@ -24386,8 +24386,8 @@
         "has_deps_section": true
       },
       "description": "Source\n.planning/reviews/0.7.0-release-gate/01-core-platform.md \u2014 Task List row 13; code at crates/clawft-platform/src/browser/env.rs.\nProblem / gap\nBrowserEnvironment is in-memory only. Same UX consequence as the FS issue: env variables (e.g. API keys) are lost on reload.\nAcceptance criteria\n[ ] BrowserEnvironment persists to OPFS or IndexedDB.\n[ ] Round-trip test confirms env survives reload.\n[ ] BrowserPlatform::env() retains its async signature.\n[ ] Config sensitive values continue to redact in Debug.\nDependencies\nPairs with the BrowserFileSystem OPFS work; same upstream binding constraints.\nNotes\nLow priority because secrets-in-browser is a security smell anyway; document the trade-off.",
-      "open": true,
-      "updated_at": "2026-04-28T23:09:24.075065Z",
+      "open": false,
+      "updated_at": "2026-07-31T04:45:32.334795Z",
       "lane": "G"
     },
     "WEFT-13": {
@@ -24395,7 +24395,7 @@
       "id": "f60f4c52-5a48-46f5-a658-3112e15648d3",
       "sequence_id": 13,
       "name": "ws01: platform \u2014 implement OPFS-backed BrowserFileSystem persistence",
-      "state": "In Progress",
+      "state": "Done",
       "priority": "medium",
       "labels": [
         "ws01-core",
@@ -24421,8 +24421,8 @@
         "has_deps_section": true
       },
       "description": "Source\n.planning/reviews/0.7.0-release-gate/01-core-platform.md \u2014 Task List row 6; header note at crates/clawft-platform/src/browser/fs.rs:1-9, companion at crates/clawft-platform/src/browser/mod.rs:7. Cross-references ws01 BrowserEnvironment item.\nProblem / gap\nBrowserFileSystem is currently in-memory HashMap-backed. PWA users lose all state on reload. Comment says \"acceptable for the current stub/MVP phase\".\nAcceptance criteria\n[ ] BrowserFileSystem reads/writes through OPFS (Origin Private File System) bindings.\n[ ] Falls back gracefully when OPFS unavailable.\n[ ] State survives page reload in a smoke test.\n[ ] Existing clawft-wasm tests pass.\n[ ] Documented in docs/guides/browser.md or equivalent.\nDependencies\nUpstream web-sys OPFS bindings stability (was unstable at port time).\nNotes\nPair with BrowserEnvironment persistence (separate item). Required for any real WeftOS PWA.",
-      "open": true,
-      "updated_at": "2026-04-28T23:09:23.324717Z",
+      "open": false,
+      "updated_at": "2026-07-31T04:45:31.362231Z",
       "lane": "G"
     },
     "WEFT-12": {
@@ -24465,7 +24465,7 @@
       "id": "4c9ed7d5-fd31-47d9-bf1e-f846ae4a89b9",
       "sequence_id": 11,
       "name": "ws01: rpc \u2014 implement Windows daemon transport (named pipes) for DaemonClient",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws01-core",
@@ -24611,15 +24611,9 @@
   "waves": [
     [
       "WEFT-11",
-      "WEFT-13",
-      "WEFT-135",
-      "WEFT-170",
-      "WEFT-217",
       "WEFT-413",
-      "WEFT-598",
       "WEFT-613",
       "WEFT-644",
-      "WEFT-14",
       "WEFT-48",
       "WEFT-49",
       "WEFT-54",

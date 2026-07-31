@@ -1,6 +1,6 @@
 # Plane Dependency DAG & Wave Plan
 
-> Generated: 2026-07-31 03:28 UTC
+> Generated: 2026-07-31 04:48 UTC
 > Full inventory: [`plane-board-inventory.md`](./plane-board-inventory.md)
 > DAG data: [`plane-dag.json`](./plane-dag.json)
 > Skill: `.grok/skills/plane-dag/SKILL.md`
@@ -47,7 +47,7 @@ Lane  = parallel track inside a wave (A–J)
 
 | Wave | Tickets | High/Urgent | In 0.8.x |
 |-----:|--------:|------------:|---------:|
-| 0 | 230 | 18 | 142 |
+| 0 | 224 | 18 | 136 |
 | 1 | 9 | 6 | 2 |
 | 2 | 2 | 1 | 0 |
 | 3 | 1 | 1 | 0 |
@@ -57,10 +57,10 @@ Lane  = parallel track inside a wave (A–J)
 
 ## Critical paths
 
-- **len 7**: WEFT-543 → WEFT-520 → WEFT-521 → WEFT-522 → WEFT-527 → WEFT-529 → WEFT-530
-- **len 7**: WEFT-519 → WEFT-520 → WEFT-521 → WEFT-522 → WEFT-527 → WEFT-529 → WEFT-530
+- **len 7**: WEFT-543 → WEFT-520 → WEFT-521 → WEFT-522 → WEFT-527 → WEFT-528 → WEFT-530
+- **len 7**: WEFT-519 → WEFT-520 → WEFT-521 → WEFT-522 → WEFT-527 → WEFT-528 → WEFT-530
 - **len 3**: WEFT-628 → WEFT-615 → WEFT-638
-- **len 2**: WEFT-688 → WEFT-695
+- **len 2**: WEFT-688 → WEFT-702
 - **len 2**: WEFT-686 → WEFT-695
 - **len 2**: WEFT-561 → WEFT-575
 - **len 2**: WEFT-144 → WEFT-106
@@ -89,15 +89,9 @@ Lane  = parallel track inside a wave (A–J)
 
 - **WEFT-15** [LB/low/0.9.x] 🔧WIP — ws01: kernel-config — wire LogQuantizedStubConfig + SimdDistanceStubConfig runtime
 - **WEFT-11** [LB/medium/0.8.x] — ws01: rpc — implement Windows daemon transport (named pipes) for DaemonClient
-- **WEFT-13** [LG/medium/0.8.x] — ws01: platform — implement OPFS-backed BrowserFileSystem persistence
-- **WEFT-135** [LB/medium/0.8.x] — ws02: workspace — clean ~150 clippy errors (pre-existing debt)
-- **WEFT-170** [LH/medium/0.8.x] — ws05: PluginHost C7 unification — migrate Telegram/Discord/Slack to ChannelAdapter
-- **WEFT-217** [LE/medium/0.8.x] — ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP
 - **WEFT-413** [LB/medium/0.8.x] — ws13: clawft-app — wire ADR-015 rule 6 once clawft-adapter exists
-- **WEFT-598** [LF/medium/0.8.x] — ws09: Dependabot — triage 142 npm-side vulnerabilities (5 critical/41 high)
 - **WEFT-613** [LE/medium/0.8.x] ⚠️weak-spec — Voicelab parity: Chatterbox cloned-voice fast tier (native port)
 - **WEFT-644** [LE/medium/0.8.x] ⚠️weak-spec — SileroVoiceness: neural VAD behind the Voiceness trait (model staging + stateful ONNX + fallback)
-- **WEFT-14** [LG/low/0.8.x] — ws01: platform — land OPFS-or-equivalent BrowserEnvironment persistence
 - **WEFT-48** [LB/low/0.8.x] — ws03: rate-limiter — expose rate-limiter metrics via admin endpoint (Element-09)
 - **WEFT-49** [LB/low/0.8.x] — ws03: rate-limiter — expose rate-limiter LRU maintenance via admin endpoint (Element-09)
 - **WEFT-54** [LB/low/0.8.x] — ws03: pipeline — review FitnessScorer.error_indicators allowlist (localization, jailbreak)
@@ -167,7 +161,13 @@ Lane  = parallel track inside a wave (A–J)
 - **WEFT-362** [LC/low/0.8.x] — ws12: layout — implement Sugiyama layered layout (currently falls back to tree)
 - **WEFT-364** [LC/low/0.8.x] — ws12: vector — ecc.vector-config RPC to show active backend
 - **WEFT-368** [LC/low/0.8.x] — ws12: ingest — replace StubHttpClient with real reqwest-based HTTP client
-- _…plus 150 more ready items (see inventory)_
+- **WEFT-369** [LC/low/0.8.x] — ws12: graphify — MCP server (Phase 6)
+- **WEFT-370** [LC/low/0.8.x] — ws12: graphify — extraction + graph_ops benchmarks (Phase 6)
+- **WEFT-371** [LC/low/0.8.x] — ws12: graphify — write ADR-049 (graphify port)
+- **WEFT-372** [LC/low/0.8.x] — ws12: graphify — write ADR-050..053 candidates from phase2 paper survey
+- **WEFT-375** [LC/low/0.8.x] — ws12: graphify — edge embeddings for relationship queries (LightRAG P5)
+- **WEFT-376** [LC/low/0.8.x] — ws12: graphify — graph-aware HNSW re-ranking (LightRAG P4)
+- _…plus 144 more ready items (see inventory)_
 
 ## Commands
 

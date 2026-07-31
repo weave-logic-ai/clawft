@@ -300,11 +300,9 @@ mod tests {
         assert_eq!(m.subscriptions.len(), 4);
         // kill-process, restart-service, wsp.activate, kernel.restart (WEFT-430)
         assert_eq!(m.influences.len(), 4);
-        assert_eq!(m.permissions.len(), 1);
-        assert_eq!(
-            m.permissions[0],
-            Permission::FsPath("/var/log/weftos".to_string())
-        );
+        // Empty: rule 6 requires a matching adapter reader per grant
+        // (WEFT-413); kernel subscriptions consume none.
+        assert!(m.permissions.is_empty());
         let narration = m.narration.as_ref().expect("fixture has narration");
         assert_eq!(narration.len(), 2);
         assert!(narration.contains_key("substrate/kernel/services"));

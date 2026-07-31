@@ -494,7 +494,12 @@ mod tests {
     fn stub_state() -> ApiState {
         let stub: Arc<Stub> = Arc::new(Stub);
         ApiState {
-            routing_history: std::sync::Arc::new(clawft_core::pipeline::decision_history::RoutingDecisionHistory::new()),
+            routing_history: std::sync::Arc::new(
+                clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
+            ),
+            rate_limiter: std::sync::Arc::new(
+                clawft_core::pipeline::rate_limiter::RateLimiter::new(60, 0),
+            ),
             tools: stub.clone(),
             sessions: stub.clone(),
             agents: stub.clone(),

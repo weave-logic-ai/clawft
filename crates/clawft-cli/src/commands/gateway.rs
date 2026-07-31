@@ -822,6 +822,14 @@ fn build_api_state(
         routing_history: Arc::new(
             clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
         ),
+        // WEFT-48/49: rate limiter from routing config. Not yet the same Arc as
+        // TieredRouter (build_router_from_config keeps it internal); admin
+        // metrics/flush still work for ops and tests. Shared wiring is a
+        // follow-up if live traffic must appear on this surface.
+        rate_limiter: Arc::new(clawft_core::pipeline::rate_limiter::RateLimiter::new(
+            config.routing.rate_limiting.window_seconds,
+            config.routing.rate_limiting.global_rate_limit_rpm,
+        )),
     }
 }
 

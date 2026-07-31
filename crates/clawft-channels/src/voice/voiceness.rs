@@ -18,9 +18,12 @@
 //! room tone the relaxed gate would otherwise pass.
 //!
 //! [`Voiceness`] is the seam: this [`SpectralVoiceness`] impl is the
-//! model-free fallback; a Silero-VAD ONNX backend drops in later as the
-//! preferred backend (runtime-detected on model presence), reusing the same
-//! trait for barge-in in Wave 3.
+//! model-free fallback. The preferred backend is Silero-VAD ONNX
+//! (`clawft_voice_onnx::SileroVoiceness`), selected at runtime via
+//! [`clawft_voice_onnx::preferred_voiceness`] when `silero_vad.onnx` is staged
+//! under `~/.weftos/models/silero-vad/` (WEFT-644). Talk Mode wires it through
+//! [`TalkModeController::with_voiceness`](crate::voice::talkmode::TalkModeController::with_voiceness).
+//! Wave 3 barge-in reuses the same trait.
 
 /// Per-frame voiceness scorer: `1.0` = confidently voice, `0.0` = confidently
 /// not. Implementations must be cheap enough to run on every captured frame.

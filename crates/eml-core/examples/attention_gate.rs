@@ -8,8 +8,6 @@
 
 #[cfg(feature = "experimental-attention")]
 fn main() {
-    use eml_core::run_benchmark;
-
     // Iteration-2 reference shape + heavy Phase-2 trial budget.
     let b = match eml_core::run_benchmark_with_trials(
         /* d_model */ 4, /* d_k     */ 2, /* seq_len */ 2, /* depth   */ 3,

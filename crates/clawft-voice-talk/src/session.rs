@@ -71,6 +71,11 @@ pub struct TalkConfig {
     /// but skip the brain (no ack / LLM / audio out). Drives `weft voice
     /// listen`. OFF by default.
     pub listen_only: bool,
+    /// Native dual-layer **fast** TTS preference (WEFT-613 / david profile).
+    /// Default [`FastEnginePreference::Auto`]: Chatterbox clone when
+    /// runtime-ready, else Kokoro. Overridden by env `WEFTOS_FAST_TTS` only when
+    /// left at Auto and the env is set (see [`native_components`]).
+    pub fast_engine: crate::FastEnginePreference,
 }
 
 impl Default for TalkConfig {
@@ -95,6 +100,8 @@ impl Default for TalkConfig {
                 .ok()
                 .map(|h| std::path::PathBuf::from(h).join(".weftos/speakers.json")),
             listen_only: false,
+            // david-intent: prefer clone path when inference ready (0.8 → Kokoro).
+            fast_engine: crate::FastEnginePreference::Auto,
         }
     }
 }
@@ -164,6 +171,9 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
             .filter(|p| p.exists())
             .and_then(|p| SpeakerRegistry::load(p).ok())
             .unwrap_or_else(|| SpeakerRegistry::new(config.speaker_threshold));
+        // WEFT-644: prefer Silero neural VAD when silero_vad.onnx is staged;
+        // else SpectralVoiceness. Injected via the Voiceness seam — energy
+        // floor / watchdog paths are untouched.
         let controller = TalkModeController::new(
             components.endpointer,
             components.stt,
@@ -185,7 +195,8 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
                 listen_only: config.listen_only,
                 ..ControllerConfig::default()
             },
-        );
+        )
+        .with_voiceness(clawft_voice_onnx::preferred_voiceness());
         Self { forest, controller }
     }
 

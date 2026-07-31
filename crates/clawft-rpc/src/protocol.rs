@@ -1,16 +1,32 @@
 //! Wire protocol for daemon <-> client communication.
 //!
-//! Uses line-delimited JSON over Unix domain socket.
+//! Uses line-delimited JSON over a local transport:
+//! - **Unix**: Unix domain socket (`kernel.sock` under the runtime dir)
+//! - **Windows**: named pipe derived from the same logical path (WEFT-11)
+//!
 //! Each message is a single JSON object terminated by `\n`.
 //!
 //! This protocol is intentionally simple and transport-agnostic —
 //! the same types could be serialized over WebSocket, TCP, or
 //! `postMessage` for browser contexts.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 /// Default socket path (relative to config dir).
+///
+/// On Unix this is a real filesystem path component. On Windows it is
+/// the *logical* name used to derive the named-pipe path via
+/// [`pipe_name_for_path`]; PID/log files still live on the filesystem.
 pub const SOCKET_NAME: &str = "kernel.sock";
+
+/// Windows named-pipe name prefix (WEFT-11).
+///
+/// Full pipe paths look like `\\.\pipe\clawft-kernel-<hash>`. The hash
+/// is derived from the logical `socket_path()` so project-local
+/// runtimes stay isolated the same way UDS paths do on Unix.
+pub const PIPE_NAME_PREFIX: &str = r"\\.\pipe\clawft-kernel";
 
 /// PID file name.
 pub const PID_FILE_NAME: &str = "kernel.pid";
@@ -28,10 +44,10 @@ pub const LOG_FILE_NAME: &str = "kernel.log";
 ///
 /// This enables per-project kernels: each project with a `.weftos/` directory
 /// gets its own socket, PID file, and log file.
-pub fn runtime_dir() -> std::path::PathBuf {
+pub fn runtime_dir() -> PathBuf {
     // 1. Explicit override
     if let Ok(dir) = std::env::var("WEFTOS_RUNTIME_DIR") {
-        return std::path::PathBuf::from(dir);
+        return PathBuf::from(dir);
     }
 
     // 2. Walk up from CWD looking for .weftos/
@@ -51,22 +67,55 @@ pub fn runtime_dir() -> std::path::PathBuf {
 
     // 3. Global fallback
     dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".clawft")
 }
 
-/// Resolve the full socket path.
-pub fn socket_path() -> std::path::PathBuf {
+/// Resolve the full *logical* socket path.
+///
+/// On Unix this is the UDS filesystem path. On Windows this remains a
+/// path under [`runtime_dir`] (for PID/log co-location and hermetic
+/// tests); the client maps it to a named-pipe name via
+/// [`pipe_name_for_path`] before dialing.
+pub fn socket_path() -> PathBuf {
     runtime_dir().join(SOCKET_NAME)
 }
 
+/// Map a logical socket path to a Windows named-pipe path (WEFT-11).
+///
+/// Named pipes must live under `\\.\pipe\`. Paths that already use that
+/// prefix (or the forward-slash form `//./pipe/`) are returned as-is.
+/// Otherwise a stable hash of the logical path is appended to
+/// [`PIPE_NAME_PREFIX`] so project-local runtimes stay isolated.
+///
+/// Safe to call on every platform (used by unit tests and by docs).
+pub fn pipe_name_for_path(path: impl AsRef<Path>) -> String {
+    let path = path.as_ref();
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\.\pipe\") || s.starts_with("//./pipe/") {
+        return s.into_owned();
+    }
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!(r"{PIPE_NAME_PREFIX}-{:016x}", hasher.finish())
+}
+
+/// Named-pipe path for the default daemon endpoint (Windows).
+///
+/// Equivalent to `pipe_name_for_path(socket_path())`.
+pub fn default_pipe_name() -> String {
+    pipe_name_for_path(socket_path())
+}
+
 /// Resolve the PID file path.
-pub fn pid_path() -> std::path::PathBuf {
+pub fn pid_path() -> PathBuf {
     runtime_dir().join(PID_FILE_NAME)
 }
 
 /// Resolve the log file path.
-pub fn log_path() -> std::path::PathBuf {
+pub fn log_path() -> PathBuf {
     runtime_dir().join(LOG_FILE_NAME)
 }
 
@@ -220,5 +269,31 @@ mod tests {
         assert!(!resp.ok);
         let err = resp.into_result().unwrap_err();
         assert!(err.to_string().contains("something broke"));
+    }
+
+    #[test]
+    fn pipe_name_for_path_passes_through_pipe_prefix() {
+        let raw = r"\\.\pipe\clawft-kernel-test";
+        assert_eq!(pipe_name_for_path(raw), raw);
+        let fwd = "//./pipe/clawft-kernel-test";
+        assert_eq!(pipe_name_for_path(fwd), fwd);
+    }
+
+    #[test]
+    fn pipe_name_for_path_is_stable_and_under_pipe_namespace() {
+        let a = pipe_name_for_path("/tmp/project-a/.weftos/runtime/kernel.sock");
+        let b = pipe_name_for_path("/tmp/project-a/.weftos/runtime/kernel.sock");
+        let c = pipe_name_for_path("/tmp/project-b/.weftos/runtime/kernel.sock");
+        assert_eq!(a, b, "same logical path must yield the same pipe name");
+        assert_ne!(a, c, "different runtime paths must not collide");
+        assert!(
+            a.starts_with(r"\\.\pipe\clawft-kernel-"),
+            "pipe name must live under \\\\.\\pipe\\: {a}"
+        );
+    }
+
+    #[test]
+    fn default_pipe_name_matches_socket_path() {
+        assert_eq!(default_pipe_name(), pipe_name_for_path(socket_path()));
     }
 }

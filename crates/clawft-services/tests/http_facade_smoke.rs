@@ -144,8 +144,10 @@ fn make_state() -> (ApiState, Arc<TokenStore>, Arc<InMemoryKernelFacade>) {
     let auth = Arc::new(TokenStore::new());
     let facade = Arc::new(InMemoryKernelFacade::new());
     let state = ApiState {
-            routing_history: Arc::new(clawft_core::pipeline::decision_history::RoutingDecisionHistory::new()),
-
+        routing_history: Arc::new(
+            clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
+        ),
+        rate_limiter: Arc::new(clawft_core::pipeline::rate_limiter::RateLimiter::new(60, 0)),
         tools: Arc::new(StubTools),
         sessions: Arc::new(StubSessions),
         agents: Arc::new(StubAgents),

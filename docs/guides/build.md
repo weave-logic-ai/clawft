@@ -405,9 +405,21 @@ cargo install cross
 | `aarch64-unknown-linux-musl` | Linux | ARM64 | Static, for ARM servers/Raspberry Pi |
 | `aarch64-apple-darwin` | macOS | ARM64 | Apple Silicon |
 | `x86_64-apple-darwin` | macOS | x86_64 | Intel Macs |
-| `x86_64-pc-windows-msvc` | Windows | x86_64 | Requires MSVC toolchain |
+| `x86_64-pc-windows-msvc` | Windows | x86_64 | Requires MSVC toolchain. **Daemon status (WEFT-11 / WEFT-559):** `DaemonClient` dials named pipes; weave daemon accept loop not wired yet — cargo-dist Windows target stays disabled until WEFT-559. Test client with `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` on a Windows host. |
 | `wasm32-wasip1` | WASI | WASM | WASI Preview 1 |
 | `wasm32-wasip2` | WASI | WASM | WASI Preview 2 (Component Model) |
+
+### Windows / CI matrix note (WEFT-11)
+
+| Surface | Status |
+|---------|--------|
+| `clawft-rpc` named-pipe **client** | Implemented (`cfg(windows)`) |
+| `clawft-rpc` named-pipe **server helpers** | Implemented (`named_pipe` module) |
+| Weave daemon accept loop | Residual — WEFT-559 |
+| cargo-dist `x86_64-pc-windows-msvc` | Commented out in root `Cargo.toml` |
+| GitHub Actions Windows runner in pr-gates | Not yet — document-only; prefer a future matrix job that runs `cargo test -p clawft-rpc` on `windows-latest` |
+
+See also [`weftos-deferred-requirements.md`](./weftos-deferred-requirements.md) (Windows transport section) and [`kernel.md`](./kernel.md) (Windows transport).
 
 ## Docker Builds
 

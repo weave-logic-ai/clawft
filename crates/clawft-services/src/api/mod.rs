@@ -67,6 +67,13 @@ pub struct ApiState {
     /// `GET /api/admin/routing/decisions` reflects live traffic.
     /// Empty ring when the API runs without a pipeline (tests/stubs).
     pub routing_history: Arc<clawft_core::pipeline::decision_history::RoutingDecisionHistory>,
+    /// WEFT-48/49: pipeline sliding-window rate limiter for admin metrics
+    /// and LRU flush (`GET|POST /api/admin/rate-limiter`).
+    ///
+    /// Prefer the same `Arc` used by `TieredRouter` when tiered routing is
+    /// active so admin metrics reflect live traffic. Fresh instance when
+    /// the API runs without a shared limiter (tests/stubs/static mode).
+    pub rate_limiter: Arc<clawft_core::pipeline::rate_limiter::RateLimiter>,
 }
 
 /// Trait for tool registry access (decouples API from Platform generics).

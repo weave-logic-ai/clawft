@@ -42,9 +42,13 @@ influences = [
     "kernel.restart",
 ]
 
-permissions = [
-    "fs:/var/log/weftos",
-]
+# Permissions intentionally empty: kernel topics declare no capture /
+# fs / net channels (ADR-017 §5). ADR-015 rule 6 (WEFT-413) rejects a
+# permission with no subscribed adapter that consumes that channel —
+# e.g. `fs:/var/log/weftos` would require a `substrate/fs/*` (or other
+# fs-consuming) subscription, not kernel logs alone. Logs stream via
+# the daemon, not client-side fs grant.
+permissions = []
 
 [[entry_points]]
 kind = "cli"
