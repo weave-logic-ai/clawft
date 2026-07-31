@@ -205,14 +205,48 @@ impl CausalGraph {
     /// owns the authoritative per-turn [`NodeState`](crate::context_graft::NodeState);
     /// this writes the same tag (`state.as_str()`) into the durable causal node so
     /// the two substrates stay in sync. Returns `false` if the node is unknown.
+    ///
+    /// ## Chain event (ADR-067 P1-graph / WEFT-629)
+    ///
+    /// When a chain manager is attached (`exochain` feature) and the state
+    /// **changes**, emits [`EVENT_KIND_CAUSAL_NODE_STATE`](crate::chain::EVENT_KIND_CAUSAL_NODE_STATE)
+    /// with `{node_id, from, to}` so fold-replay can reconstruct lifecycle
+    /// history. No-op transitions (same state) do not append.
     pub fn set_node_state(&self, id: NodeId, state: &str) -> bool {
         match self.nodes.get_mut(&id) {
             Some(mut node) => {
+                let previous = node
+                    .metadata
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let changed = previous.as_deref() != Some(state);
                 if let Some(obj) = node.metadata.as_object_mut() {
                     obj.insert("state".to_string(), serde_json::Value::from(state));
                 } else {
                     node.metadata = serde_json::json!({ "state": state });
                 }
+                // Drop the DashMap write guard before appending so we never
+                // hold a node lock across the chain mutex.
+                drop(node);
+
+                #[cfg(feature = "exochain")]
+                if changed {
+                    if let Some(ref cm) = self.chain_manager {
+                        cm.append(
+                            "causal",
+                            crate::chain::EVENT_KIND_CAUSAL_NODE_STATE,
+                            Some(serde_json::json!({
+                                "node_id": id,
+                                "from": previous,
+                                "to": state,
+                            })),
+                        );
+                    }
+                }
+
+                let _ = previous; // silence unused when exochain is off
+                let _ = changed;
                 true
             }
             None => false,

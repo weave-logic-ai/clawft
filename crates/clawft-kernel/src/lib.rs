@@ -83,6 +83,10 @@ pub mod democritus;
 #[cfg(feature = "ecc")]
 pub mod duplex;
 #[cfg(feature = "ecc")]
+pub mod thin_edge;
+#[cfg(all(feature = "ecc", feature = "exochain"))]
+pub mod causal_state_fold;
+#[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
 pub mod embedding_e5;
@@ -381,11 +385,21 @@ pub use duplex::{
     DuplexChannel, DuplexImpulse, DuplexState, EdgeCommand, FloorVerdict, MediaPayload, PayloadKind,
     StreamObservation,
 };
+#[cfg(feature = "ecc")]
+pub use thin_edge::{
+    ControlMessage, EdgeReflexShadow, EdgeState, LocalhostDuplexSession, MediaFrame, ObserveOutcome,
+    ThinEdge,
+};
+#[cfg(all(feature = "ecc", feature = "exochain"))]
+pub use causal_state_fold::{
+    NodeStateTransition, fold_node_states, fold_node_states_from_chain, fold_node_states_until,
+};
 pub use error::{KernelError, KernelResult};
 #[cfg(feature = "ecc")]
 pub use floor::{
-    ContentReadiness, FloorCandidate, FloorDecision, FloorState, UrgencySignals, compute_urgency,
-    contending_count, crowd_density, evaluate_floor,
+    ContentReadiness, ERL_BARGE_FLOOR, FloorCandidate, FloorDecision, FloorState, UrgencySignals,
+    compute_urgency, contending_count, crowd_density, erl_admits_barge, evaluate_floor,
+    floor_verdict_from_erl,
 };
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};

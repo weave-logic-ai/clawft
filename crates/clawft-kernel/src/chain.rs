@@ -564,6 +564,16 @@ pub const EVENT_KIND_CAUSAL_NODE_ADD: &str = "causal.node.add";
 /// The payload should include `node_id`, `label`.
 pub const EVENT_KIND_CAUSAL_NODE_REMOVE: &str = "causal.node.remove";
 
+/// Causal graph node lifecycle-state transition event (ADR-067 P1-graph / WEFT-629).
+///
+/// Emitted from [`CausalGraph::set_node_state`](crate::causal::CausalGraph::set_node_state)
+/// whenever a node's `metadata.state` tag changes
+/// (`Speculative`/`Frontier`/`Committed`/`Stale`/`Pruned`). Payload fields:
+/// `node_id`, `from` (previous state or null), `to` (new state). Folding these
+/// events reconstructs node-state-at-T without a full graph snapshot
+/// ([`crate::causal_state_fold`]).
+pub const EVENT_KIND_CAUSAL_NODE_STATE: &str = "causal.node.state";
+
 /// Causal graph edge added event.
 ///
 /// Emitted when a directed edge is created between two nodes.

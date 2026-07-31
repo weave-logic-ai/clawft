@@ -316,6 +316,9 @@ impl TalkModeLoop {
                         crowd_density: crowd,
                         content_readiness: readiness,
                         hard_interrupt: false,
+                        // Acoustic ERL is filled by the duplex TurnClaim path
+                        // (WEFT-628); non-duplex floor reads leave it None.
+                        erl_confidence: None,
                     },
                 ));
             }
