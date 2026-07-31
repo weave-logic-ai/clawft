@@ -441,19 +441,67 @@ async fn run_query(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    if results.is_empty() {
+    // WEFT-376 / LightRAG P4: graph-aware re-rank of hybrid-fusion hits.
+    // Uses fused score as the primary prior, then lifts nodes that are
+    // high-degree, same-community, hop-close to seeds, or strongly related.
+    let rerank_cfg = clawft_graphify::GraphRerankConfig::default();
+    let vector_hits: Vec<clawft_graphify::VectorHit> = results
+        .iter()
+        .map(|r| {
+            clawft_graphify::VectorHit::with_metadata(
+                r.id.to_hex(),
+                r.fused_score,
+                serde_json::json!({
+                    "label": r.label,
+                    "source_file": r.source_file,
+                    "keyword_score": r.keyword_score,
+                    "proximity_score": r.proximity_score,
+                    "community_score": r.community_score,
+                }),
+            )
+        })
+        .collect();
+    let reranked = clawft_graphify::graph_rerank_top_k(
+        &vector_hits,
+        &kg,
+        Some(&communities),
+        &rerank_cfg,
+        10,
+    );
+
+    if reranked.is_empty() {
         println!("\nNo matching nodes found.");
     } else {
-        println!("\nMatching nodes (hybrid fusion):");
-        for r in results.iter().take(10) {
+        println!("\nMatching nodes (hybrid fusion + graph re-rank):");
+        for r in &reranked {
+            let label = r
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("label"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(&r.id);
+            let source_file = r
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("source_file"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let cid_str = r.community_id.map(|c| c.to_string()).unwrap_or_default();
+            let hop = r
+                .hop_distance
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| "∞".into());
             let explanation = format!(
-                "kw={:.2} prox={:.2} comm={:.0} type_rel",
-                r.keyword_score, r.proximity_score, r.community_score
+                "primary={:.3} deg={} hop={} comm={:.0} rel={:.2}",
+                r.primary_score,
+                r.degree,
+                hop,
+                r.features.community,
+                r.features.relation
             );
             println!(
                 "  [{:.3}] {} (src={}, community={}) [{}]",
-                r.fused_score, r.label, r.source_file, cid_str, explanation
+                r.score, label, source_file, cid_str, explanation
             );
         }
     }

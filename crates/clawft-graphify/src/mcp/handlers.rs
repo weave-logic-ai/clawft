@@ -256,15 +256,53 @@ pub fn query_graph(
         return Ok("No matching nodes found.".into());
     }
 
+    // WEFT-376: graph-aware re-rank of keyword hits (degree, community, hops, relations).
+    let communities = crate::cluster::cluster(&kg);
+    let vector_hits: Vec<crate::graph_rerank::VectorHit> = scored
+        .iter()
+        .map(|(id, score, label, src)| {
+            crate::graph_rerank::VectorHit::with_metadata(
+                id.to_hex(),
+                *score,
+                serde_json::json!({ "label": label, "source_file": src }),
+            )
+        })
+        .collect();
+    let reranked = crate::graph_rerank::graph_rerank_top_k(
+        &vector_hits,
+        &kg,
+        Some(&communities),
+        &crate::graph_rerank::GraphRerankConfig::default(),
+        limit,
+    );
+
     let mut out = String::new();
     out.push_str(&format!(
-        "Query: {question}\nGraph: {}\nMode: {mode}, depth: {depth}\n\nMatches:\n",
+        "Query: {question}\nGraph: {}\nMode: {mode}, depth: {depth}\n\nMatches (graph re-rank):\n",
         path.display()
     ));
-    for (i, (_id, score, label, src)) in scored.iter().take(limit).enumerate() {
+    for (i, hit) in reranked.iter().enumerate() {
+        let label = hit
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("label"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&hit.id);
+        let src = hit
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("source_file"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let hop = hit
+            .hop_distance
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "∞".into());
         out.push_str(&format!(
-            "  {}. [{score:.1}] {label} (src={src})\n",
-            i + 1
+            "  {}. [{:.3}] {label} (src={src}, deg={}, hop={hop})\n",
+            i + 1,
+            hit.score,
+            hit.degree,
         ));
     }
 
@@ -273,8 +311,12 @@ pub fn query_graph(
         return Ok(out);
     }
 
-    // Expand from top-3 seeds.
-    let seeds: Vec<EntityId> = scored.iter().take(3).map(|(id, ..)| id.clone()).collect();
+    // Expand from top-3 seeds (post re-rank order).
+    let seeds: Vec<EntityId> = reranked
+        .iter()
+        .take(3)
+        .filter_map(|h| EntityId::from_hex(&h.id))
+        .collect();
     let mut seen: HashSet<EntityId> = HashSet::new();
     let mut neighbourhood: Vec<String> = Vec::new();
 

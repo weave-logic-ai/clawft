@@ -72,6 +72,24 @@ impl EntityId {
     pub fn to_hex(&self) -> String {
         hex_encode(&self.0)
     }
+
+    /// Decode a 64-character hex string into an [`EntityId`].
+    ///
+    /// Accepts upper or lower case. Returns `None` if the length is not 64
+    /// or any character is not a hex digit. Used when mapping HNSW entry
+    /// ids (`entity.id.to_hex()`) back into the knowledge graph (WEFT-376).
+    pub fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            let hi = hex_nibble(chunk[0])?;
+            let lo = hex_nibble(chunk[1])?;
+            bytes[i] = (hi << 4) | lo;
+        }
+        Some(Self(bytes))
+    }
 }
 
 impl fmt::Display for EntityId {
@@ -94,6 +112,15 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +259,10 @@ mod tests {
         let id = EntityId::new(&DomainTag::Code, &EntityType::Module, "auth", "auth.py");
         let hex = id.to_hex();
         assert_eq!(hex.len(), 64);
+        let back = EntityId::from_hex(&hex).expect("from_hex");
+        assert_eq!(id, back);
+        assert!(EntityId::from_hex("deadbeef").is_none());
+        assert!(EntityId::from_hex(&hex.to_ascii_uppercase()).is_some());
     }
 
     #[test]

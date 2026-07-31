@@ -26,6 +26,8 @@ pub mod eml_models;
 pub mod entity;
 pub mod export;
 pub mod extract;
+// WEFT-376 / LightRAG P4: graph-aware re-ranking of HNSW/vector hits.
+pub mod graph_rerank;
 pub mod hooks;
 /// WEFT-377: motif-based multi-node hyperedge discovery.
 pub mod hyperedge;
@@ -71,6 +73,9 @@ pub use hyperedge::{
 pub use model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, GodNode, GraphDiff, Hyperedge,
     KnowledgeGraph, SuggestedQuestion, SurprisingConnection,
+};
+pub use graph_rerank::{
+    GraphRerankConfig, RerankFeatures, RerankedHit, VectorHit, graph_rerank, graph_rerank_top_k,
 };
 pub use relationship::{Confidence, RelationType, Relationship};
 // WEFT-378: vault domain hyperedges + SUGGEST → ratify → CRDT pipeline.

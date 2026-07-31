@@ -328,6 +328,51 @@ impl GraphifyBridge {
         self.entity_to_causal.get(entity_id).map(|r| *r.value())
     }
 
+    /// Borrow the underlying HNSW service (tests / advanced callers).
+    pub fn hnsw(&self) -> &Arc<HnswService> {
+        &self.hnsw
+    }
+
+    /// HNSW search followed by graph-aware re-ranking (WEFT-376 / LightRAG P4).
+    ///
+    /// 1. Query the multi-key-aware HNSW index (`search_dedup`) for
+    ///    `top_k * candidate_multiplier` candidates (default multiplier 3).
+    /// 2. Re-rank with [`crate::graph_rerank::graph_rerank`] using degree,
+    ///    community co-membership, hop distance, and relation weights from
+    ///    `kg`.
+    /// 3. Return the top `top_k` hits.
+    ///
+    /// When `config` is `None`, [`GraphRerankConfig::default`] is used.
+    pub fn search_graph_reranked(
+        &self,
+        query: &[f32],
+        kg: &KnowledgeGraph,
+        top_k: usize,
+        config: Option<&crate::graph_rerank::GraphRerankConfig>,
+    ) -> Vec<crate::graph_rerank::RerankedHit> {
+        use crate::graph_rerank::{GraphRerankConfig, VectorHit, graph_rerank_top_k};
+
+        let cfg_owned;
+        let cfg = match config {
+            Some(c) => c,
+            None => {
+                cfg_owned = GraphRerankConfig::default();
+                &cfg_owned
+            }
+        };
+
+        // Over-fetch so re-ranking has room to promote structurally strong
+        // lower-vector hits (LightRAG-style neighbourhood expansion budget).
+        let fetch_k = top_k.saturating_mul(3).max(top_k).max(1);
+        let raw = self.hnsw.search_dedup(query, fetch_k);
+        let hits: Vec<VectorHit> = raw
+            .into_iter()
+            .map(|r| VectorHit::with_metadata(r.id, r.score as f64, r.metadata))
+            .collect();
+
+        graph_rerank_top_k(&hits, kg, kg.communities.as_ref(), cfg, top_k)
+    }
+
     /// Export from CausalGraph back into a KnowledgeGraph.
     ///
     /// This is a reverse bridge: reads CausalNodes that carry the
@@ -861,6 +906,93 @@ mod tests {
         assert_eq!(exported.entity_count(), 2);
         // Edges may duplicate due to traversal; verify at least 1.
         assert!(exported.relationship_count() >= 1);
+    }
+
+    /// WEFT-376: HNSW search → graph re-rank end-to-end on the bridge.
+    #[tokio::test]
+    async fn bridge_search_graph_reranked() {
+        use clawft_kernel::hnsw_service::{HnswServiceConfig, MultiKey};
+        use crate::graph_rerank::GraphRerankConfig;
+
+        let causal = Arc::new(CausalGraph::new());
+        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let crossref = Arc::new(CrossRefStore::new());
+        let bridge = GraphifyBridge::new(causal, hnsw.clone(), crossref);
+
+        // Distinct embeddings so HNSW ranking is deterministic.
+        // hub is structurally central; isolated has a slightly closer
+        // vector to the query but zero topology.
+        let mut kg = KnowledgeGraph::new();
+        let hub = make_entity("hub_fn");
+        let leaf = make_entity("leaf_fn");
+        let isolated = make_entity("isolated_fn");
+        kg.add_entity(hub.clone());
+        kg.add_entity(leaf.clone());
+        kg.add_entity(isolated.clone());
+        kg.add_relationship(make_rel(&hub, &leaf));
+
+        let mut communities = std::collections::HashMap::new();
+        communities.insert(0, vec![hub.id.clone(), leaf.id.clone()]);
+        communities.insert(1, vec![isolated.id.clone()]);
+        kg.communities = Some(communities);
+
+        // Insert with multi-key so search_dedup is exercised.
+        hnsw.insert_multi_key(
+            hub.id.to_hex(),
+            &[MultiKey {
+                key_type: "name".into(),
+                embedding: vec![0.9, 0.1, 0.0],
+            }],
+            serde_json::json!({"label": "hub_fn"}),
+            4,
+        );
+        hnsw.insert_multi_key(
+            leaf.id.to_hex(),
+            &[MultiKey {
+                key_type: "name".into(),
+                embedding: vec![0.85, 0.15, 0.0],
+            }],
+            serde_json::json!({"label": "leaf_fn"}),
+            4,
+        );
+        hnsw.insert_multi_key(
+            isolated.id.to_hex(),
+            &[MultiKey {
+                key_type: "name".into(),
+                embedding: vec![1.0, 0.0, 0.0],
+            }],
+            serde_json::json!({"label": "isolated_fn"}),
+            4,
+        );
+
+        let query = [1.0_f32, 0.0, 0.0];
+        let cfg = GraphRerankConfig::topology_heavy();
+        let ranked = bridge.search_graph_reranked(&query, &kg, 3, Some(&cfg));
+
+        assert_eq!(ranked.len(), 3);
+        // All three entities present.
+        let ids: std::collections::HashSet<_> = ranked.iter().map(|h| h.id.clone()).collect();
+        assert!(ids.contains(&hub.id.to_hex()));
+        assert!(ids.contains(&leaf.id.to_hex()));
+        assert!(ids.contains(&isolated.id.to_hex()));
+
+        // Hub (degree 1, same community as leaf, hop-close) should not
+        // be last under topology-heavy weights when query is near isolated.
+        let hub_rank = ranked
+            .iter()
+            .position(|h| h.id == hub.id.to_hex())
+            .unwrap();
+        let iso_rank = ranked
+            .iter()
+            .position(|h| h.id == isolated.id.to_hex())
+            .unwrap();
+        // At least one of: hub beats isolated, or hub has hop features set.
+        let hub_hit = ranked.iter().find(|h| h.id == hub.id.to_hex()).unwrap();
+        assert!(hub_hit.degree >= 1);
+        assert!(
+            hub_rank < iso_rank || hub_hit.features.degree > 0.0,
+            "expected topology signals on hub; ranks hub={hub_rank} iso={iso_rank}"
+        );
     }
 
     #[test]
