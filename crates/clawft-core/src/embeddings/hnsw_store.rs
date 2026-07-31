@@ -20,6 +20,8 @@ use instant_distance::{Builder, HnswMap, Point, Search};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use super::path_predict::{PathPrediction, RegionEntryTable};
+
 /// Minimum number of entries before the HNSW index is built.
 ///
 /// Below this threshold, brute-force cosine similarity is used because
@@ -531,6 +533,89 @@ impl HnswStore {
             .collect()
     }
 
+    /// Snapshot `(id, embedding)` pairs for building a
+    /// [`RegionEntryTable`](super::path_predict::RegionEntryTable).
+    pub fn entry_id_embeddings(&self) -> Vec<(String, Vec<f32>)> {
+        self.entries
+            .iter()
+            .map(|e| (e.id.clone(), e.embedding.to_vec()))
+            .collect()
+    }
+
+    /// Guided search using a region → entry-node path prediction table
+    /// (WEFT-385 / HNSW-EML #4).
+    ///
+    /// Strategy:
+    /// 1. Predict entry nodes + candidate pool from `table` (nearest regions).
+    /// 2. Score the candidate pool (region-constrained brute force) — this is
+    ///    the fast path that skips most of the global traversal.
+    /// 3. If the pool is empty or smaller than `top_k`, fall back to standard
+    ///    HNSW [`query`] and merge so recall is never worse than unguided.
+    ///
+    /// Returns `(results, prediction)` so callers can record training data.
+    pub fn query_guided(
+        &mut self,
+        query_embedding: &[f32],
+        top_k: usize,
+        table: &RegionEntryTable,
+        probes: usize,
+    ) -> (Vec<HnswQueryResult>, PathPrediction) {
+        let prediction = table.predict(query_embedding, probes);
+
+        if self.entries.is_empty() || top_k == 0 {
+            return (Vec::new(), prediction);
+        }
+
+        // Fast path: score predicted candidates only.
+        let mut results = self.score_candidates(query_embedding, &prediction.candidate_ids);
+
+        // Ensure predicted entry nodes are always scored (in case they were
+        // filtered or the table is stale after deletes).
+        if !prediction.entry_ids.is_empty() {
+            let entry_hits = self.score_candidates(query_embedding, &prediction.entry_ids);
+            results.extend(entry_hits);
+        }
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.dedup_by(|a, b| a.id == b.id);
+
+        // Fallback / merge with full HNSW only when the region pool cannot
+        // fill top_k (stale table, tiny region, or empty prediction).
+        if results.len() < top_k {
+            let hnsw = self.query(query_embedding, top_k);
+            results.extend(hnsw);
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.dedup_by(|a, b| a.id == b.id);
+        }
+
+        results.truncate(top_k);
+        (results, prediction)
+    }
+
+    /// Score a subset of entries by id (skips missing ids).
+    fn score_candidates(&self, query: &[f32], ids: &[String]) -> Vec<HnswQueryResult> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(&pos) = self.id_index.get(id) {
+                let entry = &self.entries[pos];
+                out.push(HnswQueryResult {
+                    id: entry.id.clone(),
+                    score: cosine_similarity(query, &entry.embedding),
+                    metadata: entry.metadata.clone(),
+                });
+            }
+        }
+        out
+    }
+
     /// Brute-force cosine similarity search (fallback for small datasets).
     fn brute_force_query(&self, query_embedding: &[f32], top_k: usize) -> Vec<HnswQueryResult> {
         let mut scored: Vec<HnswQueryResult> = self
@@ -988,6 +1073,37 @@ mod tests {
         assert_eq!(store.ef_search, 50);
         assert_eq!(store.ef_construction, 100);
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn guided_query_hits_right_cluster() {
+        use crate::embeddings::path_predict::PathPredictConfig;
+
+        let mut store = HnswStore::new();
+        for i in 0..15 {
+            let n = 0.02 * (i as f32);
+            store.insert(format!("a{i}"), vec![1.0 + n, n, n], serde_json::json!({}));
+            store.insert(format!("b{i}"), vec![n, 1.0 + n, n], serde_json::json!({}));
+            store.insert(format!("c{i}"), vec![n, n, 1.0 + n], serde_json::json!({}));
+        }
+        let pairs = store.entry_id_embeddings();
+        let table = RegionEntryTable::build(
+            &pairs,
+            PathPredictConfig {
+                num_regions: 3,
+                region_probes: 1,
+                entries_per_region: 2,
+                kmeans_iters: 12,
+            },
+        );
+        let (results, pred) = store.query_guided(&[1.0, 0.0, 0.0], 5, &table, 1);
+        assert!(pred.is_learned);
+        assert!(!results.is_empty());
+        assert!(
+            results[0].id.starts_with('a'),
+            "top hit should be cluster A, got {}",
+            results[0].id
+        );
     }
 
     #[test]

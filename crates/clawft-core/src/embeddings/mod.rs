@@ -12,6 +12,9 @@ pub mod hash_embedder;
 pub mod hnsw_store;
 #[cfg(feature = "vector-memory")]
 pub mod micro_hnsw;
+/// WEFT-385 / HNSW-EML #4: region → entry-node search-path prediction.
+#[cfg(feature = "vector-memory")]
+pub mod path_predict;
 // `rvf_stub` has no dependency on the real `rvf-runtime` crate (just serde +
 // tracing, both unconditional deps), so it is gated on the broader
 // `vector-memory` feature rather than `rvf`. This keeps it available as the

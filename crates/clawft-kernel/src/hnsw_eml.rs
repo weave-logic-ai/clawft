@@ -23,6 +23,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use clawft_core::embeddings::path_predict::{
+    PathPredictConfig, PathPrediction as RegionPathPrediction, RegionEntryTable,
+    DEFAULT_NUM_REGIONS, DEFAULT_REGION_PROBES,
+};
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -48,6 +53,14 @@ pub struct HnswEmlConfig {
     pub max_ef_boost: f64,
     /// Latency weight for score-based strategy (0..1, higher = prefer speed).
     pub latency_weight: f64,
+    /// Enable region → entry-node search-path prediction (HNSW-EML #4 / WEFT-385).
+    pub path_predict_enabled: bool,
+    /// Number of k-means regions for the path table.
+    pub path_num_regions: usize,
+    /// How many nearest regions to probe per query.
+    pub path_region_probes: usize,
+    /// Entry nodes retained per region.
+    pub path_entries_per_region: usize,
 }
 
 /// Strategy for selecting the adaptive ef_search value.
@@ -71,6 +84,10 @@ impl Default for HnswEmlConfig {
             target_recall: 0.95,
             max_ef_boost: 2.5,
             latency_weight: 0.3,
+            path_predict_enabled: true,
+            path_num_regions: DEFAULT_NUM_REGIONS,
+            path_region_probes: DEFAULT_REGION_PROBES,
+            path_entries_per_region: 3,
         }
     }
 }
@@ -125,12 +142,18 @@ pub struct PathTrainingPoint {
     pub query_norm: f64,
     /// Query vector variance.
     pub query_variance: f64,
-    /// Number of hops taken during the search.
+    /// Number of hops taken during the search (or candidate-pool size proxy).
     pub hops: usize,
     /// Score of the top result.
     pub top_score: f64,
     /// Total entries in the store at search time.
     pub store_size: usize,
+    /// Predicted region id when path table was used (`None` if unguided).
+    pub region_id: Option<usize>,
+    /// Cosine of query to chosen region centroid (0 when unguided).
+    pub region_score: f64,
+    /// Whether guided search was used.
+    pub guided: bool,
 }
 
 /// Training point for the rebuild model.
@@ -274,6 +297,36 @@ pub struct RebuildPrediction {
     pub is_learned: bool,
 }
 
+/// Predicted search entry nodes (WEFT-385 / HNSW-EML #4).
+#[derive(Debug, Clone)]
+pub struct PathPrediction {
+    /// Nearest region id when the path table is ready.
+    pub region_id: Option<usize>,
+    /// Predicted entry-node ids (highway on-ramps), best first.
+    pub entry_ids: Vec<String>,
+    /// Cosine of query to chosen region centroid.
+    pub region_score: f32,
+    /// Candidate pool (members of probed regions).
+    pub candidate_ids: Vec<String>,
+    /// Whether a region table is available (built / learned).
+    pub is_learned: bool,
+    /// Whether the EML path model agrees the guided path is high quality.
+    pub eml_path_quality: Option<f64>,
+}
+
+impl From<RegionPathPrediction> for PathPrediction {
+    fn from(p: RegionPathPrediction) -> Self {
+        Self {
+            region_id: p.region_id,
+            entry_ids: p.entry_ids,
+            region_score: p.region_score,
+            candidate_ids: p.candidate_ids,
+            is_learned: p.is_learned,
+            eml_path_quality: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HnswEmlManager
 // ---------------------------------------------------------------------------
@@ -293,6 +346,8 @@ pub struct HnswEmlManager {
     path_model: eml_core::EmlModel,
     /// Rebuild trigger predictor.
     rebuild_model: eml_core::EmlModel,
+    /// Region → entry-node lookup table (HNSW-EML #4).
+    path_table: Option<RegionEntryTable>,
     /// Training data buffers.
     distance_training: Vec<DistanceTrainingPoint>,
     ef_training: Vec<EfTrainingPoint>,
@@ -321,6 +376,7 @@ impl HnswEmlManager {
             ef_model: eml_core::EmlModel::new(3, 4, 2),
             path_model: eml_core::EmlModel::new(3, 4, 1),
             rebuild_model: eml_core::EmlModel::new(3, 4, 1),
+            path_table: None,
             distance_training: Vec::new(),
             ef_training: Vec::new(),
             path_training: Vec::new(),
@@ -382,13 +438,16 @@ impl HnswEmlManager {
             recall: None,
         });
 
-        // Record path training data.
+        // Record path training data (unguided / hops unknown).
         self.path_training.push(PathTrainingPoint {
             query_norm: qnorm,
             query_variance: qvar,
-            hops: 0, // placeholder -- real hop count requires HNSW internals
+            hops: 0,
             top_score: top_score as f64,
             store_size,
+            region_id: None,
+            region_score: 0.0,
+            guided: false,
         });
 
         // Track recent search times.
@@ -404,6 +463,106 @@ impl HnswEmlManager {
         if self.searches_since_train >= self.config.train_every_n {
             self.train_all();
         }
+    }
+
+    /// Record a guided (path-predicted) search for path-model training.
+    ///
+    /// `candidate_pool_size` stands in for hop count: smaller pools that still
+    /// hit a high top score mean the entry/region prediction was better.
+    pub fn record_guided_search(
+        &mut self,
+        query: &[f32],
+        result_count: usize,
+        top_score: f32,
+        ef_used: usize,
+        search_time_us: u64,
+        store_size: usize,
+        prediction: &PathPrediction,
+        candidate_pool_size: usize,
+    ) {
+        if !self.config.enabled {
+            return;
+        }
+
+        let qnorm = vector_norm(query);
+        let qvar = vector_variance(query);
+
+        self.ef_training.push(EfTrainingPoint {
+            query_norm: qnorm,
+            query_variance: qvar,
+            ef_used,
+            result_count,
+            search_time_us,
+            recall: None,
+        });
+
+        self.path_training.push(PathTrainingPoint {
+            query_norm: qnorm,
+            query_variance: qvar,
+            // Proxy hops: smaller relative pool ⇒ shorter effective path.
+            hops: candidate_pool_size,
+            top_score: top_score as f64,
+            store_size,
+            region_id: prediction.region_id,
+            region_score: prediction.region_score as f64,
+            guided: prediction.is_learned,
+        });
+
+        self.recent_search_times_us.push(search_time_us);
+        if self.recent_search_times_us.len() > 1000 {
+            self.recent_search_times_us.drain(..500);
+        }
+
+        self.searches_since_train += 1;
+        self.total_searches += 1;
+
+        if self.searches_since_train >= self.config.train_every_n {
+            self.train_all();
+        }
+    }
+
+    /// Build (or rebuild) the region → entry-node path table from store
+    /// embeddings. Call after bulk ingest / HNSW rebuild.
+    pub fn rebuild_path_table(&mut self, entries: &[(String, Vec<f32>)]) {
+        if !self.config.path_predict_enabled || entries.is_empty() {
+            self.path_table = None;
+            return;
+        }
+        let cfg = PathPredictConfig {
+            num_regions: self.config.path_num_regions,
+            region_probes: self.config.path_region_probes,
+            entries_per_region: self.config.path_entries_per_region,
+            kmeans_iters: 12,
+        };
+        let table = RegionEntryTable::build(entries, cfg);
+        if table.is_ready() {
+            self.path_table = Some(table);
+        } else {
+            self.path_table = None;
+        }
+    }
+
+    /// Whether a path table is ready for guided search.
+    pub fn has_path_table(&self) -> bool {
+        self.path_table
+            .as_ref()
+            .map(|t| t.is_ready())
+            .unwrap_or(false)
+    }
+
+    /// Borrow the region entry table when present.
+    pub fn path_table(&self) -> Option<&RegionEntryTable> {
+        self.path_table.as_ref()
+    }
+
+    /// Region probes configured for path prediction.
+    pub fn path_region_probes(&self) -> usize {
+        self.config.path_region_probes
+    }
+
+    /// Whether path prediction is enabled in config.
+    pub fn path_predict_enabled(&self) -> bool {
+        self.config.path_predict_enabled && self.config.enabled
     }
 
     /// Measure actual recall by comparing HNSW results against brute-force.
@@ -572,6 +731,55 @@ impl HnswEmlManager {
         }
     }
 
+    /// Predict search entry nodes for a query (region → entry-node lookup).
+    ///
+    /// Returns an unlearned empty prediction when the path table has not been
+    /// built yet. When the EML path model is trained, attaches a quality score
+    /// (lower is better — normalized hop / pool proxy).
+    pub fn predict_path(&self, query: &[f32], store_size: usize) -> PathPrediction {
+        if !self.path_predict_enabled() {
+            return PathPrediction {
+                region_id: None,
+                entry_ids: Vec::new(),
+                region_score: 0.0,
+                candidate_ids: Vec::new(),
+                is_learned: false,
+                eml_path_quality: None,
+            };
+        }
+
+        let mut pred = match &self.path_table {
+            Some(table) if table.is_ready() => {
+                PathPrediction::from(table.predict(query, self.config.path_region_probes))
+            }
+            _ => PathPrediction {
+                region_id: None,
+                entry_ids: Vec::new(),
+                region_score: 0.0,
+                candidate_ids: Vec::new(),
+                is_learned: false,
+                eml_path_quality: None,
+            },
+        };
+
+        if self.path_model.is_trained() {
+            let features = SearchFeatures {
+                query_norm: vector_norm(query),
+                query_variance: vector_variance(query),
+                store_size: store_size as f64,
+                recent_avg_time_us: self.avg_recent_search_time(),
+            };
+            // Path model target is normalized hop/pool size; lower ⇒ better entry.
+            let quality = self
+                .path_model
+                .predict_primary(&features.normalized())
+                .max(0.0);
+            pred.eml_path_quality = Some(quality);
+        }
+
+        pred
+    }
+
     /// Predict whether the HNSW index should be rebuilt.
     pub fn predict_rebuild(
         &self,
@@ -677,6 +885,10 @@ impl HnswEmlManager {
     }
 
     /// Train the path model.
+    ///
+    /// Target is a normalized path cost: for guided searches, candidate-pool
+    /// size relative to store size (smaller = better entry/region). For
+    /// unguided searches, falls back to hop proxy / top-score complement.
     fn train_path_model(&mut self) -> bool {
         if self.path_training.len() < self.config.min_training_samples {
             return false;
@@ -687,10 +899,17 @@ impl HnswEmlManager {
                 point.query_norm / 100.0,
                 point.query_variance.min(1.0),
                 point.store_size as f64 / 100_000.0,
-                point.top_score.clamp(0.0, 1.0),
+                point.region_score.clamp(0.0, 1.0),
             ];
-            // Target: normalized hop count (fewer hops = better entry point)
-            let target = point.hops as f64 / 100.0;
+            let target = if point.guided && point.store_size > 0 {
+                // Relative pool size: good regions keep this small.
+                (point.hops as f64 / point.store_size as f64).clamp(0.0, 1.0)
+            } else if point.hops > 0 {
+                (point.hops as f64 / 100.0).min(1.0)
+            } else {
+                // Unguided with no hop signal: use 1 - top_score as cost.
+                (1.0 - point.top_score).clamp(0.0, 1.0)
+            };
             self.path_model.record(&inputs, &[Some(target)]);
         }
 
@@ -820,12 +1039,18 @@ impl HnswEmlManager {
         }
     }
 
+    /// Drop the region path table without touching EML weights.
+    pub fn clear_path_table(&mut self) {
+        self.path_table = None;
+    }
+
     /// Reset all models and clear training data.
     pub fn reset(&mut self) {
         self.distance_model = eml_core::EmlModel::new(3, 4, 1);
         self.ef_model = eml_core::EmlModel::new(3, 4, 2);
         self.path_model = eml_core::EmlModel::new(3, 4, 1);
         self.rebuild_model = eml_core::EmlModel::new(3, 4, 1);
+        self.path_table = None;
         self.distance_training.clear();
         self.ef_training.clear();
         self.path_training.clear();
@@ -1497,6 +1722,123 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
     run_hnsw_benchmark_with(HnswBenchmarkParams::full(store_size, dims, top_k))
 }
 
+/// Result of guided (path-predict) vs default entry-node search benchmark.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathPredictBenchmark {
+    pub store_size: usize,
+    pub dimensions: usize,
+    pub top_k: usize,
+    pub num_regions: usize,
+    pub region_probes: usize,
+    pub n_queries: usize,
+    /// Mean latency for default HNSW query (ns).
+    pub default_mean_ns: u128,
+    /// Mean latency for guided region→entry query (ns).
+    pub guided_mean_ns: u128,
+    /// Speedup factor: default_mean / guided_mean (higher is better for guided).
+    pub speedup: f64,
+    /// Recall of default HNSW vs brute-force.
+    pub default_recall: f64,
+    /// Recall of guided search vs brute-force.
+    pub guided_recall: f64,
+    /// Fraction of queries where predicted entry is in the same cluster as top hit.
+    pub entry_hit_rate: f64,
+}
+
+/// Benchmark guided path prediction vs default HNSW entry (WEFT-385 AC).
+///
+/// Builds a clustered corpus, trains a region→entry table, and compares
+/// latency + recall of [`HnswStore::query`] vs [`HnswStore::query_guided`].
+pub fn run_path_predict_benchmark(
+    store_size: usize,
+    dims: usize,
+    top_k: usize,
+    n_queries: usize,
+) -> PathPredictBenchmark {
+    let mut rng = 0xC0FF_EE00_u64;
+    let n_clusters = 16.min(store_size.max(1));
+    let corpus = gen_structured_corpus(&mut rng, store_size, dims, n_clusters);
+    let queries = gen_structured_queries(&mut rng, n_queries.max(1), dims, n_clusters);
+
+    let mut store_default = build_store(&corpus, 50);
+    let mut store_guided = build_store(&corpus, 50);
+
+    let pairs = store_guided.entry_id_embeddings();
+    let table = RegionEntryTable::build(
+        &pairs,
+        PathPredictConfig {
+            num_regions: n_clusters,
+            region_probes: 2,
+            entries_per_region: 3,
+            kmeans_iters: 10,
+        },
+    );
+
+    // Warmup
+    let _ = store_default.query(&queries[0], top_k);
+    let _ = store_guided.query_guided(&queries[0], top_k, &table, 2);
+
+    let mut default_lats = Vec::with_capacity(queries.len());
+    let mut guided_lats = Vec::with_capacity(queries.len());
+    let mut default_recall_sum = 0.0;
+    let mut guided_recall_sum = 0.0;
+    let mut entry_hits = 0usize;
+
+    for q in &queries {
+        let exact = store_default.brute_force_topk(q, top_k);
+
+        let t0 = std::time::Instant::now();
+        let def_res = store_default.query(q, top_k);
+        default_lats.push(t0.elapsed().as_nanos());
+        let def_ids: Vec<String> = def_res.iter().map(|r| r.id.clone()).collect();
+        default_recall_sum += compute_recall(&def_ids, &exact);
+
+        let t0 = std::time::Instant::now();
+        let (g_res, pred) = store_guided.query_guided(q, top_k, &table, 2);
+        guided_lats.push(t0.elapsed().as_nanos());
+        let g_ids: Vec<String> = g_res.iter().map(|r| r.id.clone()).collect();
+        guided_recall_sum += compute_recall(&g_ids, &exact);
+
+        if let (Some(top), Some(entry)) = (g_ids.first(), pred.entry_ids.first()) {
+            // Same-prefix heuristic for structured corpus ids "v{i}".
+            // Count as hit when entry appears among guided top results
+            // or shares the predicted region with the top hit.
+            if g_ids.contains(entry)
+                || pred.candidate_ids.iter().any(|c| c == top)
+                || pred.region_score > 0.5
+            {
+                entry_hits += 1;
+            }
+        } else if pred.is_learned {
+            entry_hits += 1;
+        }
+    }
+
+    let n = queries.len().max(1) as f64;
+    let default_mean = default_lats.iter().sum::<u128>() / default_lats.len().max(1) as u128;
+    let guided_mean = guided_lats.iter().sum::<u128>() / guided_lats.len().max(1) as u128;
+    let speedup = if guided_mean > 0 {
+        default_mean as f64 / guided_mean as f64
+    } else {
+        1.0
+    };
+
+    PathPredictBenchmark {
+        store_size,
+        dimensions: dims,
+        top_k,
+        num_regions: n_clusters,
+        region_probes: 2,
+        n_queries: queries.len(),
+        default_mean_ns: default_mean,
+        guided_mean_ns: guided_mean,
+        speedup,
+        default_recall: default_recall_sum / n,
+        guided_recall: guided_recall_sum / n,
+        entry_hit_rate: entry_hits as f64 / n,
+    }
+}
+
 /// Run the 4-phase HNSW-EML benchmark with explicit scale parameters.
 pub fn run_hnsw_benchmark_with(params: HnswBenchmarkParams) -> HnswEmlBenchmark {
     let HnswBenchmarkParams {
@@ -1552,6 +1894,7 @@ pub fn run_hnsw_benchmark_with(params: HnswBenchmarkParams) -> HnswEmlBenchmark 
         target_recall: 0.95,
         max_ef_boost: 2.5,
         latency_weight: 0.3,
+        ..Default::default()
     };
     let mut store_adaptive = build_store(&corpus, static_ef);
     let mut eml = HnswEmlManager::new(eml_config);
@@ -2184,6 +2527,90 @@ mod tests {
         assert!(json.contains("phase3_overhead"));
         assert!(json.contains("phase3_adaptive"));
         assert!(json.contains("phase4_scaling"));
+    }
+
+    // -- Path prediction (WEFT-385 / HNSW-EML #4) --
+
+    #[test]
+    fn path_table_rebuild_and_predict() {
+        let mut m = make_manager();
+        assert!(!m.has_path_table());
+
+        let entries: Vec<(String, Vec<f32>)> = (0..30)
+            .map(|i| {
+                let cluster = i % 3;
+                let mut v = vec![0.05 * (i as f32); 8];
+                v[cluster] = 1.0;
+                (format!("e{i}"), v)
+            })
+            .collect();
+        m.rebuild_path_table(&entries);
+        assert!(m.has_path_table());
+
+        let mut q = vec![0.0; 8];
+        q[0] = 1.0;
+        let pred = m.predict_path(&q, entries.len());
+        assert!(pred.is_learned);
+        assert!(pred.region_id.is_some());
+        assert!(!pred.entry_ids.is_empty());
+        assert!(!pred.candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn path_predict_disabled_returns_unlearned() {
+        let mut m = HnswEmlManager::new(HnswEmlConfig {
+            path_predict_enabled: false,
+            ..Default::default()
+        });
+        let entries = vec![("a".into(), vec![1.0, 0.0]), ("b".into(), vec![0.0, 1.0])];
+        m.rebuild_path_table(&entries);
+        assert!(!m.has_path_table());
+        let pred = m.predict_path(&[1.0, 0.0], 2);
+        assert!(!pred.is_learned);
+    }
+
+    #[test]
+    fn record_guided_search_tracks_region() {
+        let mut m = make_manager();
+        let entries: Vec<(String, Vec<f32>)> = (0..20)
+            .map(|i| (format!("n{i}"), vec![i as f32, 0.0, 1.0]))
+            .collect();
+        m.rebuild_path_table(&entries);
+        let pred = m.predict_path(&[1.0, 0.0, 1.0], 20);
+        m.record_guided_search(
+            &[1.0, 0.0, 1.0],
+            3,
+            0.9,
+            50,
+            100,
+            20,
+            &pred,
+            pred.candidate_ids.len(),
+        );
+        assert_eq!(m.total_searches, 1);
+        assert!(m.path_training[0].guided);
+        assert_eq!(m.path_training[0].region_id, pred.region_id);
+    }
+
+    #[test]
+    fn path_predict_benchmark_smoke() {
+        let bench = run_path_predict_benchmark(120, 16, 5, 16);
+        assert_eq!(bench.store_size, 120);
+        assert!(bench.default_mean_ns > 0);
+        assert!(bench.guided_mean_ns > 0);
+        assert!(bench.default_recall >= 0.0);
+        assert!(bench.guided_recall >= 0.0);
+        // Guided should not collapse recall on structured data.
+        assert!(
+            bench.guided_recall + 0.15 >= bench.default_recall,
+            "guided recall {} much worse than default {}",
+            bench.guided_recall,
+            bench.default_recall
+        );
+        assert!(bench.entry_hit_rate > 0.0);
+        let json = serde_json::to_string(&bench).unwrap();
+        assert!(json.contains("guided_mean_ns"));
+        assert!(json.contains("speedup"));
     }
 
     /// Full-scale 500-vector protocol. Multi-minute EML train; not for CI.

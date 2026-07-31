@@ -184,6 +184,9 @@ impl HnswService {
         let removed = store.delete(id);
         if removed {
             self.epoch.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut eml) = self.eml.lock() {
+                eml.clear_path_table();
+            }
         }
         removed
     }
@@ -224,6 +227,11 @@ impl HnswService {
         self.insert_count.fetch_add(1, Ordering::Relaxed);
         self.epoch.fetch_add(1, Ordering::SeqCst);
 
+        // Invalidate path table on mutation — rebuilt lazily on next search.
+        if let Ok(mut eml) = self.eml.lock() {
+            eml.clear_path_table();
+        }
+
         // Chain logging: hnsw.insert
         #[cfg(feature = "exochain")]
         if let Some(ref cm) = self.chain_manager {
@@ -246,7 +254,9 @@ impl HnswService {
     ///
     /// When EML is enabled and trained, the beam width (ef_search) is
     /// adapted per-query and the rebuild model is consulted after each
-    /// search. Training data is recorded for continuous learning.
+    /// search. When a region → entry-node path table is available
+    /// (WEFT-385 / HNSW-EML #4), search is guided through predicted
+    /// entry nodes. Training data is recorded for continuous learning.
     pub fn search(&self, query: &[f32], top_k: usize) -> Vec<HnswSearchResult> {
         let mut store = self.store.lock().expect("HnswStore lock poisoned");
         let mut eml = self.eml.lock().expect("EML lock poisoned");
@@ -267,30 +277,95 @@ impl HnswService {
         let rebuild_pred = eml.predict_rebuild(store_size, store.inserts_since_rebuild(), 0);
         if rebuild_pred.is_learned && rebuild_pred.should_rebuild {
             store.force_rebuild();
+            // Path table is tied to store layout — rebuild after graph rebuild.
+            let pairs = store.entry_id_embeddings();
+            eml.rebuild_path_table(&pairs);
+        }
+
+        // Lazy path-table build: first search after enough inserts.
+        if eml.path_predict_enabled() && !eml.has_path_table() && store_size >= 16 {
+            let pairs = store.entry_id_embeddings();
+            eml.rebuild_path_table(&pairs);
         }
 
         let t0 = std::time::Instant::now();
-        let results: Vec<HnswSearchResult> = store
-            .query(query, top_k)
-            .into_iter()
-            .map(|r| HnswSearchResult {
-                id: r.id,
-                score: r.score,
-                metadata: r.metadata,
-            })
-            .collect();
+        let (results, path_pred, used_guided) = if eml.has_path_table() {
+            let probes = eml.path_region_probes();
+            // SAFETY: path_table borrowed only for the guided call; we re-fetch
+            // prediction metadata after releasing the table ref via clone of
+            // the needed fields. Clone table snapshot for query_guided.
+            let table = eml
+                .path_table()
+                .expect("has_path_table true")
+                .clone();
+            let (raw, pred) = store.query_guided(query, top_k, &table, probes);
+            let mapped: Vec<HnswSearchResult> = raw
+                .into_iter()
+                .map(|r| HnswSearchResult {
+                    id: r.id,
+                    score: r.score,
+                    metadata: r.metadata,
+                })
+                .collect();
+            let guided = pred.is_learned;
+            let path_pred = crate::hnsw_eml::PathPrediction {
+                region_id: pred.region_id,
+                entry_ids: pred.entry_ids,
+                region_score: pred.region_score,
+                candidate_ids: pred.candidate_ids,
+                is_learned: pred.is_learned,
+                eml_path_quality: None,
+            };
+            (mapped, path_pred, guided)
+        } else {
+            let mapped: Vec<HnswSearchResult> = store
+                .query(query, top_k)
+                .into_iter()
+                .map(|r| HnswSearchResult {
+                    id: r.id,
+                    score: r.score,
+                    metadata: r.metadata,
+                })
+                .collect();
+            (
+                mapped,
+                crate::hnsw_eml::PathPrediction {
+                    region_id: None,
+                    entry_ids: Vec::new(),
+                    region_score: 0.0,
+                    candidate_ids: Vec::new(),
+                    is_learned: false,
+                    eml_path_quality: None,
+                },
+                false,
+            )
+        };
         let elapsed_us = t0.elapsed().as_micros() as u64;
 
         let top_score = results.first().map(|r| r.score).unwrap_or(0.0);
         let ef_used = store.ef_search();
-        eml.record_search(
-            query,
-            results.len(),
-            top_score,
-            ef_used,
-            elapsed_us,
-            store_size,
-        );
+        if used_guided {
+            let pool = path_pred.candidate_ids.len();
+            eml.record_guided_search(
+                query,
+                results.len(),
+                top_score,
+                ef_used,
+                elapsed_us,
+                store_size,
+                &path_pred,
+                pool,
+            );
+        } else {
+            eml.record_search(
+                query,
+                results.len(),
+                top_score,
+                ef_used,
+                elapsed_us,
+                store_size,
+            );
+        }
 
         // ExoChain: append multi-signal observation for training provenance.
         #[cfg(feature = "exochain")]
@@ -305,11 +380,32 @@ impl HnswService {
                     "top_score": top_score,
                     "store_size": store_size,
                     "is_learned": ef_pred.is_learned,
+                    "path_guided": used_guided,
+                    "path_region": path_pred.region_id,
+                    "path_region_score": path_pred.region_score,
+                    "path_entry_count": path_pred.entry_ids.len(),
                 })),
             );
         }
 
         results
+    }
+
+    /// Explicitly rebuild the region → entry-node path table from the
+    /// current store contents (WEFT-385).
+    pub fn rebuild_path_table(&self) {
+        let store = self.store.lock().expect("HnswStore lock poisoned");
+        let mut eml = self.eml.lock().expect("EML lock poisoned");
+        let pairs = store.entry_id_embeddings();
+        eml.rebuild_path_table(&pairs);
+    }
+
+    /// Whether guided path prediction is active.
+    pub fn path_table_ready(&self) -> bool {
+        self.eml
+            .lock()
+            .expect("EML lock poisoned")
+            .has_path_table()
     }
 
     /// Brute-force ground-truth search for recall measurement.
@@ -813,6 +909,38 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a");
         assert!((results[0].score - 1.0).abs() < 0.01);
+    }
+
+    /// WEFT-385: path table builds lazily once store has ≥16 entries and
+    /// guided search still returns the nearest neighbor.
+    #[test]
+    fn search_builds_path_table_and_guides() {
+        let svc = make_service();
+        for i in 0..24 {
+            let cluster = i % 3;
+            let mut emb = vec![0.02 * (i as f32); 4];
+            emb[cluster] = 1.0;
+            svc.insert(format!("n{i}"), emb, serde_json::json!({}));
+        }
+        assert!(!svc.path_table_ready());
+
+        let mut q = vec![0.0; 4];
+        q[0] = 1.0;
+        let results = svc.search(&q, 3);
+        assert!(!results.is_empty());
+        assert!(svc.path_table_ready());
+        // Cluster-0 entries are n0, n3, n6, ...
+        assert!(
+            results[0].id.starts_with('n'),
+            "unexpected id {}",
+            results[0].id
+        );
+
+        // Explicit rebuild stays ready.
+        svc.rebuild_path_table();
+        assert!(svc.path_table_ready());
+        let results2 = svc.search(&q, 3);
+        assert_eq!(results2[0].id, results[0].id);
     }
 
     #[test]

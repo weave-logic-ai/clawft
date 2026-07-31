@@ -400,9 +400,10 @@ pub use health::{ProbeConfig, ProbeResult, ProbeState};
 pub use hnsw_eml::{
     ArmMetrics, DistanceTrainingPoint, EfPrediction, EfStrategy, EfTrainingPoint,
     HnswBenchmarkParams, HnswEmlBenchmark, HnswEmlConfig, HnswEmlManager, HnswEmlStatus,
-    HnswScalingPoint, PathTrainingPoint, ProbeReport, RebuildPrediction, RebuildTrainingPoint,
-    SearchStrategy, SpectrumForm, TriageRecord, probe_corpus, run_hnsw_benchmark,
-    run_hnsw_benchmark_with, triage_strategy,
+    HnswScalingPoint, PathPredictBenchmark, PathPrediction, PathTrainingPoint, ProbeReport,
+    RebuildPrediction, RebuildTrainingPoint, SearchStrategy, SpectrumForm, TriageRecord,
+    probe_corpus, run_hnsw_benchmark, run_hnsw_benchmark_with, run_path_predict_benchmark,
+    triage_strategy,
 };
 #[cfg(feature = "ecc")]
 pub use hnsw_service::{
