@@ -66,3 +66,7 @@ http-body-util = "0.1"
 # real client over a localhost TCP socket.
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+# WEFT-500: MCP HTTP transport integration tests against a real local
+# HTTP server (axum TcpListener + wiremock status/path stubs).
+axum = { version = "0.8", features = ["json", "macros", "tokio", "http1"] }
+wiremock = "0.6"
