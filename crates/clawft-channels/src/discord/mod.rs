@@ -1,14 +1,15 @@
 //! Discord channel plugin.
 //!
-//! Provides a [`Channel`](crate::traits::Channel) implementation that
-//! connects to the Discord Gateway via WebSocket. The plugin is registered
-//! with the host through [`DiscordChannelFactory`].
+//! Provides dual [`Channel`](crate::traits::Channel) +
+//! [`ChannelAdapter`](clawft_plugin::traits::ChannelAdapter) implementations
+//! (WEFT-170 / C7) that connect to the Discord Gateway via WebSocket.
+//! The plugin is registered with the host through [`DiscordChannelFactory`].
 //!
 //! # Modules
 //!
 //! - [`events`] -- Discord Gateway payload types and opcodes
 //! - [`api`] -- HTTP client wrapper for the Discord REST API
-//! - [`channel`] -- `Channel` trait implementation
+//! - [`channel`] -- `Channel` + `ChannelAdapter` implementations
 //! - [`factory`] -- `ChannelFactory` implementation
 
 pub mod api;

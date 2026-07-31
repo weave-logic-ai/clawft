@@ -1,8 +1,9 @@
-//! [`DiscordChannel`] -- `Channel` trait implementation for Discord.
+//! [`DiscordChannel`] -- dual [`Channel`] + [`ChannelAdapter`] for Discord.
 //!
-//! Uses the Discord Gateway WebSocket protocol to receive events and
-//! delivers them to the pipeline through
-//! [`ChannelHost::deliver_inbound`](crate::traits::ChannelHost::deliver_inbound).
+//! Uses the Discord Gateway WebSocket protocol to receive events. Primary
+//! surface is [`ChannelAdapter`] (WEFT-170 / C7); the legacy [`Channel`]
+//! trait remains for `PluginHost` / gateway via
+//! [`ChannelAdapterHostBridge`](crate::plugin_host::ChannelAdapterHostBridge).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,10 +16,14 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use clawft_plugin::error::PluginError;
+use clawft_plugin::message::MessagePayload;
+use clawft_plugin::traits::{ChannelAdapter, ChannelAdapterHost};
 use clawft_types::config::DiscordConfig;
 use clawft_types::error::ChannelError;
-use clawft_types::event::{InboundMessage, OutboundMessage};
+use clawft_types::event::OutboundMessage;
 
+use crate::plugin_host::ChannelAdapterHostBridge;
 use crate::traits::{Channel, ChannelHost, ChannelMetadata, ChannelStatus, MessageId};
 
 use super::api::DiscordApiClient;
@@ -33,6 +38,8 @@ use super::events::{
 const RECONNECT_DELAY_SECS: u64 = 5;
 
 /// Discord channel implementation using the Gateway WebSocket protocol.
+///
+/// Implements both [`ChannelAdapter`] (C7 / WEFT-170) and legacy [`Channel`].
 ///
 /// # Configuration
 ///
@@ -84,12 +91,26 @@ impl DiscordChannel {
         *self.status.write().await = status;
     }
 
-    /// Process a MESSAGE_CREATE event, delivering it to the host.
+    /// Whether `sender_id` is permitted (empty allow-list = everyone).
+    pub fn is_allowed(&self, sender_id: &str) -> bool {
+        self.config.allow_from.is_empty() || self.config.allow_from.iter().any(|id| id == sender_id)
+    }
+
+    /// Current lifecycle status (non-blocking read).
+    pub fn status(&self) -> ChannelStatus {
+        self.status
+            .try_read()
+            .map(|s| s.clone())
+            .unwrap_or(ChannelStatus::Stopped)
+    }
+
+    /// Process a MESSAGE_CREATE event, delivering it via
+    /// [`ChannelAdapterHost`].
     pub(crate) async fn process_message_create(
         &self,
         msg: &MessageCreate,
-        host: &Arc<dyn ChannelHost>,
-    ) -> Result<(), ChannelError> {
+        host: &Arc<dyn ChannelAdapterHost>,
+    ) -> Result<(), PluginError> {
         // Skip bot messages to avoid loops.
         if msg.author.bot {
             debug!(
@@ -140,51 +161,22 @@ impl DiscordChannel {
             metadata.insert("allow_from_match".into(), serde_json::Value::Bool(true));
         }
 
-        let inbound = InboundMessage {
-            channel: "discord".into(),
-            sender_id: sender_id.clone(),
-            chat_id: msg.channel_id.clone(),
-            content: msg.content.clone(),
-            timestamp: chrono::Utc::now(),
-            media: vec![],
+        host.deliver_inbound(
+            "discord",
+            sender_id,
+            &msg.channel_id,
+            MessagePayload::text(msg.content.clone()),
             metadata,
-        };
-
-        host.deliver_inbound(inbound).await
-    }
-}
-
-#[async_trait]
-impl Channel for DiscordChannel {
-    fn name(&self) -> &str {
-        "discord"
+        )
+        .await
     }
 
-    fn metadata(&self) -> ChannelMetadata {
-        ChannelMetadata {
-            name: "discord".into(),
-            display_name: "Discord".into(),
-            supports_threads: true,
-            supports_media: true,
-        }
-    }
-
-    fn status(&self) -> ChannelStatus {
-        self.status
-            .try_read()
-            .map(|s| s.clone())
-            .unwrap_or(ChannelStatus::Stopped)
-    }
-
-    fn is_allowed(&self, sender_id: &str) -> bool {
-        self.config.allow_from.is_empty() || self.config.allow_from.iter().any(|id| id == sender_id)
-    }
-
-    async fn start(
+    /// Shared Gateway loop used by both trait surfaces.
+    async fn run_gateway_loop(
         &self,
-        host: Arc<dyn ChannelHost>,
+        host: Arc<dyn ChannelAdapterHost>,
         cancel: CancellationToken,
-    ) -> Result<(), ChannelError> {
+    ) -> Result<(), PluginError> {
         self.set_status(ChannelStatus::Starting).await;
 
         info!("Discord channel starting");
@@ -533,20 +525,21 @@ impl Channel for DiscordChannel {
         Ok(())
     }
 
-    async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
+    /// Chunk and deliver outbound content via the Discord REST API.
+    async fn send_content(&self, chat_id: &str, content: &str) -> Result<String, ChannelError> {
         let opts = ChunkerOptions::from_discord_config(&self.config);
-        let plan = plan_chunks(&msg.content, &opts);
+        let plan = plan_chunks(content, &opts);
         let mut last_id = String::new();
 
         for chunk in &plan.chunks {
             match chunk {
                 OutboundChunk::Text(text) => {
-                    last_id = self.api.create_message(&msg.chat_id, text).await?;
+                    last_id = self.api.create_message(chat_id, text).await?;
                 }
                 OutboundChunk::Embed(embed) => {
                     last_id = self
                         .api
-                        .create_message_with_embeds(&msg.chat_id, "", std::slice::from_ref(embed))
+                        .create_message_with_embeds(chat_id, "", std::slice::from_ref(embed))
                         .await?;
                 }
                 OutboundChunk::File {
@@ -556,7 +549,7 @@ impl Channel for DiscordChannel {
                 } => {
                     match self
                         .api
-                        .create_message_with_file(&msg.chat_id, notice, filename, content.as_bytes())
+                        .create_message_with_file(chat_id, notice, filename, content.as_bytes())
                         .await
                     {
                         Ok(id) => last_id = id,
@@ -571,16 +564,98 @@ impl Channel for DiscordChannel {
                             let fallback = format!(
                                 "{notice}\n(file `{filename}` not uploaded: {e})"
                             );
-                            last_id = self
-                                .api
-                                .create_message(&msg.chat_id, &fallback)
-                                .await?;
+                            last_id = self.api.create_message(chat_id, &fallback).await?;
                         }
                     }
                 }
             }
         }
 
-        Ok(MessageId(last_id))
+        Ok(last_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ChannelAdapter (primary C7 surface)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl ChannelAdapter for DiscordChannel {
+    fn name(&self) -> &str {
+        "discord"
+    }
+
+    fn display_name(&self) -> &str {
+        "Discord"
+    }
+
+    fn supports_threads(&self) -> bool {
+        true
+    }
+
+    fn supports_media(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelAdapterHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), PluginError> {
+        self.run_gateway_loop(host, cancel).await
+    }
+
+    async fn send(&self, target: &str, payload: &MessagePayload) -> Result<String, PluginError> {
+        let content = payload.as_text().ok_or_else(|| {
+            PluginError::ExecutionFailed("discord: only text payloads supported".into())
+        })?;
+        self.send_content(target, content)
+            .await
+            .map_err(|e| PluginError::ExecutionFailed(e.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Channel (legacy PluginHost / gateway surface)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl Channel for DiscordChannel {
+    fn name(&self) -> &str {
+        "discord"
+    }
+
+    fn metadata(&self) -> ChannelMetadata {
+        ChannelMetadata {
+            name: "discord".into(),
+            display_name: "Discord".into(),
+            supports_threads: true,
+            supports_media: true,
+        }
+    }
+
+    fn status(&self) -> ChannelStatus {
+        DiscordChannel::status(self)
+    }
+
+    fn is_allowed(&self, sender_id: &str) -> bool {
+        DiscordChannel::is_allowed(self, sender_id)
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), ChannelError> {
+        let adapter_host: Arc<dyn ChannelAdapterHost> =
+            Arc::new(ChannelAdapterHostBridge::new(host));
+        self.run_gateway_loop(adapter_host, cancel)
+            .await
+            .map_err(|e| ChannelError::Other(e.to_string()))
+    }
+
+    async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
+        let id = self.send_content(&msg.chat_id, &msg.content).await?;
+        Ok(MessageId(id))
     }
 }

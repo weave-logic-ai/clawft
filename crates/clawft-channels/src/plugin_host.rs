@@ -1,10 +1,15 @@
 //! Unified plugin host extensions for C7: PluginHost Unification.
 //!
 //! Provides:
-//! - [`ChannelAdapterShim`] -- bridges the existing [`Channel`] trait to the
-//!   new [`ChannelAdapter`] trait from `clawft-plugin`, allowing existing
-//!   Telegram, Discord, and Slack channels to work through the unified
-//!   plugin system without behavior changes.
+//! - [`ChannelAdapterShim`] -- **kept (deprecated for first-party)** bridge
+//!   from legacy [`Channel`] → [`ChannelAdapter`]. Telegram, Discord, and
+//!   Slack now implement [`ChannelAdapter`] directly (WEFT-170); the shim
+//!   remains for third-party / residual legacy channels (e.g. `web`) and
+//!   for adapters that still only expose [`Channel`].
+//! - [`ChannelAdapterHostBridge`] -- reverse bridge from
+//!   [`ChannelAdapterHost`] → [`ChannelHost`] so dual-impl channels can
+//!   share one poll/gateway loop while `PluginHost` still speaks
+//!   [`Channel`].
 //! - [`SoulConfig`] -- loads and injects SOUL.md personality content into
 //!   the Assembler pipeline stage system prompt.
 
@@ -29,15 +34,29 @@ use clawft_types::event::OutboundMessage;
 /// Bridges an existing [`Channel`] implementation to the [`ChannelAdapter`]
 /// trait from `clawft-plugin`.
 ///
-/// This shim allows Telegram, Discord, Slack, and other channels that
-/// implement the original `Channel` trait to participate in the unified
-/// plugin host system without requiring rewrites.
+/// # Status (WEFT-170)
+///
+/// **Kept with deprecation for first-party use.** Telegram, Discord, and
+/// Slack implement [`ChannelAdapter`] natively. Prefer that path for new
+/// work. Retain this shim for:
+/// - residual legacy channels that still only implement [`Channel`] (e.g. web)
+/// - third-party plugins that cannot yet move to [`ChannelAdapter`]
+///
+/// On native builds, `clawft_plugin::CancellationToken` is
+/// `tokio_util::sync::CancellationToken`, so the poll bridge below is a
+/// no-op-compatible adapter (still valid if a future non-native token is
+/// passed through the plugin boundary).
 ///
 /// The shim converts between the two trait signatures:
 /// - `Channel::start(host: Arc<dyn ChannelHost>, cancel)` <->
 ///   `ChannelAdapter::start(host: Arc<dyn ChannelAdapterHost>, cancel)`
 /// - `Channel::send(msg: &OutboundMessage) -> MessageId` <->
 ///   `ChannelAdapter::send(target, payload: &MessagePayload) -> String`
+#[deprecated(
+    note = "WEFT-170: first-party channels implement ChannelAdapter directly; \
+            keep this shim only for legacy Channel-only plugins (e.g. web) \
+            and third-party adapters."
+)]
 pub struct ChannelAdapterShim {
     /// The underlying channel implementation.
     channel: Arc<dyn Channel>,
@@ -45,6 +64,7 @@ pub struct ChannelAdapterShim {
     bridge_host: Arc<dyn ChannelHost>,
 }
 
+#[allow(deprecated)]
 impl ChannelAdapterShim {
     /// Create a new shim wrapping an existing channel.
     pub fn new(channel: Arc<dyn Channel>, host: Arc<dyn ChannelHost>) -> Self {
@@ -61,6 +81,7 @@ impl ChannelAdapterShim {
 }
 
 #[async_trait]
+#[allow(deprecated)]
 impl ChannelAdapter for ChannelAdapterShim {
     fn name(&self) -> &str {
         self.channel.name()
@@ -402,8 +423,9 @@ mod tests {
         }
     }
 
-    // -- ChannelAdapterShim tests --
+    // -- ChannelAdapterShim tests (legacy bridge; still covered) --
 
+    #[allow(deprecated)]
     #[test]
     fn shim_name_matches_channel() {
         let channel: Arc<dyn Channel> = Arc::new(MockChannel::new("telegram"));
@@ -413,6 +435,7 @@ mod tests {
         assert_eq!(ChannelAdapter::name(&shim), "telegram");
     }
 
+    #[allow(deprecated)]
     #[test]
     fn shim_capabilities_match_channel() {
         let channel: Arc<dyn Channel> = Arc::new(MockChannel::new("slack"));
@@ -423,6 +446,7 @@ mod tests {
         assert!(!shim.supports_media());
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn shim_send_text_payload() {
         let channel: Arc<dyn Channel> = Arc::new(MockChannel::new("discord"));
@@ -435,6 +459,7 @@ mod tests {
         assert_eq!(result.unwrap(), "mock-chat-123");
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn shim_send_json_payload() {
         let channel: Arc<dyn Channel> = Arc::new(MockChannel::new("test"));
@@ -446,6 +471,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn shim_send_binary_not_supported() {
         let channel: Arc<dyn Channel> = Arc::new(MockChannel::new("test"));
@@ -459,6 +485,7 @@ mod tests {
         assert!(err.contains("not supported"), "got: {err}");
     }
 
+    #[allow(deprecated)]
     #[test]
     fn shim_status_reflects_channel() {
         let channel: Arc<dyn Channel> = Arc::new(MockChannel::new("test"));
