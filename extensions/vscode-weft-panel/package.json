@@ -46,7 +46,8 @@
     "test:chip-a11y": "npx --yes tsx --test src/chipA11y.test.ts",
     "test:active-radar": "npx --yes tsx --test src/activeRadar.test.ts",
     "test:wsp": "npx --yes tsx --test src/wsp.test.ts",
-    "test:unit": "npm run test:panel-auth && npm run test:chip-a11y && npm run test:wsp && npm run test:active-radar"
+    "test:capture": "npx --yes tsx --test src/captureSidecar.test.ts",
+    "test:unit": "npm run test:panel-auth && npm run test:chip-a11y && npm run test:wsp && npm run test:active-radar && npm run test:capture"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",

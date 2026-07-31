@@ -100,9 +100,23 @@ Or palette → `Developer: Install Extension from Location…`.
 
 If you see the fallback "Failed to load the wasm bundle" card, step 1
 of Build wasn't run. See `SMOKE.md` for the full smoke test and the
-known gaps (voice/capture sidecar, full active-radar stream — M2).
+known gaps (full active-radar stream — M2).
 WSP-0.1 verbs are implemented on the extension host (WEFT-285);
 see `SMOKE.md` §10 and `src/wsp.ts`.
+
+## WEFT-282 capture sidecar
+
+Webviews cannot use `getUserMedia` ([vscode#303293](https://github.com/microsoft/vscode/issues/303293)).
+Mic capture runs on the **extension host** via `src/captureSidecar.ts`:
+
+- Default: graceful **unavailable** (panel still loads; voice affordances disable).
+- `WEFT_CAPTURE_BACKEND=mock` — synthetic PCM for tests / smoke without hardware.
+- `WEFT_CAPTURE_SIDECAR=…` — external process writing mono s16le to stdout.
+
+Wire: `capture-request` / `capture-response`. Consent via WSP
+`consent.request` (`scope://mic`) or `grant_consent`. Design memo:
+`docs/architecture/vscode-panel-capture-sidecar.md`. Tests:
+`npm run test:capture`. Smoke: `SMOKE.md` §11.
 
 ## WEFT-283 active-radar
 

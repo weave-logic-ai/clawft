@@ -1348,7 +1348,7 @@ export function verbMappingTable(): WspVerbDocRow[] {
             verb: "consent.request",
             direction: "request",
             mapping: "local consent + modal surface",
-            notes: "Capture sidecar is M2",
+            notes: "WEFT-282: scope://mic|camera grants host capture bridge",
         },
         {
             verb: "consent.revoke",

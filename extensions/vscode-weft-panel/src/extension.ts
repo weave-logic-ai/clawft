@@ -13,7 +13,9 @@
 // daemon RPC while keeping raw `rpc-request` backward compatible.
 // WEFT-283: typed active-radar return schema + variant-id echo is in;
 // full ux/returns substrate publish remains M2 loop wiring.
-// Still out of scope: voice/capture sidecar (M2), workspace editor topics (M2).
+// WEFT-282: capture sidecar / host bridge for mic (camera reserved);
+// webview getUserMedia is blocked (microsoft/vscode#303293).
+// Still out of scope: workspace editor topics (M2).
 
 import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
@@ -55,6 +57,12 @@ import {
     parseRadarReturn,
     type VariantId,
 } from "./activeRadar";
+import {
+    CaptureController,
+    isCaptureConsentScope,
+    isCaptureRequest,
+    resolveCaptureBackend,
+} from "./captureSidecar";
 
 const VIEW_TYPE = "weft.panel";
 
@@ -210,11 +218,17 @@ interface WebviewRadarReturnMessage {
     type: typeof RADAR_RETURN_TYPE;
 }
 
+/** Discriminator-only; full shape validated by isCaptureRequest (WEFT-282). */
+interface WebviewCaptureRequestMessage {
+    type: "capture-request";
+}
+
 type WebviewInbound =
     | WasmRpcRequest
     | WasmWspRequest
     | WebviewReadyMessage
-    | WebviewRadarReturnMessage;
+    | WebviewRadarReturnMessage
+    | WebviewCaptureRequestMessage;
 
 export function activate(context: vscode.ExtensionContext): void {
     const openCmd = vscode.commands.registerCommand("weft.openPanel", () => {
@@ -339,6 +353,10 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
     // continues to work without a WSP session (backward compat).
     let wspSession: WspSession | undefined;
 
+    // WEFT-282: host-side capture bridge (webview cannot getUserMedia).
+    // Backend defaults to graceful-unavailable unless WEFT_CAPTURE_* is set.
+    const capture = new CaptureController(resolveCaptureBackend());
+
     panel.webview.onDidReceiveMessage(
         async (raw: unknown) => {
             const msg = raw as WebviewInbound | null;
@@ -353,6 +371,8 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
                     socketPath,
                     multiUser,
                     panelId: panelSession?.panelId,
+                    // WEFT-282: advertise capture bridge capability.
+                    capture: capture.status(),
                 });
                 // WEFT-285: migrate the connect surface onto WSP —
                 // auto session.initialize + seed kernel status via
@@ -370,6 +390,17 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
                 handleRadarReturn(panel, raw);
                 return;
             }
+            if (isCaptureRequest(raw)) {
+                // WEFT-282: host capture sidecar (mic/camera bridge).
+                const result = await capture.dispatch(
+                    raw.method,
+                    raw.params ?? null,
+                );
+                void panel.webview.postMessage(
+                    capture.buildResponse(raw.id, raw.method, result),
+                );
+                return;
+            }
             if (msg.type === "wsp-request") {
                 wspSession = await handleWsp(
                     panel,
@@ -378,11 +409,19 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
                     wspSession,
                     panelSession,
                     multiUser,
+                    capture,
                 );
                 return;
             }
             if (msg.type === "rpc-request") {
-                await handleRpc(panel, socketPath, msg, panelSession, multiUser);
+                await handleRpc(
+                    panel,
+                    socketPath,
+                    msg,
+                    panelSession,
+                    multiUser,
+                    capture,
+                );
             }
         },
         undefined,
@@ -394,6 +433,7 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
     panel.onDidDispose(
         () => {
             hotReload.dispose();
+            void capture.dispose();
             if (currentPanel === panel) {
                 currentPanel = undefined;
             }
@@ -558,9 +598,26 @@ async function handleRpc(
     req: WasmRpcRequest,
     panelSession?: PanelSession,
     multiUser = false,
+    capture?: CaptureController,
 ): Promise<void> {
     // WEFT-283: optional pulse id — echoed on every response path.
     const variantId = extractVariantId(req);
+
+    // WEFT-282: sensor.mic.status is answered by the host capture bridge.
+    // The daemon may not implement this verb; the panel reserved it for
+    // the audio bridge (M1.5.2). Prefer host truth over a UDS miss.
+    if (req.method === "sensor.mic.status" && capture) {
+        void panel.webview.postMessage(
+            buildRpcResponse({
+                id: req.id,
+                ok: true,
+                result: capture.sensorMicStatus(),
+                variantId,
+            }),
+        );
+        return;
+    }
+
     const resp = await proxyDaemonRpc(
         socketPath,
         req.method,
@@ -596,6 +653,7 @@ async function handleWsp(
     session: WspSession | undefined,
     panelSession: PanelSession | undefined,
     multiUser: boolean,
+    capture?: CaptureController,
 ): Promise<WspSession | undefined> {
     let active = session;
     const action = translateWsp(active, req.method, req.params ?? null);
@@ -621,6 +679,37 @@ async function handleWsp(
         }
         if (req.method === "session.shutdown") {
             active = undefined;
+            // Drop capture on WSP shutdown (privacy).
+            void capture?.dispose();
+        }
+        // WEFT-282: wire consent.request / revoke into the capture bridge.
+        if (capture && req.method === "consent.request") {
+            const p = (req.params ?? {}) as Record<string, unknown>;
+            const scope =
+                typeof p.scope === "string" ? p.scope : "scope://unspecified";
+            if (isCaptureConsentScope(scope)) {
+                capture.grantConsent(scope);
+            }
+        }
+        if (capture && req.method === "consent.revoke") {
+            const p = (req.params ?? {}) as Record<string, unknown>;
+            // Prefer explicit scope; else look up consent record by id.
+            if (typeof p.scope === "string") {
+                capture.revokeConsent(p.scope);
+            } else if (active) {
+                const consentId =
+                    typeof p.consent_id === "string"
+                        ? p.consent_id
+                        : typeof p["consent-id"] === "string"
+                          ? p["consent-id"]
+                          : undefined;
+                if (consentId) {
+                    const rec = active.consents.get(consentId);
+                    if (rec && isCaptureConsentScope(rec.scope)) {
+                        capture.revokeConsent(rec.scope);
+                    }
+                }
+            }
         }
         void panel.webview.postMessage({
             type: "wsp-response",
@@ -628,6 +717,24 @@ async function handleWsp(
             method: req.method,
             ok: true,
             result: publicWspResult(action.result),
+        });
+        return active;
+    }
+
+    // WEFT-282: host answers sensor.mic.status for WSP-mapped subscribe too.
+    if (action.method === "sensor.mic.status" && capture) {
+        const result = wrapWspRpcResult(
+            action.wrapResult,
+            capture.sensorMicStatus(),
+            true,
+        );
+        void panel.webview.postMessage({
+            type: "wsp-response",
+            id: req.id,
+            method: req.method,
+            ok: true,
+            result,
+            rpc_method: action.method,
         });
         return active;
     }

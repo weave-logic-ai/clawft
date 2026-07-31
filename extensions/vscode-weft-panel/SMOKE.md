@@ -203,15 +203,92 @@ npm run test:wsp
 # or: npm run test:unit
 ```
 
+## 11. Capture sidecar (WEFT-282)
+
+Webviews still cannot call `getUserMedia`
+([microsoft/vscode#303293](https://github.com/microsoft/vscode/issues/303293)).
+Mic capture is host-side. Design:
+`docs/architecture/vscode-panel-capture-sidecar.md`.
+
+### Unit tests (no host / no mic)
+
+```bash
+cd extensions/vscode-weft-panel
+npm run test:capture
+# or: npm run test:unit
+```
+
+### Mock path (CI / no hardware)
+
+1. Launch VS Code / Cursor with the mock backend:
+   ```bash
+   WEFT_CAPTURE_BACKEND=mock code --extensionDevelopmentPath=extensions/vscode-weft-panel .
+   ```
+2. Palette → **WeftOS: Open Panel**.
+3. On `ready`, `hello.capture.mic.available` should be `true` and
+   `hello.capture.mic.backend` should be `"mock"`.
+4. From the webview (or DevTools eval of the postMessage path):
+   - `consent.request` with `{ scope: "scope://mic", purpose: "voice" }`
+     **or** `capture-request` `{ method: "grant_consent", params: { scope: "scope://mic" } }`
+   - `capture-request` `{ method: "start", params: { media: "mic" } }`
+   - `capture-request` `{ method: "poll" }` → non-empty `pcm_i16` / `whisper`
+   - `capture-request` `{ method: "stop" }`
+5. Raw RPC `sensor.mic.status` (or subscribe
+   `resource://sensor/mic/status`) returns host bridge status
+   (`bridge: "host"`, `upstream: "microsoft/vscode#303293"`).
+
+### Whisper smoke (mock PCM → service shape)
+
+`poll` returns `result.whisper` matching
+`clawft-service-whisper::PcmChunk`:
+
+```json
+{
+  "data": "<base64 s16le>",
+  "sample_rate": 16000,
+  "channels": 1,
+  "seq": 1,
+  "samples": 1600,
+  "chunk_ms": 100
+}
+```
+
+With the whisper service running and subscribed to
+`substrate/<node>/sensor/mic/pcm_chunk`, a privileged host tool (not
+the webview — WEFT-496 denylist) can publish that object. For a pure
+unit check without the daemon:
+
+```bash
+npm run test:capture
+# covers encodePcmI16Base64 + toWhisperPcmChunk + controller poll.whisper
+```
+
+### Process sidecar (optional real mic)
+
+```bash
+# Example: sox default device → mono s16le @ 16 kHz on stdout
+export WEFT_CAPTURE_SIDECAR='sox -q -d -t raw -b 16 -e signed -c 1 -r 16000 -'
+export WEFT_CAPTURE_SAMPLE_RATE=16000
+```
+
+If the binary is missing, `start` fails with a clear `unavailable`
+error; the panel remains usable.
+
+### Graceful unavailable (default)
+
+With no `WEFT_CAPTURE_*` env, `hello.capture.mic.available === false`
+and `start` returns `error_code: "unavailable"`. Camera always
+reports unavailable in this MVP.
+
 ## Known gaps (deferred)
 
-- No voice input — VSCode webviews can't expose `allow="microphone"`
-  yet (microsoft/vscode#303293). Capture sidecar lands next.
-- No typed active-radar return schema on the observation stream
-  (`observe` opens a local id; full radar is M2).
+- Camera capture (status reserved; start → graceful unavailable).
+- Full active-radar `observation.update` stream (`observe` opens a
+  local id; full radar loop is M2).
 - No `ThreadDock` primitive for per-agent parallel output.
 - Live tone sync from wasm → DOM a11y strip (today the E2E path uses
   a mock inject; production canvas tones are still canvas-only).
+- Automatic host→substrate PCM publish (helpers only; grant-gated).
 
 References:
 - Architecture & rationale: ADR-011, session-7 findings.
@@ -219,6 +296,7 @@ References:
 - Verb set: `.planning/symposiums/compositional-ui/adrs/adr-005-wsp-verb-set.md`.
 - Chip DOM followup: WEFT-558 / WEFT-486.
 - WEFT-285: `docs/plans/wave-0-WEFT-285-result.md`.
+- WEFT-282: `docs/architecture/vscode-panel-capture-sidecar.md`.
 
 ## WEFT-283 active-radar
 
