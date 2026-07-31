@@ -453,6 +453,7 @@ mod tests {
             source_file: src.source_file.clone(),
             source_location: None,
             metadata: serde_json::json!({}),
+            embedding: None,
         }
     }
 
