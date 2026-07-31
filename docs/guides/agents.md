@@ -20,9 +20,12 @@ Each initialized workspace holds the Concierge persona under `.clawft/`:
 | `.clawft/IDENTITY.md` | Operational identity, skills, tone |
 
 `weaver init` materializes both. The daemon’s
-[`IdentityLoader`](../../crates/clawft-core/src/agent/identity.rs) reads them
-on every turn (small files; no hot-reload watcher yet). Missing files make
-`agent.chat` fail with `identity load failed` — run `weaver init` to seed.
+[`FileIdentityProvider`](../../crates/clawft-core/src/agent/identity.rs)
+loads them via [`Platform::fs`]. On native builds a notify watcher
+(WEFT-329) invalidates the cache when `SOUL.md` / `IDENTITY.md` change;
+the next turn re-reads. Without the watcher (WASM / notify failure)
+every call re-reads (small files). Missing files make `agent.chat` fail
+with `identity load failed` — run `weaver init` to seed.
 
 ---
 

@@ -102,6 +102,12 @@ fn daemon_atom_registry() -> Option<Arc<clawft_service_agent::AtomRegistry>> {
 static DAEMON_AGENT_LOOP: OnceLock<Arc<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>> =
     OnceLock::new();
 
+/// WEFT-329: keep the identity notify watcher alive for the daemon
+/// process lifetime. Dropping the handle would stop invalidation;
+/// without it the provider stays in watch mode but never marks stale.
+static DAEMON_IDENTITY_WATCHER: OnceLock<clawft_core::agent::identity_watcher::IdentityWatcherHandle> =
+    OnceLock::new();
+
 /// `pub(crate)` (mirrors [`daemon_agent`]) so `voice_loop.rs` can reach the
 /// review-gate surface directly — WEFT-655 Gap A needs `pending_hold_info`
 /// from `dispatch_reply`'s Ok arm, which `AgentLoopHandle` doesn't expose.
@@ -1743,18 +1749,54 @@ pub async fn run(
         let _ = DAEMON_TURN_SINK.set(agent_sink.clone());
 
         // agent-core-v1 Phase D1 + WEFT-96: FileIdentityProvider loads
-        // `.clawft/SOUL.md` + `.clawft/IDENTITY.md` every turn; wrap with
+        // `.clawft/SOUL.md` + `.clawft/IDENTITY.md`; wrap with
         // JournalAwareIdentityProvider so pending substrate journal rows
         // are consulted (read-on-every-turn) without auto-promoting into
         // SOUL.md. Degrade-open on journal read errors so a substrate
         // blip never blocks chat.
+        //
+        // WEFT-329: start a notify watcher on `.clawft/` so identity
+        // edits invalidate the cache; next turn re-reads. Always-on
+        // when notify starts (cheap single-dir watch); fail-open to
+        // default always-re-read if the watcher cannot be created.
         let identity_provider: Arc<dyn clawft_core::agent::identity::IdentityProvider> = {
-            let file_base: Arc<dyn clawft_core::agent::identity::IdentityProvider> = Arc::new(
+            let file_provider = Arc::new(
                 clawft_core::agent::identity::FileIdentityProvider::new(
                     &workspace,
                     Arc::clone(&identity_platform),
                 ),
             );
+            let watch_cfg =
+                clawft_core::agent::identity_watcher::IdentityWatcherConfig::for_workspace(
+                    &workspace,
+                );
+            match clawft_core::agent::identity_watcher::start_watching(
+                watch_cfg,
+                Arc::clone(&file_provider),
+            ) {
+                Ok(handle) => {
+                    if DAEMON_IDENTITY_WATCHER.set(handle).is_ok() {
+                        info!(
+                            clawft = %workspace.join(".clawft").display(),
+                            "agent-core: identity hot-reload watcher started (WEFT-329)"
+                        );
+                    } else {
+                        warn!(
+                            "agent-core: identity watcher handle already set; \
+                             new handle dropped (watcher stopped)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "agent-core: identity hot-reload watcher failed to start; \
+                         FileIdentityProvider stays in always-re-read mode"
+                    );
+                }
+            }
+            let file_base: Arc<dyn clawft_core::agent::identity::IdentityProvider> =
+                file_provider;
             let k = kernel.read().await;
             let journal_client = Arc::new(clawft_service_agent::KernelSubstrateClient::new(
                 k.substrate_service().clone(),

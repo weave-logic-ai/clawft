@@ -12,6 +12,8 @@ pub mod graft;
 pub mod helpers;
 pub mod hydrate;
 pub mod identity;
+#[cfg(feature = "native")]
+pub mod identity_watcher;
 pub mod learning;
 pub mod local_file_sink;
 pub mod loop_core;

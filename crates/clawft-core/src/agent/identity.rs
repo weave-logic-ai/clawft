@@ -29,11 +29,14 @@
 //!   Operators can set `agents.binding_thread_mode = "warn_only"` to
 //!   restore the legacy annotate + `warn!` degraded path.
 //!
-//! ## What this is NOT (yet)
+//! ## Hot-reload (WEFT-329)
 //!
-//! - **No hot-reload watcher** — the cached `FileIdentityProvider`
-//!   re-reads on every call (small files; cheap). A `notify`-driven
-//!   watcher arrives when measurement says it earns its keep.
+//! [`FileIdentityProvider`] defaults to re-reading on every call (small
+//! files; WASM/mock portable). On native builds the daemon starts a
+//! `notify`-driven watcher ([`super::identity_watcher`]) that flips the
+//! provider into **watch mode**: cache is served until
+//! [`FileIdentityProvider::invalidate`], then the next `current()`
+//! re-reads `SOUL.md` / `IDENTITY.md` from disk.
 //!
 //! ## SOUL.journal (WEFT-330 write + WEFT-96 read-on-every-turn)
 //!
@@ -59,6 +62,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clawft_platform::Platform;
 
@@ -241,33 +245,47 @@ pub trait IdentityProvider: Send + Sync + 'static {
     async fn current(&self) -> Result<Identity, IdentityError>;
 }
 
-/// Filesystem-backed [`IdentityProvider`] that re-reads on every call
-/// and caches the most recent successful load.
+/// Filesystem-backed [`IdentityProvider`] with optional watch-mode cache
+/// (WEFT-329).
 ///
 /// All IO goes through [`Platform::fs`] (WEFT-95 / MW-17) so the path
 /// is native/WASM portable — the same mock / browser backends used by
 /// the rest of the agent loop exercise identity loads without
 /// `std::fs`.
 ///
-/// The cache lets repeated calls within a turn skip the disk hit;
-/// cross-turn changes (the user editing `SOUL.md` between turns) are
-/// picked up on the next call because the loader still tries the disk
-/// first. The cache is only consulted as a fallback when the disk
-/// path fails to resolve; that fallback is tagged
-/// [`IdentitySource::Cache`].
+/// ## Cache modes
+///
+/// - **Default (always re-read):** every [`Self::current`] hits disk.
+///   Cross-turn edits are observed immediately. The cache is only
+///   consulted when the disk path fails; that fallback is tagged
+///   [`IdentitySource::Cache`].
+/// - **Watch mode:** after a successful load, subsequent calls serve
+///   the cache until [`Self::invalidate`]. The next call re-reads
+///   disk. Enabled by the native notify watcher
+///   ([`super::identity_watcher`]) when the daemon starts it.
 pub struct FileIdentityProvider<P: Platform> {
     workspace: PathBuf,
     platform: Arc<P>,
     cached: RwLock<Option<Identity>>,
+    /// When `true`, serve cache until [`Self::invalidate`].
+    watch_mode: AtomicBool,
+    /// When `true` (and watch mode), the next `current()` re-reads disk.
+    stale: AtomicBool,
 }
 
 impl<P: Platform> FileIdentityProvider<P> {
     /// Build a provider rooted at the given workspace directory.
+    ///
+    /// Starts in always-re-read mode. Call [`Self::enable_watch_mode`]
+    /// (or start [`super::identity_watcher::start_watching`]) to switch
+    /// to cache-until-invalidate.
     pub fn new(workspace: impl Into<PathBuf>, platform: Arc<P>) -> Self {
         Self {
             workspace: workspace.into(),
             platform,
             cached: RwLock::new(None),
+            watch_mode: AtomicBool::new(false),
+            stale: AtomicBool::new(true),
         }
     }
 
@@ -275,16 +293,62 @@ impl<P: Platform> FileIdentityProvider<P> {
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
+
+    /// Mark the cached identity dirty so the next `current()` re-reads
+    /// disk (WEFT-329). No-op when watch mode is off (every call already
+    /// re-reads).
+    pub fn invalidate(&self) {
+        self.stale.store(true, Ordering::Release);
+        debug!("identity provider: cache invalidated");
+    }
+
+    /// Enable cache-until-invalidate mode (WEFT-329).
+    ///
+    /// Used when a notify watcher is active. Forces a re-read on the
+    /// next `current()` so the first load after enabling is fresh.
+    pub fn enable_watch_mode(&self) {
+        self.watch_mode.store(true, Ordering::Release);
+        self.stale.store(true, Ordering::Release);
+        debug!("identity provider: watch mode enabled");
+    }
+
+    /// Whether watch mode is currently enabled.
+    pub fn is_watch_mode(&self) -> bool {
+        self.watch_mode.load(Ordering::Acquire)
+    }
+
+    /// Whether the cache is marked stale (will re-read on next call in
+    /// watch mode). Always effectively "stale" outside watch mode
+    /// because every call re-reads.
+    pub fn is_stale(&self) -> bool {
+        self.stale.load(Ordering::Acquire)
+    }
 }
 
 #[async_trait]
 impl<P: Platform + 'static> IdentityProvider for FileIdentityProvider<P> {
     async fn current(&self) -> Result<Identity, IdentityError> {
+        let watch_mode = self.watch_mode.load(Ordering::Acquire);
+        let stale = self.stale.load(Ordering::Acquire);
+
+        // Watch mode + fresh cache → skip disk.
+        if watch_mode && !stale {
+            if let Some(cached) = self.cached.read().await.clone() {
+                debug!(
+                    hash = %cached.hash,
+                    "identity provider: serving cache (watch mode)"
+                );
+                return Ok(cached);
+            }
+            // Cache empty — fall through to disk.
+        }
+
         let loader = IdentityLoader::new(self.workspace.clone(), Arc::clone(&self.platform));
         match loader.current().await {
             Some(id) => {
                 let mut cache = self.cached.write().await;
                 *cache = Some(id.clone());
+                self.stale.store(false, Ordering::Release);
                 Ok(id)
             }
             None => {
@@ -299,6 +363,8 @@ impl<P: Platform + 'static> IdentityProvider for FileIdentityProvider<P> {
                         cached.hash
                     );
                     cached.source = IdentitySource::Cache;
+                    // Keep stale=true so a later successful disk read
+                    // still refreshes after invalidation.
                     return Ok(cached);
                 }
                 Err(IdentityError::NotFound)
@@ -837,7 +903,7 @@ mod tests {
         assert_eq!(first.soul, "soul-1");
 
         // Mutate the files between calls — provider must observe the
-        // change because every call re-reads from disk.
+        // change because every call re-reads from disk (default mode).
         platform.fs.seed(clawft.join("SOUL.md"), "soul-2");
         let second = provider.current().await.expect("second load");
         assert_eq!(second.soul, "soul-2");
@@ -882,6 +948,72 @@ mod tests {
         let provider = FileIdentityProvider::new(PathBuf::from("/missing"), mock_platform());
         let err = provider.current().await.unwrap_err();
         assert!(matches!(err, IdentityError::NotFound));
+    }
+
+    // ── WEFT-329: watch-mode cache + invalidate ───────────────────
+
+    #[tokio::test]
+    async fn watch_mode_serves_cache_until_invalidate() {
+        let platform = mock_platform();
+        let workspace = PathBuf::from("/watch-ws");
+        let clawft = workspace.join(".clawft");
+        platform.fs.seed(clawft.join("SOUL.md"), "soul-v1");
+        platform.fs.seed(clawft.join("IDENTITY.md"), "id-v1");
+
+        let provider = FileIdentityProvider::new(&workspace, Arc::clone(&platform));
+        provider.enable_watch_mode();
+        assert!(provider.is_watch_mode());
+        assert!(provider.is_stale());
+
+        let first = provider.current().await.expect("warm");
+        assert_eq!(first.soul, "soul-v1");
+        assert!(!provider.is_stale());
+
+        // Disk changes without invalidate must not be observed.
+        platform.fs.seed(clawft.join("SOUL.md"), "soul-v2");
+        let cached = provider.current().await.expect("cache hit");
+        assert_eq!(cached.soul, "soul-v1");
+        assert_eq!(cached.hash, first.hash);
+
+        // Invalidate → next call re-reads.
+        provider.invalidate();
+        assert!(provider.is_stale());
+        let reloaded = provider.current().await.expect("reload");
+        assert_eq!(reloaded.soul, "soul-v2");
+        assert_ne!(reloaded.hash, first.hash);
+        assert!(!provider.is_stale());
+    }
+
+    #[tokio::test]
+    async fn watch_mode_re_read_after_invalidate_with_temp_files() {
+        // AC: tests with temp identity files (native Platform::fs).
+        #[cfg(feature = "native")]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let clawft = tmp.path().join(".clawft");
+            std::fs::create_dir_all(&clawft).unwrap();
+            std::fs::write(clawft.join("SOUL.md"), "temp-soul-a").unwrap();
+            std::fs::write(clawft.join("IDENTITY.md"), "temp-id-a").unwrap();
+
+            let provider =
+                FileIdentityProvider::new(tmp.path(), native_platform());
+            provider.enable_watch_mode();
+
+            let a = provider.current().await.expect("load a");
+            assert_eq!(a.soul, "temp-soul-a");
+
+            std::fs::write(clawft.join("SOUL.md"), "temp-soul-b").unwrap();
+            // Still cached.
+            assert_eq!(
+                provider.current().await.expect("still a").soul,
+                "temp-soul-a"
+            );
+
+            provider.invalidate();
+            let b = provider.current().await.expect("load b");
+            assert_eq!(b.soul, "temp-soul-b");
+            assert_eq!(b.source, IdentitySource::Clawft);
+        }
     }
 
     // ── WEFT-96 / WEFT-97 ───────────────────────────────────────────
