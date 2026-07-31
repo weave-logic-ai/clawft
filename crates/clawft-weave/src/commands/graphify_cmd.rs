@@ -171,11 +171,12 @@ async fn run_ingest(
     // Detect if target is a URL or local path.
     if target.starts_with("http://") || target.starts_with("https://") {
         println!("Ingesting URL: {target}");
-        // URL ingestion uses the graphify ingest module.
-        // In production, this would use a real HTTP client.
-        // For now, report the action.
         use clawft_graphify::ingest;
-        let client = ingest::StubHttpClient;
+        // Production path: ReqwestHttpClient (clawft-graphify `http-client`
+        // feature, enabled by this binary). StubHttpClient / trait mocks
+        // remain for unit tests.
+        let client = ingest::ReqwestHttpClient::new()
+            .map_err(|e| anyhow::anyhow!("HTTP client init failed: {e}"))?;
         match ingest::ingest(target, output, &client, contributor) {
             Ok(result) => {
                 println!("Saved {:?}: {}", result.url_type, result.path.display());

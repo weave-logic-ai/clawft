@@ -159,7 +159,9 @@ pub trait HttpClient: Send + Sync {
     fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, GraphifyError>;
 }
 
-/// A no-op HTTP client that always errors (for compile-time gating).
+/// A no-op HTTP client that always errors (for compile-time gating / tests).
+///
+/// Production binaries should use [`ReqwestHttpClient`] (feature `http-client`).
 pub struct StubHttpClient;
 
 impl HttpClient for StubHttpClient {
@@ -172,6 +174,83 @@ impl HttpClient for StubHttpClient {
         Err(GraphifyError::IngestError(format!(
             "HTTP client not configured, cannot fetch: {url}"
         )))
+    }
+}
+
+/// Production HTTP client backed by `reqwest` (blocking + rustls).
+///
+/// Enabled with the `http-client` feature. SSRF checks run in [`ingest`]
+/// before any fetch; this client also re-validates URLs as defense in depth
+/// when used directly.
+#[cfg(feature = "http-client")]
+pub struct ReqwestHttpClient {
+    client: reqwest::blocking::Client,
+}
+
+#[cfg(feature = "http-client")]
+impl ReqwestHttpClient {
+    /// Build a client with sensible timeouts and a graphify user-agent.
+    pub fn new() -> Result<Self, GraphifyError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .user_agent(concat!(
+                "weftos-graphify/",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| {
+                GraphifyError::IngestError(format!("failed to build HTTP client: {e}"))
+            })?;
+        Ok(Self { client })
+    }
+
+    fn map_status(url: &str, status: reqwest::StatusCode) -> Result<(), GraphifyError> {
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(GraphifyError::IngestError(format!(
+                "HTTP {status} fetching {url}"
+            )))
+        }
+    }
+}
+
+#[cfg(feature = "http-client")]
+impl Default for ReqwestHttpClient {
+    fn default() -> Self {
+        Self::new().expect("failed to build default ReqwestHttpClient")
+    }
+}
+
+#[cfg(feature = "http-client")]
+impl HttpClient for ReqwestHttpClient {
+    fn fetch_text(&self, url: &str) -> Result<String, GraphifyError> {
+        // Defense in depth: same SSRF policy as ingest(), for direct callers.
+        validate_url(url)?;
+        let resp = self.client.get(url).send().map_err(|e| {
+            GraphifyError::IngestError(format!("HTTP request failed for {url}: {e}"))
+        })?;
+        Self::map_status(url, resp.status())?;
+        resp.text().map_err(|e| {
+            GraphifyError::IngestError(format!("failed to read response body from {url}: {e}"))
+        })
+    }
+
+    fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, GraphifyError> {
+        validate_url(url)?;
+        let resp = self.client.get(url).send().map_err(|e| {
+            GraphifyError::IngestError(format!("HTTP request failed for {url}: {e}"))
+        })?;
+        Self::map_status(url, resp.status())?;
+        resp.bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| {
+                GraphifyError::IngestError(format!(
+                    "failed to read response bytes from {url}: {e}"
+                ))
+            })
     }
 }
 
@@ -664,5 +743,239 @@ mod tests {
     fn yaml_escape_special_chars() {
         assert_eq!(yaml_escape("hello \"world\""), "hello \\\"world\\\"");
         assert_eq!(yaml_escape("line\nbreak"), "line break");
+    }
+
+    /// Hermetic mock: returns canned bodies for known URLs.
+    struct MockHttpClient {
+        text: std::collections::HashMap<String, String>,
+        bytes: std::collections::HashMap<String, Vec<u8>>,
+    }
+
+    impl MockHttpClient {
+        fn new() -> Self {
+            Self {
+                text: std::collections::HashMap::new(),
+                bytes: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with_text(mut self, url: &str, body: &str) -> Self {
+            self.text.insert(url.to_string(), body.to_string());
+            self
+        }
+
+        fn with_bytes(mut self, url: &str, body: Vec<u8>) -> Self {
+            self.bytes.insert(url.to_string(), body);
+            self
+        }
+    }
+
+    impl HttpClient for MockHttpClient {
+        fn fetch_text(&self, url: &str) -> Result<String, GraphifyError> {
+            self.text.get(url).cloned().ok_or_else(|| {
+                GraphifyError::IngestError(format!("mock: no text for {url}"))
+            })
+        }
+
+        fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, GraphifyError> {
+            self.bytes.get(url).cloned().ok_or_else(|| {
+                GraphifyError::IngestError(format!("mock: no bytes for {url}"))
+            })
+        }
+    }
+
+    #[test]
+    fn stub_client_errors() {
+        let client = StubHttpClient;
+        assert!(client.fetch_text("https://example.com").is_err());
+        assert!(client.fetch_bytes("https://example.com/a.pdf").is_err());
+    }
+
+    #[test]
+    fn ingest_webpage_with_mock_client() {
+        let url = "https://example.com/docs/intro";
+        let html = r#"<html><head><title>Intro Guide</title></head>
+<body><script>bad()</script><p>Hello knowledge graph.</p></body></html>"#;
+        let client = MockHttpClient::new().with_text(url, html);
+
+        let dir = std::env::temp_dir().join("graphify_test_ingest_webpage");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let result = ingest(url, &dir, &client, Some("tester")).unwrap();
+        assert_eq!(result.url_type, UrlType::Webpage);
+        assert!(result.path.exists());
+        let content = std::fs::read_to_string(&result.path).unwrap();
+        assert!(content.contains("Intro Guide"));
+        assert!(content.contains("Hello knowledge graph"));
+        assert!(content.contains("source_url: https://example.com/docs/intro"));
+        assert!(content.contains("contributor: tester"));
+        assert!(!content.contains("<script"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingest_arxiv_with_mock_client() {
+        let url = "https://arxiv.org/abs/2301.12345";
+        let abs_url = "https://export.arxiv.org/abs/2301.12345";
+        let html = r#"
+            <h1 class="title mathjax"><span class="descriptor">Title:</span>Cool Paper</h1>
+            <div class="authors"><a>Ada Lovelace</a></div>
+            <blockquote class="abstract mathjax">
+                <span class="descriptor">Abstract:</span> We prove things.
+            </blockquote>
+        "#;
+        let client = MockHttpClient::new().with_text(abs_url, html);
+
+        let dir = std::env::temp_dir().join("graphify_test_ingest_arxiv");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let result = ingest(url, &dir, &client, None).unwrap();
+        assert_eq!(result.url_type, UrlType::Arxiv);
+        assert_eq!(result.filename, "arxiv_2301_12345.md");
+        let content = std::fs::read_to_string(&result.path).unwrap();
+        assert!(content.contains("Cool Paper"));
+        assert!(content.contains("Ada Lovelace"));
+        assert!(content.contains("We prove things"));
+        assert!(content.contains("arxiv_id: 2301.12345"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingest_pdf_with_mock_client() {
+        let url = "https://example.com/papers/report.pdf";
+        let client = MockHttpClient::new().with_bytes(url, b"%PDF-1.4 mock".to_vec());
+
+        let dir = std::env::temp_dir().join("graphify_test_ingest_pdf");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let result = ingest(url, &dir, &client, None).unwrap();
+        assert_eq!(result.url_type, UrlType::Pdf);
+        assert!(result.filename.ends_with(".pdf"));
+        let bytes = std::fs::read(&result.path).unwrap();
+        assert_eq!(bytes, b"%PDF-1.4 mock");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingest_rejects_ssrf_before_fetch() {
+        let client = MockHttpClient::new();
+        let dir = std::env::temp_dir().join("graphify_test_ssrf_ingest");
+        let err = ingest("http://127.0.0.1/secret", &dir, &client, None).unwrap_err();
+        assert!(err.to_string().contains("SSRF") || err.to_string().contains("localhost"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReqwestHttpClient tests (feature-gated, hermetic via mockito)
+// ---------------------------------------------------------------------------
+//
+// mockito binds localhost; `validate_url` / `ReqwestHttpClient` block private
+// IPs. Transport tests use a thin blocking client that skips SSRF so we can
+// prove reqwest fetch works end-to-end. Full ingest SSRF coverage is in the
+// mock suite above. Tests are sync because `reqwest::blocking` owns its own
+// runtime and must not be created/dropped inside a tokio async test.
+
+#[cfg(all(test, feature = "http-client"))]
+mod reqwest_tests {
+    use super::*;
+
+    /// Thin wrapper that hits mockito without SSRF (localhost).
+    struct LocalHttpClient {
+        inner: reqwest::blocking::Client,
+    }
+
+    impl LocalHttpClient {
+        fn new() -> Self {
+            Self {
+                inner: reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+            }
+        }
+    }
+
+    impl HttpClient for LocalHttpClient {
+        fn fetch_text(&self, url: &str) -> Result<String, GraphifyError> {
+            let resp = self.inner.get(url).send().map_err(|e| {
+                GraphifyError::IngestError(format!("local fetch_text: {e}"))
+            })?;
+            if !resp.status().is_success() {
+                return Err(GraphifyError::IngestError(format!(
+                    "HTTP {} from local mock",
+                    resp.status()
+                )));
+            }
+            resp.text()
+                .map_err(|e| GraphifyError::IngestError(e.to_string()))
+        }
+
+        fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, GraphifyError> {
+            let resp = self.inner.get(url).send().map_err(|e| {
+                GraphifyError::IngestError(format!("local fetch_bytes: {e}"))
+            })?;
+            if !resp.status().is_success() {
+                return Err(GraphifyError::IngestError(format!(
+                    "HTTP {} from local mock",
+                    resp.status()
+                )));
+            }
+            resp.bytes()
+                .map(|b| b.to_vec())
+                .map_err(|e| GraphifyError::IngestError(e.to_string()))
+        }
+    }
+
+    #[test]
+    fn reqwest_blocking_client_builds_and_enforces_ssrf() {
+        let client = ReqwestHttpClient::new().expect("build client");
+        assert!(client.fetch_text("http://127.0.0.1/").is_err());
+        assert!(client.fetch_text("http://10.0.0.1/").is_err());
+        assert!(client.fetch_text("http://localhost/admin").is_err());
+        assert!(client.fetch_bytes("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn hermetic_fetch_text_and_bytes_via_mockito() {
+        let mut server = mockito::Server::new();
+        let _page = server
+            .mock("GET", "/page")
+            .with_status(200)
+            .with_body("<html><title>Wire</title><body>ok</body></html>")
+            .create();
+        let _bin = server
+            .mock("GET", "/file.bin")
+            .with_status(200)
+            .with_body(vec![1u8, 2, 3, 4])
+            .create();
+
+        let client = LocalHttpClient::new();
+        let text = client
+            .fetch_text(&format!("{}/page", server.url()))
+            .unwrap();
+        assert!(text.contains("Wire"));
+
+        let bytes = client
+            .fetch_bytes(&format!("{}/file.bin", server.url()))
+            .unwrap();
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn hermetic_http_error_status() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/missing")
+            .with_status(404)
+            .with_body("nope")
+            .create();
+
+        let err = LocalHttpClient::new()
+            .fetch_text(&format!("{}/missing", server.url()))
+            .unwrap_err();
+        assert!(err.to_string().contains("404") || err.to_string().contains("HTTP"));
     }
 }

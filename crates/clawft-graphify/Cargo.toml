@@ -17,9 +17,12 @@ forensic-domain = []
 html-export = ["dep:html-escape"]
 neo4j-export = []
 kernel-bridge = ["dep:clawft-kernel", "dep:async-trait"]
+# Real HTTP for URL ingest (reqwest + rustls). Production binaries
+# (weaver) enable this; unit tests keep StubHttpClient / mock clients.
+http-client = ["dep:reqwest"]
 full = ["ast-extract", "semantic-extract", "vision-extract", "code-domain",
         "forensic-domain", "html-export", "neo4j-export", "kernel-bridge",
-        "lang-all"]
+        "http-client", "lang-all"]
 
 lang-python = ["ast-extract", "dep:tree-sitter-python"]
 lang-javascript = ["ast-extract", "dep:tree-sitter-javascript"]
@@ -72,7 +75,15 @@ clawft-kernel = { workspace = true, optional = true, features = ["ecc"] }
 # The previously-declared optional `clawft-llm` dep was dead — no feature
 # gated it on, no source `use`d it. Removed in WEFT-383 (ws12 cleanup).
 notify = { workspace = true, optional = true }
+# WEFT-368: blocking reqwest for sync `HttpClient` trait (ingest is sync).
+# rustls-tls matches workspace (musl/static builds); `blocking` because the
+# graphify `HttpClient` trait is intentionally non-async.
+reqwest = { workspace = true, optional = true, default-features = false, features = ["blocking", "rustls-tls", "json"] }
 
 [dev-dependencies]
 insta = { workspace = true }
 tempfile = { workspace = true }
+# Sync mock HTTP server for Reqwest::blocking tests (WEFT-368).
+# Prefer mockito over wiremock here: blocking reqwest cannot be used/dropped
+# inside a tokio async test context.
+mockito = "1"
