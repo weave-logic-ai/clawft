@@ -1,0 +1,11 @@
+{
+  "entities": [
+    {"name": "API Gateway", "type": "service", "description": "External entry point"},
+    {"name": "Auth Service", "type": "service", "description": "Authentication and sessions"},
+    {"name": "User DB", "type": "concept", "description": "User store"}
+  ],
+  "relationships": [
+    {"source": "API Gateway", "target": "Auth Service", "relation": "related_to", "confidence": "EXTRACTED"},
+    {"source": "Auth Service", "target": "User DB", "relation": "related_to", "confidence": "INFERRED"}
+  ]
+}

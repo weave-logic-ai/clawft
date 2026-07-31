@@ -233,11 +233,85 @@ fn default_confidence() -> String {
 #[cfg(all(test, feature = "vision-extract"))]
 mod tests {
     use super::*;
+    use crate::entity::{EntityType, FileType};
+    use crate::relationship::Confidence;
 
     #[test]
     fn is_image_extensions() {
         assert!(is_image(Path::new("diagram.png")));
         assert!(is_image(Path::new("photo.JPEG")));
+        assert!(is_image(Path::new("arch.webp")));
+        assert!(is_image(Path::new("flow.SVG")));
         assert!(!is_image(Path::new("code.rs")));
+        assert!(!is_image(Path::new("notes")));
+    }
+
+    #[test]
+    fn extract_json_from_markdown_fences() {
+        let input = r#"```json
+{"entities": [], "relationships": []}
+```"#;
+        let result = extract_json_from_response(input);
+        assert!(result.starts_with('{'));
+        assert!(result.ends_with('}'));
+    }
+
+    #[test]
+    fn parse_entity_types() {
+        assert_eq!(parse_entity_type("service"), EntityType::Service);
+        assert_eq!(parse_entity_type("CONCEPT"), EntityType::Concept);
+        assert_eq!(
+            parse_entity_type("widget"),
+            EntityType::Custom("widget".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_vision_parses_mock_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny.png");
+        // Minimal valid 1×1 PNG (IHDR + empty IDAT is enough for read path).
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D,
+            0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&path, png).unwrap();
+
+        let fake_vision = |_prompt: String, bytes: Vec<u8>, media: String| async move {
+            assert!(!bytes.is_empty());
+            assert_eq!(media, "image/png");
+            Ok::<_, String>(
+                r#"{"entities":[{"name":"Frontend","type":"service","description":"UI"},{"name":"Backend","type":"service","description":"API"}],"relationships":[{"source":"Frontend","target":"Backend","relation":"related_to","confidence":"EXTRACTED"}]}"#
+                    .to_string(),
+            )
+        };
+
+        let result = extract_vision(&path, fake_vision).await.unwrap();
+        assert_eq!(result.entities.len(), 2);
+        assert_eq!(result.entities[0].label, "Frontend");
+        assert_eq!(result.entities[0].file_type, FileType::Image);
+        assert_eq!(result.relationships.len(), 1);
+        assert_eq!(result.relationships[0].confidence, Confidence::Extracted);
+    }
+
+    #[tokio::test]
+    async fn extract_vision_rejects_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.png");
+        std::fs::write(&path, b"not-a-real-png-but-readable").unwrap();
+
+        let fake_vision = |_p: String, _b: Vec<u8>, _m: String| async {
+            Ok::<_, String>("this is not json".into())
+        };
+
+        let err = extract_vision(&path, fake_vision).await.unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse vision response")
+                || err.to_string().to_lowercase().contains("llm"),
+            "got: {err}"
+        );
     }
 }

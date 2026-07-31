@@ -474,6 +474,46 @@ jobs:
         run: cargo test -p eml-core --features experimental-attention --lib attention
 
   # -------------------------------------------------------------------
+  # graphify vision-extract feature gate — WEFT-381.
+  #
+  # `vision-extract` is OFF by default on clawft-graphify. Default
+  # workspace check/test jobs never compile vision_extract.rs or the
+  # e2e fixture under tests/fixtures/, so regressions under the flag
+  # would be silent. This job:
+  #
+  #   1. cargo check -p clawft-graphify --features vision-extract
+  #   2. cargo test  -p clawft-graphify --features vision-extract
+  #      (unit tests + tests/vision_extract_e2e.rs with mock vision)
+  #
+  # Mock vision only — no real Claude / network. Sub-second.
+  # -------------------------------------------------------------------
+  graphify-vision-extract:
+    name: graphify vision-extract feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-vision-extract-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-vision-extract-
+
+      - name: Check clawft-graphify with vision-extract
+        run: cargo check -p clawft-graphify --features vision-extract
+
+      - name: Test vision_extract path (unit + e2e fixture, mock vision)
+        run: cargo test -p clawft-graphify --features vision-extract
+
+  # -------------------------------------------------------------------
   # UI: lint and type-check (when ui/ directory exists)
   # -------------------------------------------------------------------
   ui-check:

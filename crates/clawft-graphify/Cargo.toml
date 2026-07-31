@@ -108,3 +108,9 @@ harness = false
 [[bench]]
 name = "graph_ops"
 harness = false
+
+# WEFT-381: vision_extract e2e fixture + mock vision path.
+# Only builds when `vision-extract` is enabled (CI job + local --features).
+[[test]]
+name = "vision_extract_e2e"
+required-features = ["vision-extract"]
