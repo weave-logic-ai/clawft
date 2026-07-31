@@ -106,6 +106,9 @@ impl Sidebar {
 }
 
 /// Where the sidebar can navigate to. Matches DESIGN.md §9 OOB manifest.
+///
+/// `Workspace` is the ADR-073 Agent Workspace mode (0.9+ freeform stage).
+/// It is intentionally optional and does not replace stock desktop apps.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SidebarTarget {
     Files,
@@ -120,6 +123,8 @@ pub enum SidebarTarget {
     Chat,
     Admin,
     Explorer,
+    /// Freeform multi-agent stage (WEFT-686 / WEFT-687).
+    Workspace,
     Apps(AppsTab),
 }
 
@@ -318,13 +323,16 @@ fn paint_menu(
     let mut cursor_y = rect.top() + 4.0;
     let mut action: Option<SidebarAction> = None;
 
-    // Leaf rows (canonical order — DO NOT REORDER, see DESIGN.md §5).
+    // Leaf rows (canonical order — DESIGN.md §5). Agent Workspace
+    // (ADR-073) is appended after Explorer so the 0.8 stock order is
+    // preserved; Workspace is an optional 0.9+ mode, not a reorder.
     // Canonical icon set per DESIGN.md §5. The Geometric Shapes /
     // Math / Block Elements / Arrows glyphs (▢ ≣ ↯ ◯ ◷ ▥ ≡ ▌ ▦)
     // are covered by the DejaVuSans subset registered as a fallback
     // in `app::install_symbol_font`; the rest (⚙ ✱ ⛨ ⌖) come from
-    // egui's default Ubuntu-Light + NotoEmoji.
-    let items: [MenuItem; 13] = [
+    // egui's default Ubuntu-Light + NotoEmoji. Workspace uses ❖ (U+2756,
+    // in DejaVuSans-WeftSymbols).
+    let items: [MenuItem; 14] = [
         MenuItem::Leaf("Files", "▢", SidebarTarget::Files),
         MenuItem::Leaf("Processes", "≣", SidebarTarget::Processes),
         MenuItem::Leaf("Services", "↯", SidebarTarget::Services),
@@ -354,6 +362,7 @@ fn paint_menu(
         MenuItem::Leaf("Chat", "✱", SidebarTarget::Chat),
         MenuItem::Leaf("Admin", "⛨", SidebarTarget::Admin),
         MenuItem::Leaf("Explorer", "⌖", SidebarTarget::Explorer),
+        MenuItem::Leaf("Workspace", "❖", SidebarTarget::Workspace),
         MenuItem::Group(
             "Apps",
             "▦",

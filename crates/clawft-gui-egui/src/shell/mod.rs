@@ -1,5 +1,9 @@
 //! Desktop-shell experience: boot splash → desktop with warped grid
 //! wallpaper, bottom tray, and floating app windows.
+//!
+//! Agent Workspace (ADR-073 / WEFT-686..688): freeform multi-pane stage,
+//! `WindowIntent` bus, and optional shell mode live under
+//! [`window_manager`], [`window_intent`], and [`workspace`].
 
 pub mod audio;
 pub mod boot;
@@ -7,6 +11,9 @@ pub mod desktop;
 pub mod grid;
 pub mod sidebar;
 pub mod tray;
+pub mod window_intent;
+pub mod window_manager;
+pub mod workspace;
 
 use web_time::Instant;
 

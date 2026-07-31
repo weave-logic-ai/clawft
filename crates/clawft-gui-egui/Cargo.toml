@@ -128,6 +128,7 @@ egui_dock = "0.19"
 # feature trim available without dropping markdown rendering.
 egui_commonmark = { version = "0.23", default-features = false, features = ["pulldown_cmark"] }
 log = "0.4"
+serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 # Drop-in Instant/SystemTime: std on native, performance.now() on wasm.

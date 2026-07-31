@@ -67,7 +67,8 @@ fn render_builtin(ui: &mut egui::Ui, rect: egui::Rect, desk: &mut Desktop) {
     // sub-target. We deliberately do not include "Apps" itself in the
     // grid — clicking the launcher to launch the launcher would be
     // confusing.
-    let tiles: [(&str, SidebarTarget); 12] = [
+    // 13 tiles: DESIGN.md §5 stock apps + Agent Workspace (ADR-073).
+    let tiles: [(&str, SidebarTarget); 13] = [
         ("Files", SidebarTarget::Files),
         ("Processes", SidebarTarget::Processes),
         ("Services", SidebarTarget::Services),
@@ -80,6 +81,7 @@ fn render_builtin(ui: &mut egui::Ui, rect: egui::Rect, desk: &mut Desktop) {
         ("Chat", SidebarTarget::Chat),
         ("Admin", SidebarTarget::Admin),
         ("Explorer", SidebarTarget::Explorer),
+        ("Workspace", SidebarTarget::Workspace),
     ];
 
     if let Some(action) = paint_tile_grid(

@@ -133,6 +133,11 @@ pub struct Desktop {
     /// Survives across paints so an in-flight edit isn't clobbered by
     /// the next snapshot tick.
     pub scheduler: crate::apps::scheduler::SchedulerState,
+
+    /// Agent Workspace freeform stage (ADR-073 / WEFT-686..688).
+    /// Owned here so layout + intent bus survive sidebar navigation
+    /// away from and back to `SidebarTarget::Workspace`.
+    pub workspace: super::workspace::AgentWorkspace,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -283,6 +288,7 @@ impl Desktop {
             settings_state: crate::apps::settings::SettingsState::default(),
             files_state: crate::apps::files::FilesState::default(),
             scheduler: crate::apps::scheduler::SchedulerState::default(),
+            workspace: super::workspace::AgentWorkspace::new(),
         }
     }
 }

@@ -83,6 +83,11 @@ pub fn dispatch(
         SidebarTarget::Chat => chat::show(ui, rect, desk, live, snap),
         SidebarTarget::Admin => admin::show(ui, rect, desk, live, snap),
         SidebarTarget::Explorer => explorer::show(ui, rect, desk, live, snap),
+        // Agent Workspace freeform stage (ADR-073 / WEFT-686..688).
+        // Stock desktop apps remain available on other sidebar targets.
+        SidebarTarget::Workspace => {
+            crate::shell::workspace::show(ui, rect, &mut desk.workspace);
+        }
         SidebarTarget::Apps(tab) => launcher::show(ui, rect, desk, live, snap, tab),
     }
 }
