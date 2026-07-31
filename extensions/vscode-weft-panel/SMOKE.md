@@ -203,6 +203,47 @@ npm run test:wsp
 # or: npm run test:unit
 ```
 
+## Known gaps (deferred)
+
+- No voice input — VSCode webviews can't expose `allow="microphone"`
+  yet (microsoft/vscode#303293). Capture sidecar lands next.
+- No typed active-radar return schema on the observation stream
+  (`observe` opens a local id; full radar is M2).
+- ~~No `ThreadDock` primitive for per-agent parallel output.~~
+  **Shipped WEFT-284** — `ui://thread-dock` in `clawft-canon`, chat
+  composition when ≥2 agent columns, panel wire helpers in
+  `src/threadDock.ts` (`npm run test:thread-dock`).
+- Live tone sync from wasm → DOM a11y strip (today the E2E path uses
+  a mock inject; production canvas tones are still canvas-only).
+
+References:
+- Architecture & rationale: ADR-011, session-7 findings.
+- Protocol: `.planning/symposiums/compositional-ui/protocol-spec.md`.
+- Verb set: `.planning/symposiums/compositional-ui/adrs/adr-005-wsp-verb-set.md`.
+- Chip DOM followup: WEFT-558 / WEFT-486.
+- WEFT-285: `docs/plans/wave-0-WEFT-285-result.md`.
+
+## WEFT-283 active-radar
+
+Typed `radar-return` / `variant-id` echo — see `src/activeRadar.ts` and `npm run test:active-radar`.
+
+## WEFT-284 ThreadDock
+
+Column-per-agent parallel output (`ui://thread-dock`):
+
+- Canon: `crates/clawft-canon/src/thread_dock.rs` (`ThreadDock`,
+  `AgentThread`, `ThreadDockState`, `ThreadPhase`).
+- Chat host: `ChatPanel::upsert_agent_thread` / `feed_agent_stream` —
+  paints ThreadDock above the transcript when `len ≥ 2`.
+- Panel wire: `src/threadDock.ts` + `npm run test:thread-dock`.
+- Blocks demo: Canon → ThreadDock tab (sample coder/reviewer/tester).
+
+```bash
+cd extensions/vscode-weft-panel && npm run test:thread-dock
+cargo test -p clawft-canon thread_dock --lib
+cargo test -p clawft-gui-egui explorer::chat --lib -- thread_dock
+```
+
 ## 11. Capture sidecar (WEFT-282)
 
 Webviews still cannot call `getUserMedia`

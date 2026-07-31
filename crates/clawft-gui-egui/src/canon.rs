@@ -7,5 +7,5 @@
 pub use clawft_canon::*;
 pub use clawft_canon::{
     canvas, chip, dock, field, gauge, grid, media, modal, plot, pressable, response, select,
-    sheet, slider, stack, stream_view, strip, table, tabs, toggle, tree, types,
+    sheet, slider, stack, stream_view, strip, table, tabs, thread_dock, toggle, tree, types,
 };

@@ -28,6 +28,7 @@ pub mod stream_view;
 pub mod strip;
 pub mod table;
 pub mod tabs;
+pub mod thread_dock;
 pub mod toggle;
 pub mod tree;
 pub mod types;
@@ -51,6 +52,7 @@ pub use stream_view::StreamView;
 pub use strip::{CellSize, Strip, StripAxis};
 pub use table::{Table, TableColumn, TableOutcome};
 pub use tabs::Tabs;
+pub use thread_dock::{AgentThread, ThreadDock, ThreadDockState, ThreadPhase};
 pub use toggle::{Toggle, ToggleStyle};
 pub use tree::{Tree, TreeNode, TreeOutcome};
 pub use types::{

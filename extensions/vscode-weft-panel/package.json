@@ -47,7 +47,8 @@
     "test:active-radar": "npx --yes tsx --test src/activeRadar.test.ts",
     "test:wsp": "npx --yes tsx --test src/wsp.test.ts",
     "test:capture": "npx --yes tsx --test src/captureSidecar.test.ts",
-    "test:unit": "npm run test:panel-auth && npm run test:chip-a11y && npm run test:wsp && npm run test:active-radar && npm run test:capture"
+    "test:unit": "npm run test:panel-auth && npm run test:chip-a11y && npm run test:wsp && npm run test:active-radar && npm run test:capture && npm run test:thread-dock",
+    "test:thread-dock": "npx --yes tsx --test src/threadDock.test.ts"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",

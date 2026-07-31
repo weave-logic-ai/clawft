@@ -10,9 +10,9 @@ use eframe::egui;
 use egui_dock::{DockState, NodeIndex, TabViewer};
 
 use crate::canon::{
-    self, Canvas, Chip, ChipTone, Dock, Field, FieldKind, FieldValue, Gauge, Grid, Media, MediaFit,
-    Modal, Modality, Pressable, Select, Sheet, Slider, Stack, StreamView, Strip, Tabs, Thresholds,
-    Toggle, ToggleStyle, Tree, TreeNode,
+    self, AgentThread, Canvas, Chip, ChipTone, Dock, Field, FieldKind, FieldValue, Gauge, Grid,
+    Media, MediaFit, Modal, Modality, Pressable, Select, Sheet, Slider, Stack, StreamView, Strip,
+    Tabs, ThreadDock, ThreadDockState, ThreadPhase, Thresholds, Toggle, ToggleStyle, Tree, TreeNode,
 };
 use crate::canon::{CanonResponse, CanonWidget};
 
@@ -39,10 +39,12 @@ pub enum CanonKind {
     Media,
     Canvas,
     Tabs,
+    /// WEFT-284 — column-per-agent parallel output.
+    ThreadDock,
 }
 
 impl CanonKind {
-    pub const ALL: [(CanonKind, &'static str); 20] = [
+    pub const ALL: [(CanonKind, &'static str); 21] = [
         (CanonKind::Pressable, "Pressable"),
         (CanonKind::Chip, "Chip"),
         (CanonKind::Stack, "Stack"),
@@ -63,6 +65,7 @@ impl CanonKind {
         (CanonKind::Media, "Media"),
         (CanonKind::Canvas, "Canvas"),
         (CanonKind::Tabs, "Tabs"),
+        (CanonKind::ThreadDock, "ThreadDock"),
     ];
 }
 
@@ -81,6 +84,8 @@ pub struct CanonDemoState {
     pub tabs_idx: usize,
     pub modal_open_for: Option<Modality>,
     pub dock_state: Option<DockState<String>>,
+    /// WEFT-284 demo dock with ≥2 parallel agent columns.
+    pub thread_dock: ThreadDockState,
     pub last_response_note: String,
 }
 
@@ -100,9 +105,37 @@ impl Default for CanonDemoState {
             tabs_idx: 0,
             modal_open_for: None,
             dock_state: None,
+            thread_dock: sample_thread_dock(),
             last_response_note: String::new(),
         }
     }
+}
+
+/// Seed ≥2 parallel agent streams for the Blocks / ThreadDock demo.
+fn sample_thread_dock() -> ThreadDockState {
+    ThreadDockState::with_threads([
+        AgentThread::new("swarm/coder", "coder")
+            .phase(ThreadPhase::Streaming)
+            .token_rate(38.0)
+            .variant(101)
+            .lines([
+                "planning worktree layout…",
+                "editing crates/clawft-canon/src/thread_dock.rs",
+                "appending unit tests for focus lane",
+            ]),
+        AgentThread::new("swarm/reviewer", "reviewer")
+            .phase(ThreadPhase::Thinking)
+            .token_rate(0.0)
+            .variant(102)
+            .lines([
+                "watching coder stream",
+                "checking column-per-thread invariant",
+            ]),
+        AgentThread::new("swarm/tester", "tester")
+            .phase(ThreadPhase::Idle)
+            .variant(103)
+            .lines(["awaiting green tests…"]),
+    ])
 }
 
 pub fn show(ui: &mut egui::Ui, kind: CanonKind, state: &mut CanonDemoState) {
@@ -145,6 +178,7 @@ pub fn show(ui: &mut egui::Ui, kind: CanonKind, state: &mut CanonDemoState) {
                 CanonKind::Media => show_media(ui),
                 CanonKind::Canvas => show_canvas(ui),
                 CanonKind::Tabs => show_tabs(ui, state),
+                CanonKind::ThreadDock => show_thread_dock(ui, state),
             }
 
             if !state.last_response_note.is_empty() {
@@ -178,6 +212,7 @@ fn identity_for(kind: CanonKind) -> &'static str {
         CanonKind::Media => "ui://media",
         CanonKind::Canvas => "ui://canvas",
         CanonKind::Tabs => "ui://tabs",
+        CanonKind::ThreadDock => "ui://thread-dock",
     }
 }
 
@@ -635,4 +670,66 @@ fn show_tabs(ui: &mut egui::Ui, state: &mut CanonDemoState) {
         },
     )
     .show(ui);
+}
+
+/// WEFT-284 — column-per-agent parallel streams (≥2 columns).
+fn show_thread_dock(ui: &mut egui::Ui, state: &mut CanonDemoState) {
+    ui.label(
+        "Column-per-agent dock (never interleaved). Click a column header \
+         to switch the focus lane; non-focused columns keep streaming with \
+         presence pips.",
+    );
+    ui.horizontal(|ui| {
+        if ui.button("tick streams").clicked() {
+            let n = state
+                .thread_dock
+                .get("swarm/coder")
+                .map(|t| t.lines.len())
+                .unwrap_or(0);
+            let _ = state.append_demo_tick(n);
+        }
+        if ui.button("reset sample").clicked() {
+            state.thread_dock = sample_thread_dock();
+        }
+        if let Some(f) = state.thread_dock.focused() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "focus={}  phase={}  columns={}",
+                    f.label,
+                    f.phase.as_str(),
+                    state.thread_dock.len()
+                ))
+                .small()
+                .monospace(),
+            );
+        }
+    });
+    ui.add_space(6.0);
+    let resp = ThreadDock::new("demo.thread_dock", &mut state.thread_dock)
+        .min_height(220.0)
+        .max_height(280.0)
+        .show_close(true)
+        .tooltip("WEFT-284 ThreadDock — parallel agent columns")
+        .show(ui);
+    note(state, &resp);
+}
+
+impl CanonDemoState {
+    /// Advance demo agent streams by one synthetic tick (smoke ≥2 streams).
+    fn append_demo_tick(&mut self, n: usize) -> bool {
+        let a = self
+            .thread_dock
+            .append_line("swarm/coder", format!("coder tick {n}"));
+        let b = self
+            .thread_dock
+            .append_line("swarm/reviewer", format!("reviewer tick {n}"));
+        let _ = self
+            .thread_dock
+            .set_phase("swarm/coder", ThreadPhase::Streaming);
+        let _ = self
+            .thread_dock
+            .set_phase("swarm/reviewer", ThreadPhase::Streaming);
+        let _ = self.thread_dock.set_token_rate("swarm/coder", 40.0 + n as f32);
+        a && b
+    }
 }

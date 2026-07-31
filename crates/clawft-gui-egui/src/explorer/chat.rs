@@ -55,6 +55,10 @@
 //!   surface a non-dismissable warning chip above the input. WEFT-259.
 //! - **Model / provider switcher** in a chip strip above the history
 //!   (WEFT-256).
+//! - **ThreadDock** (WEFT-284): when the panel hosts ≥2 parallel agent
+//!   threads (swarm / supervisor pair), a column-per-agent dock paints
+//!   above the active transcript so streams never interleave. Idle
+//!   single-conversation chat keeps the classic layout.
 
 use std::sync::Arc;
 
@@ -62,6 +66,7 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use serde_json::Value;
 
+use crate::canon::{AgentThread, CanonWidget, ThreadDock, ThreadDockState, ThreadPhase};
 use crate::live::{self, Command, Live, ReplyRx};
 
 /// Shape-match priority for the chat sentinel. Higher than
@@ -841,6 +846,11 @@ impl ChatSession {
 pub struct ChatPanel {
     sessions: Vec<ChatSession>,
     active: usize,
+    /// WEFT-284 — parallel agent columns. Visible when
+    /// [`ThreadDockState::is_parallel`] (len ≥ 2). Independent of the
+    /// multi-conversation sidebar (WEFT-254): sessions are alternate
+    /// chats; threads are concurrent agents on one swarm turn.
+    thread_dock: ThreadDockState,
 }
 
 impl Default for ChatPanel {
@@ -855,7 +865,63 @@ impl ChatPanel {
         Self {
             sessions: vec![ChatSession::fresh()],
             active: 0,
+            thread_dock: ThreadDockState::new(),
         }
+    }
+
+    /// WEFT-284 — parallel agent thread dock (read-only).
+    pub fn thread_dock(&self) -> &ThreadDockState {
+        &self.thread_dock
+    }
+
+    /// WEFT-284 — parallel agent thread dock (mutable host/tests).
+    pub fn thread_dock_mut(&mut self) -> &mut ThreadDockState {
+        &mut self.thread_dock
+    }
+
+    /// Attach or replace an agent column. Returns the column index.
+    ///
+    /// When ≥2 columns are present, [`paint`](paint) shows the
+    /// ThreadDock above the active conversation transcript.
+    pub fn upsert_agent_thread(&mut self, thread: AgentThread) -> usize {
+        if let Some(idx) = self
+            .thread_dock
+            .threads()
+            .iter()
+            .position(|t| t.id == thread.id)
+        {
+            self.thread_dock.threads_mut()[idx] = thread;
+            idx
+        } else {
+            self.thread_dock.push(thread)
+        }
+    }
+
+    /// Feed an accumulated stream draft into a named agent column
+    /// (WEFT-253 frame shape → ThreadDock column). Sets phase to
+    /// Streaming when text is non-empty.
+    pub fn feed_agent_stream(&mut self, id: &str, text: &str, phase: Option<ThreadPhase>) -> bool {
+        let ok = self.thread_dock.set_stream_text(id, text);
+        if !ok {
+            return false;
+        }
+        let p = phase.unwrap_or(if text.is_empty() {
+            ThreadPhase::Thinking
+        } else {
+            ThreadPhase::Streaming
+        });
+        let _ = self.thread_dock.set_phase(id, p);
+        true
+    }
+
+    /// True when the ThreadDock should paint (≥2 agent columns).
+    pub fn shows_thread_dock(&self) -> bool {
+        self.thread_dock.is_parallel()
+    }
+
+    /// Drop all agent columns (returns to classic single-stream chat).
+    pub fn clear_agent_threads(&mut self) {
+        self.thread_dock.clear();
     }
 
     /// Number of in-memory conversation slots.
@@ -1155,6 +1221,26 @@ fn paint_active_conversation(
     panel: &mut ChatPanel,
     live: &Arc<Live>,
 ) {
+    // WEFT-284: when ≥2 agent columns are attached, paint the
+    // column-per-thread dock above the classic transcript so parallel
+    // agent streams never collapse into one scroll.
+    if panel.shows_thread_dock() {
+        ui.label(
+            egui::RichText::new("parallel agents")
+                .small()
+                .color(egui::Color32::from_rgb(140, 170, 210)),
+        );
+        let _ = ThreadDock::new("chat.thread_dock", &mut panel.thread_dock)
+            .min_height(140.0)
+            .max_height(200.0)
+            .show_close(true)
+            .tooltip("ThreadDock — per-agent parallel output (WEFT-284)")
+            .show(ui);
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+    }
+
     // Pull session-local bits we need for labels before mutably
     // borrowing the view for the rest of the body.
     let session_id_label = panel.sessions[panel.active].display_id().to_owned();
@@ -2348,5 +2434,68 @@ mod tests {
         view.on_models_err("timeout");
         assert_eq!(view.available_models().len(), 1);
         assert!(view.models_error.as_deref().unwrap().contains("timeout"));
+    }
+
+    // ── WEFT-284 ThreadDock composition ──────────────────────────
+
+    #[test]
+    fn thread_dock_hidden_until_two_agents() {
+        let mut panel = ChatPanel::new();
+        assert!(!panel.shows_thread_dock());
+        panel.upsert_agent_thread(
+            AgentThread::new("swarm/coder", "coder").phase(ThreadPhase::Streaming),
+        );
+        assert!(!panel.shows_thread_dock());
+        panel.upsert_agent_thread(
+            AgentThread::new("swarm/reviewer", "reviewer").phase(ThreadPhase::Thinking),
+        );
+        assert!(panel.shows_thread_dock());
+        assert_eq!(panel.thread_dock().len(), 2);
+    }
+
+    #[test]
+    fn parallel_agent_streams_do_not_interleave() {
+        let mut panel = ChatPanel::new();
+        panel.upsert_agent_thread(AgentThread::new("a", "coder"));
+        panel.upsert_agent_thread(AgentThread::new("b", "reviewer"));
+        assert!(panel.feed_agent_stream("a", "hello\nfrom coder", Some(ThreadPhase::Streaming)));
+        assert!(panel.feed_agent_stream(
+            "b",
+            "hello\nfrom reviewer",
+            Some(ThreadPhase::Streaming)
+        ));
+        // Grow each stream independently.
+        assert!(panel.feed_agent_stream(
+            "a",
+            "hello\nfrom coder\nmore coder",
+            Some(ThreadPhase::Streaming)
+        ));
+        let a = panel.thread_dock().get("a").unwrap();
+        let b = panel.thread_dock().get("b").unwrap();
+        assert_eq!(a.lines, ["hello", "from coder", "more coder"]);
+        assert_eq!(b.lines, ["hello", "from reviewer"]);
+        assert!(!a.lines.iter().any(|l| l.contains("reviewer")));
+        assert!(!b.lines.iter().any(|l| l.contains("coder")));
+        assert_eq!(a.phase, ThreadPhase::Streaming);
+        assert_eq!(b.phase, ThreadPhase::Streaming);
+    }
+
+    #[test]
+    fn upsert_replaces_same_id_and_clear_resets() {
+        let mut panel = ChatPanel::new();
+        panel.upsert_agent_thread(AgentThread::new("a", "coder").phase(ThreadPhase::Idle));
+        panel.upsert_agent_thread(AgentThread::new("b", "reviewer"));
+        assert_eq!(panel.thread_dock().len(), 2);
+        panel.upsert_agent_thread(
+            AgentThread::new("a", "coder-v2")
+                .phase(ThreadPhase::Done)
+                .lines(["done"]),
+        );
+        assert_eq!(panel.thread_dock().len(), 2);
+        assert_eq!(panel.thread_dock().get("a").unwrap().label, "coder-v2");
+        assert_eq!(panel.thread_dock().get("a").unwrap().phase, ThreadPhase::Done);
+        panel.clear_agent_threads();
+        assert!(!panel.shows_thread_dock());
+        assert!(panel.thread_dock().is_empty());
     }
 }
