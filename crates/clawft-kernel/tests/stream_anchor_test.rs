@@ -54,6 +54,7 @@ fn kernel_config_with_chain() -> KernelConfig {
             checkpoint_path: None,
         }),
         vector: None,
+        spatial: None,
         profiles: None,
         pairing: None,
         mesh: None,

@@ -321,6 +321,8 @@ clawft-kernel = { version = "0.6.20", path = "crates/clawft-kernel", default-fea
 exo-resource-tree = { version = "0.6.20", path = "crates/exo-resource-tree" }
 weftos = { version = "0.6.20", path = "crates/weftos", default-features = false }
 clawft-substrate = { version = "0.6.20", path = "crates/clawft-substrate" }
+# ADR-056 / WEFT-718: BVH broad-phase (kernel SpatialBackend behind `ecc`).
+clawft-bvh = { version = "0.6.20", path = "crates/clawft-bvh" }
 clawft-app = { version = "0.6.20", path = "crates/clawft-app" }
 clawft-surface = { version = "0.6.20", path = "crates/clawft-surface" }
 clawft-canon = { version = "0.6.20", path = "crates/clawft-canon" }

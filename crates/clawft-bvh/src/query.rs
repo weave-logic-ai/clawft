@@ -47,6 +47,24 @@ pub fn query_knn(tree: &BvhTree, p: Vec3, k: usize) -> Vec<LeafId> {
     tree.collect_knn(p, k)
 }
 
+/// k nearest leaves by squared distance from `p` to AABB center.
+pub fn query_knn(tree: &BvhTree, p: Vec3, k: usize) -> Vec<LeafId> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut scored: Vec<(f32, LeafId)> = tree
+        .iter_leaves()
+        .map(|(id, leaf)| {
+            let c = leaf.bound.center();
+            let d = (c - p).length_sq();
+            (d, id)
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    scored.into_iter().map(|(_, id)| id).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

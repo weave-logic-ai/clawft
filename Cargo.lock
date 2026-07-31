@@ -1393,6 +1393,7 @@ dependencies = [
  "blake3",
  "chrono",
  "ciborium",
+ "clawft-bvh",
  "clawft-core",
  "clawft-platform",
  "clawft-plugin",

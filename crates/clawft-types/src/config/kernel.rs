@@ -214,6 +214,13 @@ pub struct KernelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector: Option<VectorConfig>,
 
+    /// Spatial BVH index configuration (ECC feature, ADR-056 / WEFT-718).
+    ///
+    /// Defaults to disabled (`enabled = false`) when present; omit the
+    /// section entirely for no spatial subsystem registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<SpatialConfig>,
+
     /// Per-user profile namespace configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiles: Option<ProfilesConfig>,
@@ -280,6 +287,7 @@ impl Default for KernelConfig {
             chain: None,
             resource_tree: None,
             vector: None,
+            spatial: None,
             profiles: None,
             pairing: None,
             mesh: None,
@@ -1185,6 +1193,79 @@ impl Default for ResourceTreeConfig {
     }
 }
 
+// ── Spatial BVH configuration (ADR-056 / WEFT-718) ───────────────────────
+
+/// Which spatial index backend to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SpatialBackendKind {
+    /// In-memory BVH (only variant in Phase C).
+    #[default]
+    Bvh,
+}
+
+/// How many derived BVH branches to retain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchRetentionPolicy {
+    /// Keep the last N derived branches (plus main).
+    KeepLast(usize),
+}
+
+impl Default for BranchRetentionPolicy {
+    fn default() -> Self {
+        Self::KeepLast(64)
+    }
+}
+
+/// Spatial / BVH index configuration under `[kernel.spatial]`.
+///
+/// See ADR-056 and `.planning/bvh-spatial-index/PLAN.md` Phase C.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpatialConfig {
+    /// Whether the spatial service is registered at boot.
+    ///
+    /// Default: `false` (opt-in). When `false`, ECC boot skips BVH init.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Backend kind (only `bvh` today).
+    #[serde(default)]
+    pub backend: SpatialBackendKind,
+
+    /// Soft max leaves per branch (store-full guard).
+    #[serde(default = "default_spatial_max_leaves")]
+    pub max_leaves: usize,
+
+    /// Pending mutations before a forced phase seal (Phase D).
+    #[serde(default = "default_spatial_phase_commit_threshold")]
+    pub phase_commit_threshold: usize,
+
+    /// Branch retention policy.
+    #[serde(default)]
+    pub branch_retention: BranchRetentionPolicy,
+}
+
+fn default_spatial_max_leaves() -> usize {
+    1_000_000
+}
+
+fn default_spatial_phase_commit_threshold() -> usize {
+    4096
+}
+
+impl Default for SpatialConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: SpatialBackendKind::Bvh,
+            max_leaves: default_spatial_max_leaves(),
+            phase_commit_threshold: default_spatial_phase_commit_threshold(),
+            branch_retention: BranchRetentionPolicy::default(),
+        }
+    }
+}
+
 // ── Vector search backend configuration ──────────────────────────────────
 
 /// Which vector search backend to use.
@@ -1527,6 +1608,7 @@ mod tests {
             chain: None,
             resource_tree: None,
             vector: None,
+            spatial: None,
             profiles: None,
             pairing: None,
             mesh: None,
@@ -1622,6 +1704,26 @@ mod tests {
         let cfg: KernelConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.vector.is_some());
         assert_eq!(cfg.vector.unwrap().backend, VectorBackendKind::Hnsw);
+    }
+
+    #[test]
+    fn spatial_config_defaults() {
+        let cfg = SpatialConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.backend, SpatialBackendKind::Bvh);
+        assert_eq!(cfg.max_leaves, 1_000_000);
+        assert_eq!(cfg.phase_commit_threshold, 4096);
+        assert_eq!(cfg.branch_retention, BranchRetentionPolicy::KeepLast(64));
+    }
+
+    #[test]
+    fn kernel_config_with_spatial() {
+        let json = r#"{"spatial": {"enabled": true, "backend": "bvh", "max_leaves": 1000}}"#;
+        let cfg: KernelConfig = serde_json::from_str(json).unwrap();
+        let s = cfg.spatial.unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.backend, SpatialBackendKind::Bvh);
+        assert_eq!(s.max_leaves, 1000);
     }
 
     #[test]

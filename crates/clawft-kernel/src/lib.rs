@@ -135,6 +135,12 @@ pub mod vector_hybrid;
 #[cfg(feature = "ecc")]
 pub mod vector_quantization;
 #[cfg(feature = "ecc")]
+pub mod spatial_backend;
+#[cfg(feature = "ecc")]
+pub mod spatial_bvh;
+#[cfg(feature = "ecc")]
+pub mod spatial_service;
+#[cfg(feature = "ecc")]
 pub mod view_resolver;
 #[cfg(feature = "ecc")]
 pub mod weaver;

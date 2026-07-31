@@ -61,7 +61,7 @@ mesh = [
 # `UnsupportedEncoding` until Option B (full RVF path) lands. Does **not**
 # change the production default.
 mesh-rvf = ["mesh"]
-ecc = ["clawft-core/vector-memory", "dep:blake3"]
+ecc = ["clawft-core/vector-memory", "dep:blake3", "dep:clawft-bvh"]
 # EXPERIMENTAL (0.6.x): quantum backends — interface only, stubs return NotImplemented.
 quantum-pasqal = ["ecc", "dep:reqwest"]
 quantum-braket = ["ecc", "dep:reqwest"]
@@ -84,6 +84,8 @@ clawft-plugin = { workspace = true, default-features = false }
 clawft-plugin-treesitter = { workspace = true, features = ["rust", "typescript"], optional = true }
 # ADR-057 per-path read ACLs — shared table/types with the ontology substrate.
 clawft-substrate = { workspace = true }
+# ADR-056 / WEFT-718: BVH spatial index (Phase C SpatialBackend).
+clawft-bvh = { workspace = true, optional = true }
 dashmap = { workspace = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }

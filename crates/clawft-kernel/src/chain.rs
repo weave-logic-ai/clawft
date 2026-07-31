@@ -714,6 +714,26 @@ pub const EVENT_KIND_PROFILE_SWITCH: &str = "profile.switch";
 /// The payload should include `profile_id`, `vector_id`, `key`.
 pub const EVENT_KIND_PROFILE_VECTOR_INSERT: &str = "profile.vector.insert";
 
+/// BVH leaf inserted (ADR-056 / WEFT-718).
+///
+/// Payload: `leaf_id`, `branch`, `tag`, `identity`, `bound`, `payload_hex`.
+pub const EVENT_KIND_BVH_INSERT: &str = "bvh.insert";
+
+/// BVH leaf removed.
+///
+/// Payload: `leaf_id`, `branch`.
+pub const EVENT_KIND_BVH_REMOVE: &str = "bvh.remove";
+
+/// BVH branch derived (COW / clone).
+///
+/// Payload: `parent`, `child`, `name`, `priority_tier`.
+pub const EVENT_KIND_BVH_DERIVE: &str = "bvh.derive";
+
+/// BVH rebalance / determinism-phase seal.
+///
+/// Payload: `branch`, `leaf_count`, `epoch`.
+pub const EVENT_KIND_BVH_REBALANCE_SEAL: &str = "bvh.rebalance_seal";
+
 /// HNSW vector inserted event.
 ///
 /// Emitted when an embedding is inserted into the HNSW store.

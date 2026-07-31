@@ -46,6 +46,7 @@ mod tests {
             chain: None,
             resource_tree: None,
             vector: None,
+            spatial: None,
             profiles: None,
             pairing: None,
             mesh: None,

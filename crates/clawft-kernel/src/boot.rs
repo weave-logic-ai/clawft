@@ -109,6 +109,9 @@ pub struct EccSubsystem {
     pub(crate) vector_backend: Option<Arc<dyn crate::vector_backend::VectorBackend>>,
     pub(crate) eml_coherence:
         Option<Arc<std::sync::Mutex<crate::eml_coherence::EmlCoherenceModel>>>,
+    /// Spatial BVH service (ADR-056 / WEFT-718). Present when
+    /// `[kernel.spatial].enabled = true`.
+    pub(crate) spatial: Option<Arc<crate::spatial_service::SpatialService>>,
 }
 
 /// OS-patterns observability: metrics, structured logging, timers,
@@ -1729,6 +1732,7 @@ impl<P: Platform> Kernel<P> {
             ecc_calibration,
             ecc_vector_backend,
             ecc_eml_model,
+            ecc_spatial,
         ) = {
             use crate::calibration::{EccCalibrationConfig, run_calibration};
             use crate::causal::CausalGraph;
@@ -1737,6 +1741,7 @@ impl<P: Platform> Kernel<P> {
             use crate::hnsw_service::{HnswService, HnswServiceConfig};
             use crate::impulse::ImpulseQueue;
             use crate::service::SystemService;
+            use crate::spatial_service::SpatialService;
             use crate::vector_backend::VectorBackend;
             use crate::vector_diskann::{
                 DiskAnnBackend, DiskAnnConfig, DiskAnnFeatureStatus, diskann_feature_status,
@@ -1955,14 +1960,51 @@ impl<P: Platform> Kernel<P> {
                 );
             }
 
+            // Spatial BVH (opt-in via [kernel.spatial].enabled)
+            let spatial_svc: Option<Arc<SpatialService>> = {
+                let spatial_cfg = kernel_config.spatial.clone().unwrap_or_default();
+                if spatial_cfg.enabled {
+                    let svc = Arc::new(SpatialService::from_spatial_config(&spatial_cfg));
+                    #[cfg(feature = "exochain")]
+                    if let Some(ref cm) = chain_manager {
+                        svc.attach_chain(cm.clone());
+                    }
+                    if let Err(e) = service_registry.register(svc.clone()) {
+                        tracing::debug!(error = %e, "failed to register spatial service");
+                    }
+                    if let Err(e) = svc.start().await {
+                        tracing::warn!(error = %e, "failed to start spatial service");
+                    }
+                    boot_log.push(BootEvent::info(
+                        BootPhase::Ecc,
+                        format!(
+                            "Spatial BVH ready (backend={}, max_leaves={})",
+                            svc.backend().backend_name(),
+                            spatial_cfg.max_leaves,
+                        ),
+                    ));
+                    Some(svc)
+                } else {
+                    boot_log.push(BootEvent::info(
+                        BootPhase::Ecc,
+                        "Spatial BVH disabled (set kernel.spatial.enabled = true)",
+                    ));
+                    None
+                }
+            };
+
             boot_log.push(BootEvent::info(
                 BootPhase::Ecc,
                 format!(
-                    "ECC ready (hnsw={}, causal={} nodes, tick={}ms, vector={})",
+                    "ECC ready (hnsw={}, causal={} nodes, tick={}ms, vector={}, spatial={})",
                     hnsw.len(),
                     causal.node_count(),
                     calibration.tick_interval_ms,
                     vector_backend.backend_name(),
+                    spatial_svc
+                        .as_ref()
+                        .map(|s| s.backend().backend_name())
+                        .unwrap_or("off"),
                 ),
             ));
 
@@ -1975,6 +2017,7 @@ impl<P: Platform> Kernel<P> {
                 Some(calibration),
                 Some(vector_backend),
                 Some(eml_model),
+                spatial_svc,
             )
         };
 
@@ -2109,6 +2152,7 @@ impl<P: Platform> Kernel<P> {
                 calibration: ecc_calibration,
                 vector_backend: ecc_vector_backend,
                 eml_coherence: ecc_eml_model,
+                spatial: ecc_spatial,
             },
             #[cfg(feature = "os-patterns")]
             observability: ObservabilitySubsystem {
@@ -2392,6 +2436,12 @@ impl<P: Platform> Kernel<P> {
         self.ecc.vector_backend.as_ref()
     }
 
+    /// Get the ECC spatial BVH service (if enabled via `[kernel.spatial]`).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_spatial(&self) -> Option<&Arc<crate::spatial_service::SpatialService>> {
+        self.ecc.spatial.as_ref()
+    }
+
     /// Get the ECC causal graph (if ecc feature enabled).
     #[cfg(feature = "ecc")]
     pub fn ecc_causal(&self) -> Option<&Arc<crate::causal::CausalGraph>> {
@@ -2496,6 +2546,7 @@ mod tests {
             chain: None,
             resource_tree: None,
             vector: None,
+            spatial: None,
             profiles: None,
             pairing: None,
             mesh: None,
@@ -2695,6 +2746,7 @@ mod tests {
                 checkpoint_path: None,
             }),
             vector: None,
+            spatial: None,
             profiles: None,
             pairing: None,
             mesh: None,
@@ -3168,6 +3220,7 @@ mod tests {
                 checkpoint_path: None,
             }),
             vector: None,
+            spatial: None,
             profiles: None,
             pairing: None,
             mesh: None,

@@ -4,28 +4,8 @@ use crate::aabb::Aabb;
 use serde::{Deserialize, Serialize};
 
 /// Stable leaf handle after insertion into a tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LeafId(pub u64);
-
-/// Stable COW branch handle (ADR-056 §7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct BranchId(pub u64);
-
-/// Metadata attached when deriving a child branch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BranchMeta {
-    /// Human-readable label (debug / CLI).
-    pub label: String,
-}
-
-impl BranchMeta {
-    /// Construct with a label.
-    pub fn new(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-        }
-    }
-}
 
 /// Object leaves keep stable IDs across branches; event leaves are one-shot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +23,7 @@ pub struct Leaf {
     pub bound: Aabb,
     /// Object vs event semantics.
     pub identity_kind: IdentityKind,
-    /// Registry tag — use [`crate::tags`] / [`weftos_leaf_types::spatial::SpatialLeafTag`].
+    /// Registry tag (`weftos-leaf-types` spatial tags later; free u32 for now).
     pub tag: u32,
     /// Opaque payload (CBOR/JSON bytes; chain-safe refs only at higher layers).
     pub payload: Vec<u8>,
@@ -66,27 +46,66 @@ impl Leaf {
     }
 }
 
-/// Canonical spatial tags re-exported from `weftos-leaf-types` (WEFT-717).
-///
-/// Prefer [`crate::SpatialLeafTag`] or these `u32` constants — do not
-/// redefine discriminants in other crates.
-///
-/// Product contract: `docs/weftos/splat-to-world-model.md`, ADR-056 §3, ADR-078.
-pub mod tags {
-    pub use weftos_leaf_types::spatial::tag_consts::*;
+/// Stable branch handle inside a [`crate::store::BvhStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BranchId(pub u64);
+
+impl BranchId {
+    /// Default / main branch allocated at store construction.
+    pub const MAIN: Self = Self(0);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::tags;
-    use weftos_leaf_types::spatial::SpatialLeafTag;
+/// Metadata attached when deriving a branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchMeta {
+    /// Human-readable branch name (audit / CLI).
+    pub name: String,
+    /// Priority tier used by determinism-phase sort (Phase D).
+    pub priority_tier: u8,
+}
 
-    #[test]
-    fn reexported_tags_match_canonical_registry() {
-        assert_eq!(tags::SPLAT_SCENE, SpatialLeafTag::SplatScene as u32);
-        assert_eq!(tags::SPLAT_SCENE, 0x5350_0001);
-        assert_eq!(tags::WM_OBJECT, SpatialLeafTag::WmObject as u32);
-        assert_eq!(tags::SPHERE, SpatialLeafTag::Sphere as u32);
-        assert_eq!(tags::AABB, SpatialLeafTag::Aabb as u32);
+impl Default for BranchMeta {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            priority_tier: 0,
+        }
     }
+}
+
+/// One leaf that differs between two branches inside a region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiffEntry {
+    /// Leaf id that is present on only one side.
+    pub leaf_id: LeafId,
+    /// Branch that still holds the leaf.
+    pub only_in: BranchId,
+    /// Broad-phase bound at diff time.
+    pub bound: Aabb,
+}
+
+/// Reserved tag band for splat + world-model leaves (formal registry later).
+/// Product contract: `docs/weftos/splat-to-world-model.md`, ADR-078.
+pub mod tags {
+    #![allow(dead_code)] // consumed when clawft-service-splat / BVH Phase B wire
+
+    /// Whole reconstructed scene after a train job.
+    pub const SPLAT_SCENE: u32 = 0x5350_0001; // "SP" + 1
+    /// COLMAP / camera frustum observation.
+    pub const SPLAT_CAMERA: u32 = 0x5350_0002;
+    /// Yardstick / metric scale event.
+    pub const SPLAT_YARDSTICK: u32 = 0x5350_0003;
+
+    /// Labeled or unlabeled object instance (furniture, prop, …).
+    pub const WM_OBJECT: u32 = 0x5350_0010;
+    /// Planar / thin surface (floor, wall, tabletop).
+    pub const WM_SURFACE: u32 = 0x5350_0011;
+    /// Free / occupied / no-go volume.
+    pub const WM_VOLUME: u32 = 0x5350_0012;
+    /// Segment / mask-backed region linkage.
+    pub const WM_SEGMENT: u32 = 0x5350_0013;
+    /// Sensor observation volume (ToF, radar, …).
+    pub const WM_SENSOR_FOV: u32 = 0x5350_0014;
+    /// Interaction / affordance volume (policy later).
+    pub const WM_AFFORDANCE: u32 = 0x5350_0015;
 }

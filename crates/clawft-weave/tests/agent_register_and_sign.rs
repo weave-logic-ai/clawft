@@ -43,6 +43,7 @@ fn minimal_kernel_config() -> KernelConfig {
         chain: None,
         resource_tree: None,
         vector: None,
+        spatial: None,
         profiles: None,
         pairing: None,
         mesh: None,
