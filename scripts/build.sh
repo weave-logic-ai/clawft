@@ -420,9 +420,27 @@ cmd_browser() {
 
     # Run wasm-bindgen to generate JS glue into www/pkg/ so the test
     # harness can be served directly from www/ at the root URL.
+    # WEFT-599: js-sys/web-sys exact-pin wasm-bindgen (=0.2.N); CLI must match
+    # Cargo.lock. Prefer: cargo install wasm-bindgen-cli --version <N> --locked
     local pkg_dir="$ROOT/crates/clawft-wasm/www/pkg"
+    local locked_bindgen=""
+    if [ -f "$ROOT/Cargo.lock" ]; then
+        locked_bindgen=$(awk '
+            $0 == "name = \"wasm-bindgen\"" { found=1; next }
+            found && $1 == "version" {
+                gsub(/"/, "", $3); print $3; exit
+            }
+        ' "$ROOT/Cargo.lock")
+    fi
     if command -v wasm-bindgen >/dev/null 2>&1; then
-        info "Running wasm-bindgen → $pkg_dir"
+        local cli_ver
+        cli_ver=$(wasm-bindgen --version 2>/dev/null | awk '{print $NF}')
+        if [ -n "$locked_bindgen" ] && [ -n "$cli_ver" ] && [ "$cli_ver" != "$locked_bindgen" ]; then
+            fail "wasm-bindgen-cli $cli_ver != Cargo.lock wasm-bindgen $locked_bindgen"
+            info "Install matching CLI: cargo install wasm-bindgen-cli --version $locked_bindgen --locked"
+            return 1
+        fi
+        info "Running wasm-bindgen ($cli_ver) → $pkg_dir"
         run_cmd wasm-bindgen "$wasm_file" \
             --out-dir "$pkg_dir" \
             --target web \
@@ -431,7 +449,11 @@ cmd_browser() {
         pass "pkg/ ready — run: scripts/build.sh serve"
     else
         skip "wasm-bindgen CLI not found — pkg/ not generated"
-        info "Install with: cargo install wasm-bindgen-cli"
+        if [ -n "$locked_bindgen" ]; then
+            info "Install with: cargo install wasm-bindgen-cli --version $locked_bindgen --locked"
+        else
+            info "Install with: cargo install wasm-bindgen-cli"
+        fi
     fi
 }
 

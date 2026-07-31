@@ -69,8 +69,10 @@ jobs:
       - name: Ensure WASM target is installed
         run: rustup target add wasm32-unknown-unknown
 
+      # WEFT-599: keep in lockstep with Cargo.lock wasm-bindgen (js-sys/web-sys
+      # exact-pin =0.2.N). Bump this when `cargo update -p wasm-bindgen` lands.
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.108
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
 
       - name: Build browser WASM
         run: |
