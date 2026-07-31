@@ -1,0 +1,37 @@
+{
+  "id": "weftos-score-invariants",
+  "kind": "score_flywheel_anchor",
+  "mode": "evaluate_only",
+  "invariants": [
+    {
+      "id": "foundation_ge_80",
+      "check": "weftosFoundationScore >= 80",
+      "source": ".metaharness/weftos-score-latest.json"
+    },
+    {
+      "id": "tasks_ge_3",
+      "check": "components.tasks >= 3"
+    },
+    {
+      "id": "views_ge_1",
+      "check": "components.views >= 1"
+    },
+    {
+      "id": "patterns_ge_5",
+      "check": "components.patternsManifest >= 5"
+    },
+    {
+      "id": "compile_100",
+      "check": "upstream compileConfidence == 100 when score-latest present"
+    },
+    {
+      "id": "no_silent_gate_relax",
+      "check": "scripts/build.sh gate still listed as task weft-gate command"
+    }
+  ],
+  "regressed_if": [
+    "weftosFoundationScore drops vs previous weftos-score-latest.json without receipt",
+    "validate-views fails",
+    "ADR-090 predicates removed"
+  ]
+}

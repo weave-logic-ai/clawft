@@ -7,62 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Staging area for changes landing on `master` between releases. Move
-entries into a dated `## [X.Y.Z] - YYYY-MM-DD` section at release-cut
-time, then add a matching `[X.Y.Z]: ...compare/...` link to the
-footnote block at the bottom of the file. The release runbook documents
-the cut-over (`docs/deployment/release.md`).
+Staging area for changes after the 0.8.0 cut.
+
+## [0.8.0] - 2026-07-31
+
+First **0.8.x publish-line** cut from `release/0.8-staging`. Workspace
+version jumps from 0.6.20 → **0.8.0** to match the product cycle (Plane
+0.8.x). Binaries via cargo-dist / Homebrew; crates.io and npm publish
+when tokens allow.
 
 ### Added
 
-- **Native GUI release artifact (WEFT-499)**: `weft-gui-egui` is a
-  first-class cargo-dist app. Release archives ship as
-  `clawft-gui-egui-<triple>.tar.gz` (and checksums / shell installer /
-  Homebrew formula) on the same GitHub Release as `weft` / `weaver`.
-  Local build: `scripts/build.sh native --gui` (or
-  `scripts/build.sh gui-egui`). The theming A/B binary `weft-demo-lab`
-  stays opt-in (`--features demo-lab`) and is not packaged. Note: this
-  workspace uses cargo-dist tar.gz + shell/homebrew installers, not
-  `.deb`/`.dmg` — same channel as the CLI binaries.
+- **Spatial / BVH**: Phase A–E spatial index, optional `VectorRef` on
+  leaves (ADR-088), Phase F dual-index join helpers (ADR-093), W1
+  geometric partition for world-model structure (ADR-078 path).
+- **Mesh**: QUIC transport, mesh clock/fixtures, chain replay + Merkle,
+  capability claims foundations.
+- **LeWM / world model crates**: `weftos-worldmodel-*`, sensor pipeline,
+  SIGReg / training surfaces, ADR-090 ECC decoupling invariant.
+- **MCP**: HTTP/SSE listen, session capability tokens, `window_*` tools
+  → WindowIntent, profiles (ADR-075/076).
+- **Agent Workspace**: freeform WM + WindowIntent (ADR-073).
+- **Android splat capture** scaffold (ADR-077) + edge UniFFI path.
+- **Governance**: action/tool selectors, `GatePrincipal`, spawn approval
+  Defer path, ADR-094 foundation (WEFT-633–638).
+- **Dashboard / UI**: skill install/uninstall API, mobile drawer,
+  Playwright + axe-core a11y suite (WEFT-301/312/561/575).
+- **Vector**: vendor-free LogQuant/SIMD + MicroLoraRouter path;
+  Hybrid/DiskANN deferred cold tier (bench-documented).
+- **MetaHarness foundation (ADR-096/097)**: Graph Views as operational
+  sensor fusion; flywheel evaluate-only ViewSpec fixtures; harness tasks
+  (gate / plane-dag / fusion-view); AgentDB pattern seed; universal
+  data-surface governance inventory.
+- **Native GUI release artifact (WEFT-499)**: `weft-gui-egui` first-class
+  cargo-dist app (`clawft-gui-egui-<triple>.tar.gz`).
 
 ### Fixed
 
-- **Release CI (WEFT-593)**: cargo-dist plan job no longer loses its
-  `artifacts_matrix` to GitHub Actions secret-scanning. Stock
-  `release.yml` stuffed the full dist-manifest (including CHANGELOG
-  announcement bodies) into a job output; when any substring matched a
-  registered secret, GHA dropped the output (`Skip output 'val' since it
-  may contain secret`), `build-local-artifacts` was SKIPPED, and the
-  tag announced a binary-less release (v0.6.21). Job outputs are now
-  slimmed (bodies stripped) with a dedicated matrix output, and the
-  host/announce path refuses to run unless local+global builds
-  succeeded. `allow-dirty = ["ci"]` records that `release.yml` is
-  hand-patched — re-apply after any `dist generate`.
+- **Release CI (WEFT-593)**: cargo-dist plan job no longer loses
+  `artifacts_matrix` to GHA secret-scanning (slimmed job outputs).
+- **Docker (from parked 0.6.x work)**: `~/.clawft` ownership before
+  `VOLUME`, default gateway `config.json`, alpine static musl path,
+  `.dockerignore` hygiene.
 
-### Fixed (parked — verified locally, not yet released)
+### Notes / residuals
 
-Docker-image fixes that are **not** in a published release. A v0.6.21 cut
-was attempted and rolled back: cargo-dist's plan *did* compute the 6
-target matrix, but GHA secret-scrubbed the plan job output so builds
-were skipped (WEFT-593, fixed above). The download-based image depends
-on those binaries. The published binaries remain at **v0.6.20**. Re-cut
-once this fix is on master (and the download-vs-self-contained Docker
-choice is settled).
-
-- **Docker (`Dockerfile`)**: pre-create `~/.clawft` owned by the `weft`
-  user *before* the `VOLUME` (Docker created the unmounted mountpoint
-  root-owned, so `weft gateway` died at "bootstrap app context:
-  Permission denied"), and ship a default `config.json` enabling the
-  auth-gated REST/WS API on the exposed port 8080 so `weft gateway` runs
-  out-of-the-box (it refuses to start with no channel and the API off).
-  The image was also refactored to a self-contained multi-stage build to
-  drop the published-asset coupling — but that makes the multi-arch CI
-  build slow (arm64 under QEMU), so the approach is still open.
-- **`Dockerfile.alpine`** (dev kernel-from-source image): build fully
-  static against musl (`musl-dev` only) rather than dynamically linking
-  OpenSSL.
-- **`.dockerignore`**: exclude `node_modules` / `.embuild` / generated
-  dirs from the build context.
+- Upstream-blocked / watch: pocket-tts, some RuVector issues, multi-user
+  Tailscale auth (1.0.x product).
+- Live BVH publish from structure extract and full Tauri desktop shell
+  remain follow-ups, not silent closes.
+- MetaHarness upstream ADR-041 scorecard has structural ceilings
+  (shallow inventory); load-bearing score is `weftosFoundationScore`.
 
 ## [0.6.20] - 2026-06-28
 
@@ -1095,7 +1090,8 @@ data structure as an interactive, drillable topology graph.
 - Release profile with LTO, strip, single codegen unit, and abort-on-panic
 - 1,029 tests across the workspace
 
-[Unreleased]: https://github.com/weave-logic-ai/weftos/compare/v0.6.20...HEAD
+[Unreleased]: https://github.com/weave-logic-ai/weftos/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/weave-logic-ai/weftos/compare/v0.6.20...v0.8.0
 [0.6.20]: https://github.com/weave-logic-ai/weftos/compare/v0.6.19...v0.6.20
 [0.6.19]: https://github.com/weave-logic-ai/weftos/compare/v0.6.18...v0.6.19
 [0.6.18]: https://github.com/weave-logic-ai/weftos/compare/v0.6.17...v0.6.18

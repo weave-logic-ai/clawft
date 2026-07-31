@@ -10,6 +10,60 @@ description: Auto-generated from CHANGELOG.md. Complete WeftOS version history.
 > overwritten on the next docs build. To change a release entry, edit
 > `CHANGELOG.md` and re-run the script.
 
+## v0.8.0
+
+*2026-07-31*
+
+First **0.8.x publish-line** cut from `release/0.8-staging`. Workspace
+version jumps from 0.6.20 → **0.8.0** to match the product cycle (Plane
+0.8.x). Binaries via cargo-dist / Homebrew; crates.io and npm publish
+when tokens allow.
+
+### Added
+
+- **Spatial / BVH**: Phase A–E spatial index, optional `VectorRef` on
+  leaves (ADR-088), Phase F dual-index join helpers (ADR-093), W1
+  geometric partition for world-model structure (ADR-078 path).
+- **Mesh**: QUIC transport, mesh clock/fixtures, chain replay + Merkle,
+  capability claims foundations.
+- **LeWM / world model crates**: `weftos-worldmodel-*`, sensor pipeline,
+  SIGReg / training surfaces, ADR-090 ECC decoupling invariant.
+- **MCP**: HTTP/SSE listen, session capability tokens, `window_*` tools
+  → WindowIntent, profiles (ADR-075/076).
+- **Agent Workspace**: freeform WM + WindowIntent (ADR-073).
+- **Android splat capture** scaffold (ADR-077) + edge UniFFI path.
+- **Governance**: action/tool selectors, `GatePrincipal`, spawn approval
+  Defer path, ADR-094 foundation (WEFT-633–638).
+- **Dashboard / UI**: skill install/uninstall API, mobile drawer,
+  Playwright + axe-core a11y suite (WEFT-301/312/561/575).
+- **Vector**: vendor-free LogQuant/SIMD + MicroLoraRouter path;
+  Hybrid/DiskANN deferred cold tier (bench-documented).
+- **MetaHarness foundation (ADR-096/097)**: Graph Views as operational
+  sensor fusion; flywheel evaluate-only ViewSpec fixtures; harness tasks
+  (gate / plane-dag / fusion-view); AgentDB pattern seed; universal
+  data-surface governance inventory.
+- **Native GUI release artifact (WEFT-499)**: `weft-gui-egui` first-class
+  cargo-dist app (`clawft-gui-egui-<triple>.tar.gz`).
+
+### Fixed
+
+- **Release CI (WEFT-593)**: cargo-dist plan job no longer loses
+  `artifacts_matrix` to GHA secret-scanning (slimmed job outputs).
+- **Docker (from parked 0.6.x work)**: `~/.clawft` ownership before
+  `VOLUME`, default gateway `config.json`, alpine static musl path,
+  `.dockerignore` hygiene.
+
+### Notes / residuals
+
+- Upstream-blocked / watch: pocket-tts, some RuVector issues, multi-user
+  Tailscale auth (1.0.x product).
+- Live BVH publish from structure extract and full Tauri desktop shell
+  remain follow-ups, not silent closes.
+- MetaHarness upstream ADR-041 scorecard has structural ceilings
+  (shallow inventory); load-bearing score is `weftosFoundationScore`.
+
+---
+
 ## v0.6.20
 
 *2026-06-28*
@@ -169,7 +223,7 @@ Eight learnable models replace hard-coded constants:
 ### Known Issues
 
 - Pre-existing workspace clippy debt (~150 errors across `clawft-types/src/goal.rs`, `clawft-rpc`, `eml-core`, and some older kernel/weave code). `scripts/build.sh check` is green; `scripts/build.sh clippy` is red on pre-existing code.
-- One test in `clawft-kernel --lib` full suite hangs when run aggregate; targeted runs pass. Tracked separately.
+- ~~One test in `clawft-kernel --lib` full suite hangs when run aggregate~~ — **fixed (WEFT-134)**: full-scale HNSW-EML benches ignored; smoke path in suite.
 
 ---
 
