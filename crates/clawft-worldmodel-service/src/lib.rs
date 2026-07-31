@@ -19,10 +19,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use weftos_worldmodel::{
     attest_frame, Action, ActionEncoder, ActionPlan, AttestationError, CemPlanner, ChainSink,
-    DefaultWorldModel, HashActionEncoder, HashEncoder, Latent, LatentPlanner, LatticeApi,
-    LinearPredPhi, MemoryChainSink, NullActionEncoder, ObservationFrame, ObservationTuple,
-    PlannerKind, Predictor, SigRegHealth, WelfordSigRegMonitor, Encoder as _, EVENT_KIND_SIGREG_HEALTH,
-    LATENT_DIM_U16, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
+    DefaultWorldModel, GateVerdict, HashActionEncoder, HashEncoder, Latent, LatentPlanner,
+    LatticeApi, LinearPredPhi, MemoryChainSink, NullActionEncoder, ObservationFrame,
+    ObservationTuple, PlannerKind, Predictor, SigRegHealth, WelfordSigRegMonitor, Encoder as _,
+    EVENT_KIND_ROLLBACK_GATE, EVENT_KIND_SIGREG_HEALTH, LATENT_DIM_U16,
+    SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };
 
 /// Three deployment topologies for WorldModelService (ADR-054 / WEFT-524).
@@ -166,6 +167,12 @@ pub struct WorldModelService {
     pub plan_ticks: u64,
     /// SIGReg auto-rollback events observed.
     pub sigreg_rollbacks: u64,
+    /// Four-condition AND-gate vetoes (promotion blocked).
+    pub gate_vetoes: u64,
+    /// Four-condition AND-gate promotions allowed.
+    pub gate_promotes: u64,
+    /// Last AND-gate verdict (if any frame processed).
+    pub last_gate: Option<GateVerdict>,
 }
 
 impl WorldModelService {
@@ -182,6 +189,9 @@ impl WorldModelService {
             last_plan_ms: None,
             plan_ticks: 0,
             sigreg_rollbacks: 0,
+            gate_vetoes: 0,
+            gate_promotes: 0,
+            last_gate: None,
         })
     }
 
@@ -252,6 +262,21 @@ impl WorldModelService {
             .encode(next_bytes)
             .map_err(ServiceError::WorldModel)?;
 
+        // WEFT-530: four-condition AND gate for streaming-merge promotion.
+        let gate = self.model.evaluate_transition(
+            &z_t,
+            &z_hat,
+            &z_tp1,
+            Some(health.score),
+        );
+        self.last_gate = Some(gate);
+        if gate.promote {
+            self.gate_promotes = self.gate_promotes.saturating_add(1);
+        } else {
+            self.gate_vetoes = self.gate_vetoes.saturating_add(1);
+        }
+        self.log_rollback_gate(gate)?;
+
         let frame_seq = self.frames;
         let tuple = ObservationTuple::new(action, z_t, z_hat, z_tp1, timestamp_ms, frame_seq);
         let chain_seq = attest_frame(&mut self.chain, &tuple).map_err(ServiceError::Attestation)?;
@@ -265,7 +290,17 @@ impl WorldModelService {
             latent_dim: tuple.latent_dim,
             sigreg_health: health.score,
             sigreg_version: health.version_tag,
+            gate_promote: gate.promote,
+            gate_sigreg: gate.metrics.sigreg_health,
+            gate_probe: gate.metrics.held_out_probe_accuracy,
+            gate_voe_diff: gate.metrics.voe_surprise_diff,
+            gate_straighten: gate.metrics.temporal_straightening,
         })
+    }
+
+    /// Whether a streaming-merge checkpoint may be promoted (AND of four conditions).
+    pub fn may_promote_checkpoint(&self) -> bool {
+        self.model.may_promote_checkpoint()
     }
 
     /// Log SIGReg health to the ExoChain sink (metrics + rollback gate).
@@ -293,6 +328,35 @@ impl WorldModelService {
         })?;
         self.chain
             .append_event(EVENT_KIND_SIGREG_HEALTH, &bytes)
+            .map_err(ServiceError::Attestation)?;
+        Ok(())
+    }
+
+    /// Log four-condition AND gate evaluation to the ExoChain sink (WEFT-530).
+    fn log_rollback_gate(&mut self, gate: GateVerdict) -> Result<(), ServiceError> {
+        // Always log vetoes; sample promotes to keep the chain compact.
+        let should_log = !gate.promote || self.frames % 8 == 0;
+        if !should_log {
+            return Ok(());
+        }
+        let first_veto = gate.first_veto().map(|c| c.as_str());
+        let payload = serde_json::json!({
+            "promote": gate.promote,
+            "sigreg_health": gate.metrics.sigreg_health,
+            "held_out_probe_accuracy": gate.metrics.held_out_probe_accuracy,
+            "voe_surprise_diff": gate.metrics.voe_surprise_diff,
+            "temporal_straightening": gate.metrics.temporal_straightening,
+            "first_veto": first_veto,
+            "sigreg_ok": gate.sigreg_ok,
+            "probe_ok": gate.probe_ok,
+            "voe_ok": gate.voe_ok,
+            "straighten_ok": gate.straighten_ok,
+        });
+        let bytes = serde_json::to_vec(&payload).map_err(|e| {
+            ServiceError::Attestation(AttestationError::Serialize(e.to_string()))
+        })?;
+        self.chain
+            .append_event(EVENT_KIND_ROLLBACK_GATE, &bytes)
             .map_err(ServiceError::Attestation)?;
         Ok(())
     }
@@ -440,6 +504,16 @@ pub struct FrameResult {
     pub sigreg_health: f32,
     /// SIGReg version tag after this frame.
     pub sigreg_version: u64,
+    /// Four-condition AND gate: promotion allowed (WEFT-530).
+    pub gate_promote: bool,
+    /// Gate metric: cluster SIGReg health.
+    pub gate_sigreg: f32,
+    /// Gate metric: held-out probe accuracy.
+    pub gate_probe: f32,
+    /// Gate metric: VoE surprise differentiation.
+    pub gate_voe_diff: f32,
+    /// Gate metric: temporal straightening.
+    pub gate_straighten: f32,
 }
 
 /// Service-level errors.
@@ -665,5 +739,47 @@ mod tests {
         assert!(rolled);
         assert!((SIGREG_HEALTH_ROLLBACK_THRESHOLD - 0.85).abs() < f32::EPSILON);
         assert_eq!(SIGREG_HEALTH_WINDOW_SECS, 30);
+    }
+
+    #[test]
+    fn four_condition_gate_wired_into_process_frame() {
+        let mut svc = WorldModelService::new(ServiceConfig::for_topology(
+            DeploymentTopology::Single,
+        ))
+        .expect("config");
+        svc.boot().expect("boot");
+
+        // Null encoder → zero latents; cold-start gate promotes (min_samples).
+        let frames = svc.run_fake_sensor_pipeline(3, false).expect("smoke");
+        assert_eq!(frames.len(), 3);
+        for fr in &frames {
+            // Cold start: all four metrics report perfect / above threshold.
+            assert!(fr.gate_promote, "cold-start should promote: {fr:?}");
+            assert!(fr.gate_sigreg >= 0.85);
+        }
+        assert!(svc.gate_promotes >= 1);
+        assert!(svc.last_gate.is_some());
+        assert!(svc.may_promote_checkpoint());
+
+        // Force SIGReg-only veto through the gate on the model.
+        svc.model.rollback_gate.set_sigreg_health(0.10);
+        let v = svc.model.rollback_gate.evaluate_now();
+        assert!(!v.promote);
+        assert_eq!(
+            v.first_veto(),
+            Some(weftos_worldmodel::GateCondition::ClusterSigRegHealth)
+        );
+
+        // Chain should carry at least one rollback-gate event.
+        let gate_events: Vec<_> = svc
+            .chain
+            .entries
+            .iter()
+            .filter(|e| e.kind == EVENT_KIND_ROLLBACK_GATE)
+            .collect();
+        assert!(
+            !gate_events.is_empty(),
+            "expected lewm.rollback_gate ExoChain events"
+        );
     }
 }

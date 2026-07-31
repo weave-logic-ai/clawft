@@ -72,13 +72,15 @@ pub use weftos_worldmodel_impls as impls;
 
 // ── Core: traits, types, latent contract, attestation ──────────────────────
 pub use weftos_worldmodel_core::{
-    latent_dim_matches_v1, surprise_voe, zero_latent, Action, ActionPlan, Encoder, Latent,
-    LatentPlanner, LatentVersion, LatticeApi, LatticeMethod, NodeId, ObservationFrame,
-    ObservationTuple, PlanStep, PlannerKind, Predictor, RecallHit, SigRegHealth, SigRegMonitor,
-    SubscriptionId, WorldModelError, WorldModelResult, ATTESTATION_SOURCE,
-    EVENT_KIND_LEWM_FRAME_ATTESTATION, LATENT_DIM, LATENT_DIM_U16, LATENT_SCHEMA_MAJOR_V1,
-    LATTICE_METHOD_COUNT, LATTICE_METHODS, SIGREG_HEALTH_ROLLBACK_THRESHOLD,
-    SIGREG_HEALTH_WINDOW_SECS,
+    latent_dim_matches_v1, surprise_voe, zero_latent, Action, ActionPlan, Encoder, GateCondition,
+    GateVerdict, Latent, LatentPlanner, LatentVersion, LatticeApi, LatticeMethod, NodeId,
+    ObservationFrame, ObservationTuple, PlanStep, PlannerKind, Predictor, RecallHit,
+    RollbackGate, RollbackGateMetrics, SigRegHealth, SigRegMonitor, SubscriptionId,
+    WorldModelError, WorldModelResult, ATTESTATION_SOURCE, EVENT_KIND_LEWM_FRAME_ATTESTATION,
+    EVENT_KIND_ROLLBACK_GATE, GATE_HELD_OUT_PROBE_MIN, GATE_SIGREG_HEALTH_MIN,
+    GATE_TEMPORAL_STRAIGHTEN_MIN, GATE_VOE_DIFF_MIN, LATENT_DIM, LATENT_DIM_U16,
+    LATENT_SCHEMA_MAJOR_V1, LATTICE_METHOD_COUNT, LATTICE_METHODS,
+    SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };
 
 // ── Host attestation path (JSON + ChainSink; requires `std`) ───────────────
@@ -95,10 +97,12 @@ pub use attestation::{
 
 // ── Impls: runtime monitors/planners + stubs + action encoder ─────────────
 pub use weftos_worldmodel_impls::{
-    planner_for_kind, ActionEncoder, CemPlanner, GradientPlanner, HashActionEncoder, HashEncoder,
-    IdentityPredictor, LinearPredPhi, MppiWarmPlanner, NullActionEncoder, NullEncoder, NullPlanner,
-    NullPredictor, NullSigRegMonitor, PredPhi, SigRegHealthEvent, SigRegHealthLog, StubLattice,
-    WelfordSigRegMonitor, ACTION_CODE_DIM, EVENT_KIND_SIGREG_HEALTH,
+    planner_for_kind, ActionEncoder, CemPlanner, FourConditionRollbackGate, GradientPlanner,
+    HashActionEncoder, HashEncoder, IdentityPredictor, LinearPredPhi, MppiWarmPlanner,
+    NullActionEncoder, NullEncoder, NullPlanner, NullPredictor, NullSigRegMonitor, PredPhi,
+    ProbePair, RollbackGateLog, SigRegHealthEvent, SigRegHealthLog, StubLattice,
+    WelfordSigRegMonitor, ACTION_CODE_DIM, DEFAULT_MIN_SAMPLES, DEFAULT_PROBE_CAPACITY,
+    DEFAULT_TRAJECTORY_CAPACITY, EVENT_KIND_SIGREG_HEALTH,
 };
 
 // ── Optional candle skeleton (no weights) ──────────────────────────────────
@@ -133,11 +137,12 @@ pub fn default_stub_lattice() -> StubLattice {
 }
 
 /// Default runtime stack: encoder, action encoder, `pred_φ`, CEM planner,
-/// lattice, and Welford SIGReg monitor (WEFT-528 / WEFT-529).
+/// lattice, Welford SIGReg monitor, and four-condition AND rollback gate
+/// (WEFT-528 / WEFT-529 / WEFT-530).
 ///
 /// Weights-free but not a pure no-op: linear residual prediction, CEM planning,
-/// and online SIGReg health with auto-rollback. Trained AdaLN / ViT weights
-/// remain residual (see `weftos-worldmodel-impls` README).
+/// online SIGReg health with auto-rollback, and streaming-merge promotion
+/// gating. Trained AdaLN / ViT weights remain residual (see impls README).
 #[derive(Debug, Clone)]
 pub struct DefaultWorldModel {
     /// Sensor → latent encoder (null by default).
@@ -152,6 +157,8 @@ pub struct DefaultWorldModel {
     pub lattice: StubLattice,
     /// Welford SIGReg health monitor (auto-rollback at 0.85 / 30s).
     pub sigreg: WelfordSigRegMonitor,
+    /// Four-condition AND rollback / promotion gate (WEFT-530).
+    pub rollback_gate: FourConditionRollbackGate,
 }
 
 impl Default for DefaultWorldModel {
@@ -171,6 +178,7 @@ impl DefaultWorldModel {
             planner: CemPlanner::default(),
             lattice: StubLattice::default(),
             sigreg: WelfordSigRegMonitor::new(1),
+            rollback_gate: FourConditionRollbackGate::new(),
         }
     }
 
@@ -181,7 +189,26 @@ impl DefaultWorldModel {
     ) -> WorldModelResult<(Latent, SigRegHealth)> {
         let z = self.lattice.observe(frame)?;
         let health = self.sigreg.update_at(&z, frame.timestamp_ms)?;
+        self.rollback_gate.set_sigreg_health(health.score);
         Ok((z, health))
+    }
+
+    /// Ingest a full transition into the four-condition gate and return the
+    /// AND verdict (blocks streaming-merge promotion when any condition fails).
+    pub fn evaluate_transition(
+        &mut self,
+        z_t: &Latent,
+        z_hat: &Latent,
+        z_tp1: &Latent,
+        sigreg_health: Option<f32>,
+    ) -> GateVerdict {
+        self.rollback_gate
+            .observe_transition(z_t, z_hat, z_tp1, sigreg_health)
+    }
+
+    /// Whether a streaming-merge checkpoint may be promoted right now.
+    pub fn may_promote_checkpoint(&self) -> bool {
+        self.rollback_gate.may_promote()
     }
 }
 
@@ -283,6 +310,22 @@ mod tests {
         assert_eq!(z, zero_latent());
         assert!(health.is_healthy());
         assert!(!health.should_rollback());
+    }
+
+    #[test]
+    fn default_world_model_four_condition_gate() {
+        let mut wm = DefaultWorldModel::new();
+        let z = zero_latent();
+        // Cold start promotes.
+        let v = wm.evaluate_transition(&z, &z, &z, Some(0.95));
+        assert!(v.promote);
+        assert!(wm.may_promote_checkpoint());
+
+        // SIGReg-only veto.
+        let v = wm.evaluate_transition(&z, &z, &z, Some(0.10));
+        assert!(!v.promote);
+        assert_eq!(v.first_veto(), Some(GateCondition::ClusterSigRegHealth));
+        assert!(v.blocks_promotion());
     }
 
     #[test]

@@ -23,6 +23,7 @@
 //! - [`planner`] — [`LatentPlanner`] (CEM default, 10 Hz)
 //! - [`lattice`] — [`LatticeApi`] (7 methods)
 //! - [`sigreg`] — health thresholds and monitor trait
+//! - [`rollback_gate`] — four-condition AND promotion / rollback gate (WEFT-530)
 //! - [`types`] — shared observation / action / plan types
 //! - [`error`] — portable error kinds
 //!
@@ -41,6 +42,7 @@ pub mod lattice;
 pub mod latent;
 pub mod planner;
 pub mod predictor;
+pub mod rollback_gate;
 pub mod sigreg;
 pub mod types;
 
@@ -56,6 +58,11 @@ pub use latent::{
 };
 pub use planner::{ActionPlan, LatentPlanner, PlanStep, PlannerKind};
 pub use predictor::Predictor;
+pub use rollback_gate::{
+    GateCondition, GateVerdict, RollbackGate, RollbackGateMetrics, EVENT_KIND_ROLLBACK_GATE,
+    GATE_HELD_OUT_PROBE_MIN, GATE_SIGREG_HEALTH_MIN, GATE_TEMPORAL_STRAIGHTEN_MIN,
+    GATE_VOE_DIFF_MIN,
+};
 pub use sigreg::{
     SigRegHealth, SigRegMonitor, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };

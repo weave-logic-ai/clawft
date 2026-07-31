@@ -15,6 +15,7 @@
 //! - [`planner`] — CEM default / MPPI-warm / gradient planners (WEFT-529)
 //! - [`lattice`] — composed [`StubLattice`] implementing [`LatticeApi`]
 //! - [`sigreg`] — Welford SIGReg monitor + auto-rollback (WEFT-528)
+//! - [`rollback_gate`] — four-condition AND promotion gate (WEFT-530)
 //! - [`candle`] — optional ML skeleton (`feature = "candle"`)
 //!
 //! Designed for `no_std` + `alloc` on the default feature set. The `candle`
@@ -31,6 +32,7 @@ pub mod encoder;
 pub mod lattice;
 pub mod planner;
 pub mod predictor;
+pub mod rollback_gate;
 pub mod sigreg;
 
 #[cfg(feature = "candle")]
@@ -39,10 +41,12 @@ pub mod candle;
 
 // ── Re-exports from core (facade-friendly surface) ─────────────────────────
 pub use weftos_worldmodel_core::{
-    zero_latent, Action, ActionPlan, Encoder, Latent, LatentPlanner, LatticeApi, NodeId,
-    ObservationFrame, PlanStep, PlannerKind, Predictor, RecallHit, SigRegHealth, SigRegMonitor,
-    SubscriptionId, WorldModelError, WorldModelResult, LATENT_DIM, LATENT_DIM_U16,
-    SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
+    zero_latent, Action, ActionPlan, Encoder, GateCondition, GateVerdict, Latent, LatentPlanner,
+    LatticeApi, NodeId, ObservationFrame, PlanStep, PlannerKind, Predictor, RecallHit,
+    RollbackGate, RollbackGateMetrics, SigRegHealth, SigRegMonitor, SubscriptionId,
+    WorldModelError, WorldModelResult, EVENT_KIND_ROLLBACK_GATE, GATE_HELD_OUT_PROBE_MIN,
+    GATE_SIGREG_HEALTH_MIN, GATE_TEMPORAL_STRAIGHTEN_MIN, GATE_VOE_DIFF_MIN, LATENT_DIM,
+    LATENT_DIM_U16, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };
 
 // ── Crate-local stubs + production runtime monitors/planners ───────────────
@@ -53,6 +57,10 @@ pub use planner::{
     planner_for_kind, CemPlanner, GradientPlanner, MppiWarmPlanner, NullPlanner,
 };
 pub use predictor::{IdentityPredictor, LinearPredPhi, NullPredictor, PredPhi};
+pub use rollback_gate::{
+    FourConditionRollbackGate, ProbePair, RollbackGateLog, DEFAULT_MIN_SAMPLES,
+    DEFAULT_PROBE_CAPACITY, DEFAULT_TRAJECTORY_CAPACITY,
+};
 pub use sigreg::{
     NullSigRegMonitor, SigRegHealthEvent, SigRegHealthLog, WelfordSigRegMonitor,
     EVENT_KIND_SIGREG_HEALTH,

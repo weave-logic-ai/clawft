@@ -9,7 +9,7 @@ depend on a single facade crate rather than wiring core traits and
 implementations separately.
 
 **Source**: `crates/weftos-worldmodel/` (facade) · `weftos-worldmodel-core` · `weftos-worldmodel-impls`
-**Tickets**: WEFT-520 (core) · WEFT-521 (impls) · **WEFT-522** (facade)
+**Tickets**: WEFT-520 (core) · WEFT-521 (impls) · **WEFT-522** (facade) · WEFT-528 (SIGReg) · WEFT-529 (pred_φ/CEM) · **WEFT-530** (four-condition AND gate)
 **Phase**: research / 0.9.x LeWM batch (ws17)
 
 ## Crate split
@@ -74,6 +74,42 @@ let (z2, health) = wm
 assert!(health.is_healthy());
 let _ = z2;
 ```
+
+## Four-condition AND rollback gate (WEFT-530)
+
+Streaming-merge world-model checkpoints promote only when **all four**
+conditions pass (strict AND — any single failure vetoes promotion and holds
+the last-good segment):
+
+| # | Condition | Threshold | Source |
+|---|-----------|-----------|--------|
+| 1 | Cluster SIGReg health | ≥ 0.85 | Welford merged partial sums |
+| 2 | Held-out probing accuracy | ≥ 0.70 | Sign-agreement linear probe on held-out Δz |
+| 3 | VoE surprise differentiation | ≥ 0.10 | Real vs identity-null residual gap |
+| 4 | Temporal-straightening score | ≥ 0.50 | Chord / path over latent window |
+
+```rust
+use weftos_worldmodel::{
+    zero_latent, DefaultWorldModel, GateCondition, GateVerdict, RollbackGateMetrics,
+};
+
+// Evaluate metrics directly (unit / host paths)
+let metrics = RollbackGateMetrics::perfect();
+assert!(GateVerdict::evaluate(metrics).promote);
+
+// Or online via the default stack after transitions
+let mut wm = DefaultWorldModel::new();
+let z = zero_latent();
+let v = wm.evaluate_transition(&z, &z, &z, Some(0.95));
+assert!(v.promote || v.first_veto().is_some());
+let _ = GateCondition::ALL;
+assert!(wm.may_promote_checkpoint() || !v.promote);
+```
+
+Production path: `FourConditionRollbackGate` in `weftos-worldmodel-impls`,
+wired through `DefaultWorldModel` and `clawft-worldmodel-service` (ExoChain
+event kind `lewm.rollback_gate`). Each condition has independent veto unit
+tests.
 
 ### Cargo dependency
 

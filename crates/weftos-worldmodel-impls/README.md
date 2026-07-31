@@ -11,6 +11,7 @@ traits for the LeWM latent world model (WEFT-521).
 | `LinearPredPhi` (`pred_φ`) | **Done** | Weights-free linear residual action-conditioned dynamics (WEFT-529) |
 | `CemPlanner` / `MppiWarmPlanner` / `GradientPlanner` | **Done** | CEM default @ 10 Hz path; toy planning tests (WEFT-529) |
 | `WelfordSigRegMonitor` | **Done** | Online Welford + auto-rollback at 0.85 / 30 s (WEFT-528) |
+| `FourConditionRollbackGate` | **Done** | AND of SIGReg / held-out probe / VoE diff / temporal straighten (WEFT-530) |
 | `ActionEncoder` + `NullActionEncoder` / `HashActionEncoder` | **Done** | Maps control bytes → fixed-width `Action` code |
 | `StubLattice` composition | **Done** | Wires encoder + `pred_φ` + CEM for service scaffolding |
 | `candle` feature skeleton (`VitTinyConfig`, `CandleVitEncoder`, `AdaLnPredictor`) | **Skeleton** | Module layout + `Unavailable` without weights; no trained checkpoint |
@@ -72,4 +73,5 @@ let _ = z_hat;
 - WEFT-522 — facade re-export (`weftos-worldmodel`) — landed; prefer that for consumers
 - WEFT-528 — Welford SIGReg + auto-rollback (landed)
 - WEFT-529 — pred_φ + CEM planner (landed; neural weights residual)
+- WEFT-530 — four-condition AND rollback / promotion gate (landed)
 - WEFT-543 — latent dim = 192 contract
