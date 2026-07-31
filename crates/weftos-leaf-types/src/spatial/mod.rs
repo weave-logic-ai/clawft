@@ -9,6 +9,7 @@
 
 pub mod primitives;
 pub mod tags;
+pub mod vector_ref;
 
 pub use primitives::{
     AabbPayload, AabbWire, BeamTracePayload, CapsulePayload, FrustumPayload, ObbPayload,
@@ -17,3 +18,4 @@ pub use primitives::{
     WmObjectPayload, WmSegmentPayload, WmSensorFovPayload, WmSurfacePayload, WmVolumePayload,
 };
 pub use tags::{SpatialLeafTag, UnknownSpatialTag, consts as tag_consts};
+pub use vector_ref::{VectorRef, index_ids};

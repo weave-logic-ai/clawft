@@ -5,11 +5,20 @@
 //!
 //! Wire format: CBOR via crate-level [`crate::encode`] / [`crate::decode`].
 //! Coordinates are reconstruction / scene-local f32 unless noted.
+//!
+//! ## Optional feature handles (ADR-088)
+//!
+//! Most payloads carry an optional [`VectorRef`] (`vector` field). It is
+//! **not** an inline embedding — only a handle into an external index
+//! (typically ECC HNSW). Default / absent = pure geometry. See
+//! `docs/design/bvh_schema_updates.md` and ADR-088.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
+
+use super::vector_ref::VectorRef;
 
 // ── Shared geometry ────────────────────────────────────────────────
 
@@ -63,6 +72,9 @@ pub struct SpherePayload {
     pub center: Vec3Wire,
     /// Radius (≥ 0).
     pub radius: f32,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::Aabb`] payload (mirrors broad-phase bound).
@@ -70,6 +82,9 @@ pub struct SpherePayload {
 pub struct AabbPayload {
     /// Box extent.
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::Obb`] payload.
@@ -81,6 +96,9 @@ pub struct ObbPayload {
     pub half_extents: Vec3Wire,
     /// Unit quaternion orientation as `[x, y, z, w]`.
     pub orientation: [f32; 4],
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::Capsule`] payload.
@@ -92,6 +110,9 @@ pub struct CapsulePayload {
     pub b: Vec3Wire,
     /// Radius (≥ 0).
     pub radius: f32,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::SweptAabb`] payload (motion volume).
@@ -101,6 +122,9 @@ pub struct SweptAabbPayload {
     pub start: AabbWire,
     /// AABB at motion end.
     pub end: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::Frustum`] payload (six half-spaces).
@@ -110,6 +134,9 @@ pub struct SweptAabbPayload {
 pub struct FrustumPayload {
     /// Six frustum planes.
     pub planes: [[f32; 4]; 6],
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::RadialSphereEvent`] payload.
@@ -123,6 +150,9 @@ pub struct RadialSphereEventPayload {
     pub t_start: f64,
     /// Inclusive end time.
     pub t_end: f64,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::BeamTrace`] payload.
@@ -136,6 +166,9 @@ pub struct BeamTracePayload {
     pub max_t: f32,
     /// Beam thickness radius (≥ 0; 0 = ideal ray).
     pub radius: f32,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::SensorRead4D`] payload.
@@ -149,6 +182,9 @@ pub struct SensorRead4DPayload {
     pub t: f64,
     /// Opaque sensor identifier.
     pub sensor_id: u64,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 // ── Splat / world-model payloads ───────────────────────────────────
@@ -162,6 +198,9 @@ pub struct SplatScenePayload {
     pub bound: Option<AabbWire>,
     /// Relative artifact names (sog, ply, …).
     pub artifacts: Vec<(String, String)>,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::SplatCamera`] payload.
@@ -179,6 +218,9 @@ pub struct SplatCameraPayload {
     pub near: f32,
     /// Far clip.
     pub far: f32,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::SplatYardstick`] payload.
@@ -190,6 +232,9 @@ pub struct SplatYardstickPayload {
     pub b: Vec3Wire,
     /// Real-world length in meters.
     pub length_m: f32,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::WmObject`] payload.
@@ -201,6 +246,9 @@ pub struct WmObjectPayload {
     pub confidence: Option<f32>,
     /// Local AABB in scene frame.
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::WmSurface`] payload.
@@ -214,6 +262,9 @@ pub struct WmSurfacePayload {
     pub point: Vec3Wire,
     /// Approximate planar extent AABB.
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::WmVolume`] payload.
@@ -223,6 +274,9 @@ pub struct WmVolumePayload {
     pub kind: String,
     /// Volume AABB.
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::WmSegment`] payload.
@@ -232,6 +286,9 @@ pub struct WmSegmentPayload {
     pub segment_id: String,
     /// Covering AABB.
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::WmSensorFov`] payload.
@@ -243,6 +300,9 @@ pub struct WmSensorFovPayload {
     pub origin: Vec3Wire,
     /// Approximate FOV AABB (or use [`FrustumPayload`] with Frustum tag).
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 /// [`super::SpatialLeafTag::WmAffordance`] payload.
@@ -252,6 +312,9 @@ pub struct WmAffordancePayload {
     pub kind: String,
     /// Interaction volume.
     pub bound: AabbWire,
+    /// Optional external feature handle (ADR-088).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<VectorRef>,
 }
 
 #[cfg(test)]
@@ -270,6 +333,7 @@ mod tests {
         let p = SpherePayload {
             center: Vec3Wire::new(1.0, 2.0, 3.0),
             radius: 0.5,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<SpherePayload>(&bytes).unwrap(), p);
@@ -277,7 +341,10 @@ mod tests {
 
     #[test]
     fn roundtrip_aabb() {
-        let p = AabbPayload { bound: unit_aabb() };
+        let p = AabbPayload {
+            bound: unit_aabb(),
+            vector: None,
+        };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<AabbPayload>(&bytes).unwrap(), p);
     }
@@ -288,6 +355,7 @@ mod tests {
             center: Vec3Wire::ZERO,
             half_extents: Vec3Wire::new(1.0, 2.0, 3.0),
             orientation: [0.0, 0.0, 0.0, 1.0],
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<ObbPayload>(&bytes).unwrap(), p);
@@ -299,6 +367,7 @@ mod tests {
             a: Vec3Wire::new(0.0, 0.0, 0.0),
             b: Vec3Wire::new(0.0, 1.0, 0.0),
             radius: 0.1,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<CapsulePayload>(&bytes).unwrap(), p);
@@ -309,6 +378,7 @@ mod tests {
         let p = SweptAabbPayload {
             start: unit_aabb(),
             end: AabbWire::from_min_max(Vec3Wire::new(0.5, 0.5, 0.5), Vec3Wire::new(1.5, 1.5, 1.5)),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<SweptAabbPayload>(&bytes).unwrap(), p);
@@ -325,6 +395,7 @@ mod tests {
                 [0.0, 0.0, 1.0, -1.0],
                 [0.0, 0.0, -1.0, -1.0],
             ],
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<FrustumPayload>(&bytes).unwrap(), p);
@@ -337,6 +408,7 @@ mod tests {
             radius: 2.0,
             t_start: 100.0,
             t_end: 200.0,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<RadialSphereEventPayload>(&bytes).unwrap(), p);
@@ -349,6 +421,7 @@ mod tests {
             direction: Vec3Wire::new(0.0, 0.0, 1.0),
             max_t: 10.0,
             radius: 0.05,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<BeamTracePayload>(&bytes).unwrap(), p);
@@ -361,6 +434,7 @@ mod tests {
             half_extents: Vec3Wire::new(0.2, 0.2, 0.2),
             t: 1_700_000_000.0,
             sensor_id: 42,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<SensorRead4DPayload>(&bytes).unwrap(), p);
@@ -375,6 +449,7 @@ mod tests {
                 (String::from("sog"), String::from("scene.sog")),
                 (String::from("ply"), String::from("splat.ply")),
             ],
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<SplatScenePayload>(&bytes).unwrap(), p);
@@ -389,6 +464,7 @@ mod tests {
             fov_y: 1.0,
             near: 0.1,
             far: 100.0,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<SplatCameraPayload>(&bytes).unwrap(), p);
@@ -400,6 +476,7 @@ mod tests {
             a: Vec3Wire::ZERO,
             b: Vec3Wire::new(1.0, 0.0, 0.0),
             length_m: 1.0,
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<SplatYardstickPayload>(&bytes).unwrap(), p);
@@ -411,6 +488,7 @@ mod tests {
             label: Some(String::from("chair")),
             confidence: Some(0.91),
             bound: unit_aabb(),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<WmObjectPayload>(&bytes).unwrap(), p);
@@ -423,6 +501,7 @@ mod tests {
             normal: Vec3Wire::new(0.0, 1.0, 0.0),
             point: Vec3Wire::ZERO,
             bound: unit_aabb(),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<WmSurfacePayload>(&bytes).unwrap(), p);
@@ -433,6 +512,7 @@ mod tests {
         let p = WmVolumePayload {
             kind: String::from("occupied"),
             bound: unit_aabb(),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<WmVolumePayload>(&bytes).unwrap(), p);
@@ -443,6 +523,7 @@ mod tests {
         let p = WmSegmentPayload {
             segment_id: String::from("seg-7"),
             bound: unit_aabb(),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<WmSegmentPayload>(&bytes).unwrap(), p);
@@ -454,6 +535,7 @@ mod tests {
             kind: String::from("tof"),
             origin: Vec3Wire::ZERO,
             bound: unit_aabb(),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<WmSensorFovPayload>(&bytes).unwrap(), p);
@@ -464,8 +546,41 @@ mod tests {
         let p = WmAffordancePayload {
             kind: String::from("sit"),
             bound: unit_aabb(),
+            vector: None,
         };
         let bytes = encode(&p).unwrap();
         assert_eq!(decode::<WmAffordancePayload>(&bytes).unwrap(), p);
+    }
+
+    #[test]
+    fn wm_object_vector_ref_roundtrip() {
+        let p = WmObjectPayload {
+            label: Some(String::from("chair")),
+            confidence: Some(0.9),
+            bound: unit_aabb(),
+            vector: Some(VectorRef::ecc_hnsw(99)),
+        };
+        let bytes = encode(&p).unwrap();
+        let q = decode::<WmObjectPayload>(&bytes).unwrap();
+        assert_eq!(q.vector, Some(VectorRef::ecc_hnsw(99)));
+    }
+
+    #[test]
+    fn legacy_sphere_without_vector_field_decodes() {
+        // Encode a map without `vector` by using CBOR of partial-compatible shape:
+        // Sphere with only center+radius via a slim struct then decode into full.
+        #[derive(Serialize)]
+        struct Legacy {
+            center: Vec3Wire,
+            radius: f32,
+        }
+        let legacy = Legacy {
+            center: Vec3Wire::new(1.0, 0.0, 0.0),
+            radius: 2.0,
+        };
+        let bytes = encode(&legacy).unwrap();
+        let p = decode::<SpherePayload>(&bytes).unwrap();
+        assert_eq!(p.radius, 2.0);
+        assert_eq!(p.vector, None);
     }
 }

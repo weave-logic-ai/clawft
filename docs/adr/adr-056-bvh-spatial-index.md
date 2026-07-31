@@ -271,6 +271,28 @@ pick up BVH automatically.
 - No upstream-contribution decision is made re: ruvector
   (concept paper §12.3 Q8). The crate ships in-tree first.
 
+## Amendment (2026-07-31) — optional VectorRef on leaf payloads
+
+**Status of amendment**: Accepted via **ADR-088**.
+
+The BVH ↔ HNSW *join* (who owns dual-index query plans, fingerprinting,
+embedder choice) remains deferred as above. What is **no longer deferred**
+is an optional handle on spatial CBOR payloads so WEFT-709 (ADR-078 W1
+geometric partition) does not ossify pure-geometry leaves:
+
+- `weftos-leaf-types::spatial::VectorRef` — `(index_id, vector_id)`
+- Every typed payload in `spatial/primitives.rs` carries
+  `vector: Option<VectorRef>` with serde default / skip-if-none
+- Default `None` = pure geometry (backward compatible)
+- No inline embeddings in leaves
+
+This preserves ADR-056's separation of concerns (BVH = where/when/shape;
+HNSW = feature similarity) while reserving the join key on the leaf.
+Full dual-index composition stays a future ADR (Phase F / fingerprinting).
+
+See: `docs/adr/adr-088-bvh-leaf-vector-ref.md`,
+`docs/design/bvh_schema_updates.md`.
+
 ## Implementation pointer
 
 Phased work breakdown, crate layout, API sketch, and the per-phase
@@ -295,3 +317,5 @@ integrations) — this is not a 0.7.0 release-gate item.
 - `crates/clawft-kernel/src/vector_backend.rs` — trait shape mirrored
 - `crates/clawft-kernel/src/hnsw_service.rs` — service shape mirrored
 - `crates/weftos-leaf-types/` — registry crate; gains `spatial/` module
+- ADR-088 — Optional `VectorRef` on spatial leaf payloads (payload-handle
+  insurance before WEFT-709; does not implement BVH×HNSW join)
