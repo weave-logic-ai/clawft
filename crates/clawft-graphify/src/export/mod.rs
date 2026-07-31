@@ -1,5 +1,6 @@
 //! Export formats for the knowledge graph.
 
+pub mod cypher;
 pub mod json;
 pub mod obsidian;
 pub mod svg;
@@ -75,6 +76,7 @@ pub fn export(
 ) -> Result<(), GraphifyError> {
     match format {
         ExportFormat::Json => json::to_json(kg, output),
+        ExportFormat::Cypher => cypher::to_cypher(kg, output),
         ExportFormat::Obsidian => {
             obsidian::to_obsidian_vault(kg, output)?;
             Ok(())
@@ -98,6 +100,8 @@ pub fn export(
             })?;
             Ok(())
         }
+        // GraphMl / Html modules exist as stubs with an older model; leave
+        // unimplemented until restored separately (not WEFT-387 scope).
         _ => Err(GraphifyError::ExportError(format!(
             "Export format {:?} not yet implemented",
             format,
