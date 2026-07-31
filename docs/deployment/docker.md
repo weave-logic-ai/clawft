@@ -149,9 +149,42 @@ for a single-host VPS install:
 ./scripts/deploy/vps-deploy.sh --pull
 ```
 
-Flags: `--image`, `--port`, `--name`, `--config`, `--restart`, `--pull`.
-The script idempotently stops any existing container with the same name
-before starting the new one.
+Flags: `--image`, `--port`, `--name`, `--config`, `--restart`, `--pull`,
+`--health-timeout`, `--no-health`.
+
+### Health-probe rollback (WEFT-456)
+
+On upgrade the script **does not** destroy the running container first.
+It stops and renames it to `<name>-previous`, starts the new container
+under the original name, then probes `GET /api/health` on the host port
+(same shape as the WEFT-550 post-publish smoke: 3s crash check + bounded
+HTTP 200 deadline, default 30s).
+
+| Outcome | Action |
+|---------|--------|
+| Probe returns 200 | Previous container is removed. |
+| Crash within 3s / probe timeout / non-200 | New container is removed; previous is renamed back and started. |
+
+Pass `--no-health` only when you intentionally want the old stop-and-
+replace behaviour (e.g. offline hosts without `curl`).
+
+#### Manual smoke (rollback path)
+
+```bash
+# Known-good baseline
+./scripts/deploy/vps-deploy.sh --name weft-smoke --port 18080
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/api/health  # 200
+
+# Force an unhealthy deploy (alpine has no `gateway` binary → exits)
+docker pull alpine:3.21
+docker tag alpine:3.21 weft-smoke-unhealthy:local
+./scripts/deploy/vps-deploy.sh --name weft-smoke --port 18080 \
+  --image weft-smoke-unhealthy:local --health-timeout 8 || true
+
+# Previous container restored; health still 200
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/api/health
+docker rm -f weft-smoke weft-smoke-previous 2>/dev/null || true
+```
 
 ## Health Checks
 
