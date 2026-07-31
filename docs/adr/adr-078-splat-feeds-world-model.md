@@ -4,7 +4,7 @@
 **Status**: Accepted  
 **Deciders**: product + ECC / spatial (owner: reconstruction is input to BVH entities—objects, surfaces, volumes—not only a SOG for viewing)  
 **Depends-On**: ADR-056 (BVH), splat pipeline design, multi-modal capture design  
-**Relates-To**: ADR-077 (capture edge), ADR-073 (workspace visualizes; BVH is truth), LeWM latent world-model track (compose later)
+**Relates-To**: ADR-077 (capture edge), ADR-073 (workspace visualizes; BVH is truth), LeWM latent world-model track (compose later), **ADR-095** (batch graph analytics research hold — multi-sensor identity / association at edge-table scale; DiskANN for vector relief — see `docs/research/diskann-and-large-scale-indexes.md`)
 
 ## Context
 

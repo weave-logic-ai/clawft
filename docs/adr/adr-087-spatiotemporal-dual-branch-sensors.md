@@ -10,7 +10,9 @@
   for survey item 053.
 - **Related**: ADR-009 (sparse Lanczos), ADR-047 (cognitive tick), ADR-056
   (BVH spatial index), ADR-077 / ADR-078 (splat / world model — adjacent spatial
-  story), ADR-079 (Urth — multi-scale twin vision)
+  story), ADR-079 (Urth — multi-scale twin vision), **ADR-095** (batch WCC/PageRank
+  plane when sensor association graphs exceed RAM — dual-branch GNN stays local;
+  DiskANN for embedding scale)
 - **Source**:
   - `.planning/development_notes/knowledge-graph-paper-survey-phase2.md` (Paper 7: K-STEMIT)
   - ArXiv 2604.09922 — *K-STEMIT: Spatio-Temporal GNN for Subsurface Estimation*

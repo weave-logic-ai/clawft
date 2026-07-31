@@ -4,7 +4,7 @@
 **Status**: Accepted (vision / direction)  
 **Deciders**: product + spatial (owner: WeftOS world is not only rooms — we build toward a shared, navigable **Urth** that densifies where sensors and people care)  
 **Depends-On**: ADR-056 (BVH), ADR-078 (structure from capture), free-form quilt, multi-cam  
-**Relates-To**: ADR-077 (edge capture), LeWM latent world models (compose later), mesh (ADR-026)
+**Relates-To**: ADR-077 (edge capture), LeWM latent world models (compose later), mesh (ADR-026), **ADR-095** (batch graph analytics + DiskANN research hold for multi-scale association / embedding volume)
 
 ## Naming
 

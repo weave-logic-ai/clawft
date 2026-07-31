@@ -80,3 +80,6 @@ producer concern (`index_ids::ECC_HNSW` / `VISUAL_FEATURES` / …).
 - ADR-056, ADR-088
 - `docs/design/bvh_schema_updates.md`
 - WEFT-709 (producers), WEFT-723 (this decision + helpers)
+- **ADR-095** — when association graphs (not just ANN) outgrow RAM: batch
+  join-agg plane; DiskANN remains the vector cold tier for this join’s
+  feature side (`docs/research/diskann-and-large-scale-indexes.md`)
