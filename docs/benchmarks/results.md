@@ -23,6 +23,25 @@ stored in `scripts/bench/baseline.json`.
 | Cold instantiation | not yet measured |
 | Warm instantiation | not yet measured |
 
+### Browser WASM (`wasm32-unknown-unknown`, WEFT-407)
+
+Profiling surface for **load / init / first-msg / memory** (BW6 targets).
+CI runs a schema stub; live numbers come from the `www/` harness
+(`window.__clawftPerf`). See [docs/browser/performance.md](../browser/performance.md).
+
+```bash
+scripts/build.sh browser-perf
+# Live: scripts/build.sh browser && scripts/build.sh serve → dump __clawftPerf
+```
+
+| Metric | Target | Checked-in baseline |
+|--------|--------|---------------------|
+| WASM load | &lt; 500 ms | null (stub until live run) |
+| `init()` | &lt; 200 ms | null |
+| First message (incl. LLM) | &lt; 3 s | null |
+| Subsequent message | &lt; 2 s | null |
+| WASM heap | &lt; 32 MB | null |
+
 ## Test Suite
 
 The workspace contains **294+** unit and integration tests across 9 crates.

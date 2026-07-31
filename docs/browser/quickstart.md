@@ -143,11 +143,14 @@ The built-in test harness at `www/index.html` provides a chat UI with:
 - An "Initialize" button
 - A message display with user/assistant/error/system styling
 - Console timing for load, init, and message latency
+- Structured perf samples on `window.__clawftPerf` (load / init / first-msg / memory — WEFT-407)
 
 To use it:
 
 ```bash
 npx serve crates/clawft-wasm/www --listen 8080
+# or: scripts/build.sh serve
 ```
 
-Then open `http://localhost:8080`.
+Then open `http://localhost:8080`. Performance targets, CI stub path, and
+how to dump a live report: [performance.md](./performance.md).

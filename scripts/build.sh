@@ -688,6 +688,35 @@ cmd_bundle_size() {
     return "$rc"
 }
 
+# Browser performance profiling baseline (WEFT-407 / BW6).
+#
+# Runs scripts/bench/browser-perf-baseline.sh — Node unit tests for the
+# metric helpers plus a CI stub report (schema weftos.browser-perf.v1).
+# Live load/init/first-msg/memory samples come from the www harness
+# (window.__clawftPerf). See docs/browser/performance.md.
+#
+#   scripts/build.sh browser-perf
+#   scripts/build.sh browser-perf --stub
+#   scripts/build.sh browser-perf --test-only
+cmd_browser_perf() {
+    header "Browser performance baseline (WEFT-407)"
+    local script="$ROOT/scripts/bench/browser-perf-baseline.sh"
+    if [ ! -f "$script" ]; then
+        fail "missing $script"
+        return 1
+    fi
+    timer_start
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   bash %s %s\n" "$script" "$*"
+        timer_end
+        return 0
+    fi
+    bash "$script" "$@"
+    local rc=$?
+    timer_end
+    return "$rc"
+}
+
 # VSCode dev-panel wasm bundle (WEFT-484 / M6-B).
 #
 # Promotes `extensions/vscode-weft-panel/scripts/build-wasm.sh` into a
@@ -1365,6 +1394,9 @@ ${BOLD}Commands:${NC}
   bundle-size     Gate browser WASM bundle (raw + gzip) against the
                   documented budget (WEFT-389 / M5-A).
                   See docs/architecture/wasm-bundle-size.md
+  browser-perf    Browser load/init/first-msg/memory baseline (WEFT-407).
+                  Node unit tests + CI stub report by default.
+                  See docs/browser/performance.md
   wasm-panel      Build the VSCode dev-panel wasm bundle (clawft-gui-egui)
                   via wasm-pack / cargo + wasm-bindgen + wasm-opt -Oz, then
                   gate against the panel size budget. (WEFT-484 / M6-B)
@@ -1486,6 +1518,41 @@ parse_args() {
         fi
     fi
 
+    # Capture flags for browser-perf (WEFT-407):
+    #   scripts/build.sh browser-perf [--stub|--test-only|--check [path]|--json-out PATH]
+    BROWSER_PERF_ARGS=()
+    if [ "$COMMAND" = "browser-perf" ]; then
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --stub|--test-only)
+                    BROWSER_PERF_ARGS+=("$1")
+                    shift
+                    ;;
+                --check)
+                    BROWSER_PERF_ARGS+=("$1")
+                    shift
+                    if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+                        BROWSER_PERF_ARGS+=("$1")
+                        shift
+                    fi
+                    ;;
+                --json-out)
+                    BROWSER_PERF_ARGS+=("$1" "${2:?'--json-out requires a path'}")
+                    shift 2
+                    ;;
+                --verbose|--dry-run|--help|-h)
+                    # leave for the global option loop
+                    break
+                    ;;
+                *)
+                    printf "${RED}Unknown browser-perf option: %s${NC}\n" "$1"
+                    usage
+                    exit 1
+                    ;;
+            esac
+        done
+    fi
+
     while [ $# -gt 0 ]; do
         case "$1" in
             --features)
@@ -1556,6 +1623,7 @@ main() {
         test)         cmd_test ;;
         test-browser) cmd_test_browser ;;
         bundle-size)  cmd_bundle_size ;;
+        browser-perf) cmd_browser_perf "${BROWSER_PERF_ARGS[@]+"${BROWSER_PERF_ARGS[@]}"}" ;;
         wasm-panel)   cmd_wasm_panel "${WASM_PANEL_MAX_RAW_KB:-}" "${WASM_PANEL_MAX_GZ_KB:-}" ;;
         check)        cmd_check ;;
         clippy)       cmd_clippy ;;

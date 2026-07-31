@@ -1,0 +1,30 @@
+{
+  "schema": "weftos.browser-perf.v1",
+  "benchmark": "browser_perf_baseline",
+  "description": "BW6 / WEFT-407 browser performance targets and placeholder baseline. Live numbers are produced by scripts/bench/browser-perf-baseline.sh (or the www harness window.__clawftPerf).",
+  "targets": {
+    "load_ms": 500,
+    "init_ms": 200,
+    "first_msg_ms": 3000,
+    "subsequent_msg_ms": 2000,
+    "memory_wasm_heap_mb": 32
+  },
+  "direction": "lower_is_better",
+  "baseline": {
+    "load_ms": null,
+    "init_ms": null,
+    "first_msg_ms": null,
+    "subsequent_msg_ms_avg": null,
+    "memory_wasm_heap_mb": null,
+    "note": "Null until a live harness run is checked in. Stub mode validates schema only."
+  },
+  "measurement": {
+    "load_ms": "performance.now() around import('./pkg/clawft_wasm.js') + default init",
+    "init_ms": "performance.now() around wasmModule.init(config_json)",
+    "first_msg_ms": "performance.now() around first send_message after init (includes LLM RTT)",
+    "subsequent_msg_ms": "later send_message samples",
+    "memory": "WASM linear memory.buffer.byteLength; Chrome performance.memory when available"
+  },
+  "updated": "2026-07-31",
+  "issue": "WEFT-407"
+}

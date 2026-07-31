@@ -2,6 +2,19 @@
 //
 // Loads the WASM module built by wasm-pack and wires the UI controls
 // to the exported init(), send_message(), and set_env() functions.
+//
+// WEFT-407: structured load / init / first-msg / memory samples land on
+// `window.__clawftPerf` (see perf-baseline.js + docs/browser/performance.md).
+
+import {
+  emptySamples,
+  recordLoad,
+  recordInit,
+  recordMessage,
+  captureMemory,
+  buildReport,
+  TARGETS,
+} from "./perf-baseline.js";
 
 // -- DOM elements ----------------------------------------------------------
 
@@ -12,11 +25,46 @@ const msgInput = document.getElementById("msg-input");
 const sendBtn = document.getElementById("send-btn");
 const statusIndicator = document.getElementById("status-indicator");
 const statusText = document.getElementById("status-text");
+const perfPanel = document.getElementById("perf-panel");
 
 // -- State -----------------------------------------------------------------
 
 let wasmModule = null;
 let initialized = false;
+
+/** @type {import("./perf-baseline.js").PerfSamples} */
+const perfSamples = emptySamples();
+
+/**
+ * Publish the latest report on `window.__clawftPerf` for console / script
+ * scraping, and refresh the on-page perf panel when present.
+ */
+function publishPerf(mode = "partial") {
+  const report = buildReport({
+    samples: perfSamples,
+    mode,
+    note: "Harness live samples (WEFT-407)",
+  });
+  // Expose for scripts/bench/browser-perf-baseline.sh and manual console use.
+  window.__clawftPerf = report;
+  if (perfPanel) {
+    const s = report.samples;
+    const mem =
+      s.memory.wasm_buffer_mb != null
+        ? `${s.memory.wasm_buffer_mb} MB wasm`
+        : s.memory.js_heap_used_mb != null
+          ? `${s.memory.js_heap_used_mb} MB js`
+          : "n/a";
+    const fmt = (v, target) =>
+      v == null ? "—" : `${v}ms (≤${target})`;
+    perfPanel.textContent =
+      `load ${fmt(s.load_ms, TARGETS.load_ms)} · ` +
+      `init ${fmt(s.init_ms, TARGETS.init_ms)} · ` +
+      `first-msg ${fmt(s.first_msg_ms, TARGETS.first_msg_ms)} · ` +
+      `mem ${mem} (≤${TARGETS.memory_wasm_heap_mb} MB)`;
+  }
+  return report;
+}
 
 // Real API keys loaded from .env-keys.json (never displayed in full).
 // Maps provider name → raw key string.
@@ -164,13 +212,18 @@ async function loadWasm() {
       await wasmModule.default();
     }
 
-    const loadMs = (performance.now() - loadStart).toFixed(1);
-    console.log(`[clawft] wasm-load: ${loadMs}ms`);
+    const loadMs = performance.now() - loadStart;
+    recordLoad(perfSamples, loadMs);
+    captureMemory(perfSamples, { wasmModule });
+    console.log(`[clawft] wasm-load: ${loadMs.toFixed(1)}ms`);
+    console.log("[clawft] perf", publishPerf("partial"));
     setStatus("", "wasm loaded, ready to initialize");
-    appendMessage("system", `WASM module loaded in ${loadMs}ms`);
+    appendMessage("system", `WASM module loaded in ${loadMs.toFixed(1)}ms`);
   } catch (err) {
-    const loadMs = (performance.now() - loadStart).toFixed(1);
-    console.error(`[clawft] wasm-load failed after ${loadMs}ms:`, err);
+    const loadMs = performance.now() - loadStart;
+    recordLoad(perfSamples, loadMs);
+    publishPerf("partial");
+    console.error(`[clawft] wasm-load failed after ${loadMs.toFixed(1)}ms:`, err);
     setStatus("error", "failed to load wasm module");
     appendMessage("error", `Failed to load WASM: ${err.message || err}`);
     initBtn.disabled = true;
@@ -216,17 +269,22 @@ async function handleInit() {
   try {
     await wasmModule.init(configJson);
 
-    const initMs = (performance.now() - initStart).toFixed(1);
-    console.log(`[clawft] init: ${initMs}ms`);
+    const initMs = performance.now() - initStart;
+    recordInit(perfSamples, initMs);
+    captureMemory(perfSamples, { wasmModule });
+    console.log(`[clawft] init: ${initMs.toFixed(1)}ms`);
+    console.log("[clawft] perf", publishPerf("partial"));
 
     initialized = true;
     setStatus("ready", "initialized");
-    appendMessage("system", `Initialized in ${initMs}ms. Ready to chat.`);
+    appendMessage("system", `Initialized in ${initMs.toFixed(1)}ms. Ready to chat.`);
     enableChat(true);
     configTextarea.disabled = true;
   } catch (err) {
-    const initMs = (performance.now() - initStart).toFixed(1);
-    console.error(`[clawft] init failed after ${initMs}ms:`, err);
+    const initMs = performance.now() - initStart;
+    recordInit(perfSamples, initMs);
+    publishPerf("partial");
+    console.error(`[clawft] init failed after ${initMs.toFixed(1)}ms:`, err);
     setStatus("error", "initialization failed");
     appendMessage("error", `Init failed: ${err.message || err}`);
     initBtn.disabled = false;
@@ -251,13 +309,22 @@ async function handleSend() {
   try {
     const response = await wasmModule.send_message(text);
 
-    const sendMs = (performance.now() - sendStart).toFixed(1);
-    console.log(`[clawft] send_message: ${sendMs}ms`);
+    const sendMs = performance.now() - sendStart;
+    recordMessage(perfSamples, sendMs);
+    captureMemory(perfSamples, { wasmModule });
+    const label =
+      perfSamples.subsequent_msg_ms.length === 0 ? "first-msg" : "msg";
+    console.log(`[clawft] ${label}: ${sendMs.toFixed(1)}ms`);
+    console.log("[clawft] perf", publishPerf("live"));
 
     appendMessage("assistant", response);
   } catch (err) {
-    const sendMs = (performance.now() - sendStart).toFixed(1);
-    console.error(`[clawft] send_message failed after ${sendMs}ms:`, err);
+    const sendMs = performance.now() - sendStart;
+    // Still record failed attempts so latency regressions surface.
+    recordMessage(perfSamples, sendMs);
+    captureMemory(perfSamples, { wasmModule });
+    publishPerf("partial");
+    console.error(`[clawft] send_message failed after ${sendMs.toFixed(1)}ms:`, err);
     appendMessage("error", `Error: ${err.message || err}`);
   } finally {
     enableChat(true);
@@ -277,6 +344,9 @@ msgInput.addEventListener("keydown", (e) => {
 });
 
 // -- Boot ------------------------------------------------------------------
+
+// Seed empty report so scrapers always find a schema-valid object.
+publishPerf("partial");
 
 // Load env keys first (may update textarea), then load WASM.
 loadEnvKeys().then(() => loadWasm());

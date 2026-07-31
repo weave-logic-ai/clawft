@@ -157,6 +157,19 @@
     }
     #send-btn:hover { background: #388bfd; }
     #send-btn:disabled { background: #484f58; cursor: not-allowed; }
+
+    /* WEFT-407 performance strip */
+    #perf-panel {
+      font-size: 0.7rem;
+      color: #8b949e;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 0.35rem 0.6rem;
+      font-variant-numeric: tabular-nums;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -168,6 +181,9 @@
       <a href="./index-worker.html" style="margin-left:auto;font-size:0.75rem;color:#8b949e;font-weight:normal;">web worker harness →</a>
     </h1>
   </header>
+  <div id="perf-panel" title="WEFT-407 browser perf baseline (window.__clawftPerf)">
+    load — · init — · first-msg — · mem —
+  </div>
 
   <section id="config-panel">
     <label for="config-textarea">Provider Configuration (JSON)</label>

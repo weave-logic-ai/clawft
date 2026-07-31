@@ -129,6 +129,17 @@ Protocol unit tests (no browser):
 node --test crates/clawft-wasm/www/protocol.test.mjs
 ```
 
+Performance baseline helpers + CI stub (WEFT-407 — load / init / first-msg /
+memory; no Chrome required):
+
+```bash
+scripts/build.sh browser-perf
+# or: scripts/bench/browser-perf-baseline.sh
+node --test crates/clawft-wasm/www/perf-baseline.test.mjs
+```
+
+See [performance.md](./performance.md) for targets and live harness capture.
+
 ### 4. Iterate
 
 After making Rust changes, rebuild with wasm-pack and refresh the browser. The test harness loads WASM from `../pkg/` relative to the HTML file.
