@@ -50,7 +50,9 @@ written rule. This skill is the operational manual.
   request, in-flight discovery), create a Plane work item in the
   appropriate cycle (`0.7.x` for must-ship-before-0.7, `0.8.x`+ for
   later). Include: file path / source citation, acceptance criteria,
-  any dependencies, link back to source-of-truth doc.
+  any dependencies, link back to source-of-truth doc. **Always attach
+  two labels at creation** (workstream `wsNN-*` + finding-type) —
+  `create-issue` enforces this (WEFT-682); see §5.1.
 - **Items being worked on**: transition to **In Progress** on claim,
   **before** starting code. The state must reflect reality.
 - **Items finished**: close with details — what shipped, the commit
@@ -186,13 +188,28 @@ config has it; agents should re-export it from there per §7).
 
 ### 5.1 Create a work item
 
+**Two-label rule (enforced at creation — WEFT-682).** Every new work
+item **must** carry at least:
+
+1. **One workstream label** — `ws01-core` … `ws18-firmware` (see §6.3 /
+   `references/labels.json`).
+2. **One finding-type label** — one of `bug`, `gap`, `stub`, `orphan`,
+   `governance`, `tech-debt`, `docs`, `tests`, `tooling`, `security`,
+   `performance`, `ruv-integration`, plus optional cross-cuts like
+   `audit-finding` / `audit-0.7.0` / `release-gate-blocker`.
+
+`scripts/plane.sh create-issue` **requires** `--labels` and refuses to
+POST when the set is missing either side. `batch-create` applies the
+same gate per spec. Do not bypass via raw curl / MCP without labels —
+`scripts/plane.sh check` will fail the board on gaps.
+
 ```bash
 scripts/plane.sh create-issue \
   --name "ws05: Email channel — implement IMAP poll loop" \
   --priority high \
   --state-name Todo \
-  --cycle 0.7.x \
-  --labels ws05-channels,audit-finding \
+  --cycle 0.8.x \
+  --labels ws05-channels,gap \
   --description-md path/to/spec.md
 ```
 
@@ -203,7 +220,7 @@ Equivalent raw call (POST `…/projects/$PROJ/issues/`, JSON body):
   "name": "ws05: Email channel — implement IMAP poll loop",
   "priority": "high",
   "state": "76d8ee2a-0afd-4359-bf45-7ddd64a59d6f",
-  "labels": ["<label-uuid>", "..."],
+  "labels": ["<ws05-uuid>", "<gap-uuid>"],
   "description_html": "<p>...</p>"
 }
 ```
@@ -335,11 +352,13 @@ For each row:
    ## Notes
    <freeform: known traps, related ADRs, prior session context>
    ```
-5. **Labels**. Always at least two:
-   - workstream label (one of `ws01-core` … `ws17-research`); see §6.3.
+5. **Labels**. Always at least two — same two-label rule as §5.1
+   (enforced by `create-issue` / `batch-create`, not optional memory):
+   - workstream label (one of `ws01-core` … `ws18-firmware`); see §6.3.
    - finding-type label (`audit-finding` for audit-derived; plus one
      of `bug`, `gap`, `stub`, `orphan`, `governance`, `tech-debt`,
-     `docs`, `tests`, `tooling` as appropriate).
+     `docs`, `tests`, `tooling`, `security`, `performance`,
+     `ruv-integration` as appropriate).
 6. **Priority**. `urgent` for live behavioural bugs (Democritus
    stuck-loop class), `high` for 0.7.x blockers, `medium` for 0.7.x
    non-blockers, `low` for deferred-cycle items, `none` for pure
@@ -378,7 +397,7 @@ ws02-kernel          ws08-weftos-gui        ws14-deployment
 ws03-pipeline        ws09-clawft-dashboard  ws15-mcp
 ws04-plugin-skills   ws10-voice             ws16-browser-wasm
 ws05-channels        ws11-agent-core-v1     ws17-research
-ws06-memory          ws12-knowledge-graph
+ws06-memory          ws12-knowledge-graph   ws18-firmware
 ```
 
 Plus a cross-cutting `audit-0.7.0` so all audit-derived items are
@@ -428,10 +447,12 @@ Before you call a triage pass "done":
       "skipped — already fixed in <SHA>" annotation, or a
       "skipped — duplicate of WEFT-N" annotation. Zero silent skips.
 - [ ] No work item has only a workstream label (every item also has
-      a finding-type label).
+      a finding-type label) — and no item was created without both
+      (wrapper refuses; see §5.1 / WEFT-682).
 - [ ] No work item is in a cycle without acceptance criteria.
-- [ ] `scripts/plane.sh check` (validates label coverage + cycle
-      assignment + AC presence) returns clean.
+- [ ] `scripts/plane.sh check` (default: open items; two-label + AC)
+      returns clean. Use `--scope all --no-require-ac` for a pure
+      label-coverage sweep of the whole board.
 
 ---
 

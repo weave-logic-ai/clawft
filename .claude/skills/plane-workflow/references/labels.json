@@ -17,7 +17,8 @@
     { "name": "ws14-deployment",      "color": "#8c6d31", "description": "Workstream 14 — Deployment & release engineering" },
     { "name": "ws15-mcp",             "color": "#843c39", "description": "Workstream 15 — MCP integration & extension surface" },
     { "name": "ws16-browser-wasm",    "color": "#7b4173", "description": "Workstream 16 — Browser WASM runtime (W-BROWSER)" },
-    { "name": "ws17-research",        "color": "#9c9ede", "description": "Workstream 17 — Research streams (JEPA/LeWM, Democritus, ECC, ExoChain, EML)" }
+    { "name": "ws17-research",        "color": "#9c9ede", "description": "Workstream 17 — Research streams (JEPA/LeWM, Democritus, ECC, ExoChain, EML)" },
+    { "name": "ws18-firmware",        "color": "#c49c94", "description": "Workstream 18 — Edge / firmware (ESP32-S3 clawft-edge-pad, IDF, display bus)" }
   ],
   "finding_type": [
     { "name": "audit-finding",          "color": "#cc3333", "description": "Derived from .planning/reviews/0.7.0-release-gate/" },

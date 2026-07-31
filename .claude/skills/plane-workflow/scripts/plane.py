@@ -16,10 +16,12 @@ Subcommands:
     list-cycle <cycle-name>         List items in a named cycle.
     search <query>                  Substring search across name + description.
 
-    create-issue --name N [--priority P] [--state-name S] [--cycle C]
-                 [--labels L1,L2,...] [--description-md PATH | --description STR]
+    create-issue --name N --labels L1,L2[,...] [--priority P] [--state-name S]
+                 [--cycle C] [--description-md PATH | --description STR]
                  [--assignee me|UUID]
-                 Create a work item. Prints sequence_id (WEFT-N) + UUID.
+                 Create a work item. --labels is REQUIRED and must satisfy
+                 the two-label rule (workstream + finding-type; WEFT-682).
+                 Prints sequence_id (WEFT-N) + UUID.
 
     add-to-cycle <cycle-name> <issue-id>...
                  Add one or more issue UUIDs to a cycle.
@@ -38,9 +40,10 @@ Subcommands:
     comment <issue-id|WEFT-N> [--body-md PATH | --body STR]
                  Post a comment on a work item.
 
-    check                           Validate label coverage + cycle assignment
-                                    + acceptance-criteria presence on all
-                                    audit-finding work items.
+    check [--scope open|audit|all] [--require-ac|--no-require-ac]
+                                    Validate the two-label rule (workstream +
+                                    finding-type) and optional acceptance-
+                                    criteria presence. Default scope=open.
 
 ids.json (sibling references/ dir) is the cached UUID source-of-truth.
 labels.json is the canonical label set.
@@ -333,6 +336,73 @@ def md_to_stripped(md: str) -> str:
 
 def split_csv(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def load_label_catalog() -> tuple[set[str], set[str]]:
+    """Return (workstream_names, finding_type_names) from labels.json.
+
+    Finding-type includes every entry under labels.json `finding_type`
+    (bug/gap/stub/… plus audit-finding, security, performance, etc.).
+    Workstream names are every entry under `workstream` (ws01-…, ws18-…).
+    """
+    canon = json.loads(LABELS_FILE.read_text())
+    workstream = {s["name"] for s in canon.get("workstream", [])}
+    finding = {s["name"] for s in canon.get("finding_type", [])}
+    return workstream, finding
+
+
+# Workstream slug pattern used when a label is present in ids.json.labels
+# but not yet mirrored into labels.json (e.g. newly created in Plane).
+_WS_SLUG_RE = re.compile(r"^ws\d{2}-[\w-]+$")
+
+
+def classify_labels(names: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Split label names into (workstream_hits, finding_type_hits)."""
+    workstream_canon, finding_canon = load_label_catalog()
+    ws: list[str] = []
+    ft: list[str] = []
+    for n in names:
+        if n in workstream_canon or _WS_SLUG_RE.match(n):
+            ws.append(n)
+        if n in finding_canon:
+            ft.append(n)
+    return ws, ft
+
+
+def validate_two_label_rule(label_names: list[str], *, context: str = "") -> None:
+    """Enforce the two-label rule: ≥1 workstream + ≥1 finding-type.
+
+    Raises PlaneError with a clear fix hint when the set is incomplete.
+    This is the durable gate that replaced the triage-only discipline
+    (WEFT-682): ad-hoc create-issue paths must pass the same bar as
+    batch audit triage.
+    """
+    names = [n for n in label_names if n]
+    prefix = f"{context}: " if context else ""
+    if not names:
+        raise PlaneError(
+            f"{prefix}two-label rule violated: --labels is required. "
+            "Pass at least one workstream (wsNN-*) and one finding-type "
+            "(bug|gap|stub|orphan|governance|tech-debt|docs|tests|tooling|"
+            "security|performance|ruv-integration|audit-finding|…). "
+            "See plane-workflow SKILL.md §5.1 / labels.json."
+        )
+    ws, ft = classify_labels(names)
+    problems: list[str] = []
+    if not ws:
+        problems.append(
+            "missing workstream label (ws01-core … ws18-firmware; see labels.json)"
+        )
+    if not ft:
+        problems.append(
+            "missing finding-type label (bug|gap|stub|orphan|governance|"
+            "tech-debt|docs|tests|tooling|security|performance|…)"
+        )
+    if problems:
+        raise PlaneError(
+            f"{prefix}two-label rule violated for labels={names}: "
+            + "; ".join(problems)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -692,13 +762,18 @@ def cmd_create_issue(args) -> None:
     elif args.description:
         desc_md = args.description
 
+    # WEFT-682: refuse unlabeled / one-sided creates. Labels are required
+    # at the creation path so ad-hoc item filing cannot skip the two-label
+    # rule that used to live only in the triage protocol.
+    label_names = split_csv(args.labels) if args.labels else []
+    validate_two_label_rule(label_names, context="create-issue")
+
     payload: dict[str, Any] = {"name": args.name}
     if args.priority:
         payload["priority"] = args.priority
     if args.state_name:
         payload["state"] = get_state_id(ids, args.state_name)
-    if args.labels:
-        payload["labels"] = get_label_ids(ids, split_csv(args.labels))
+    payload["labels"] = get_label_ids(ids, label_names)
     if args.assignee:
         payload["assignees"] = [_resolve_user(ids, args.assignee)]
     if desc_md:
@@ -720,6 +795,7 @@ def cmd_create_issue(args) -> None:
         "id": issue["id"],
         "name": issue["name"],
         "cycle": args.cycle,
+        "labels": label_names,
     }, indent=2))
 
 
@@ -839,43 +915,90 @@ def cmd_comment(args) -> None:
     print(f"commented on {args.issue_id} ({issue_id})")
 
 
-def cmd_check(_args) -> None:
-    ids = load_ids()
-    audit_label = ids["labels"].get("audit-finding")
-    fail = 0
-    for i in paginate("/issues/?expand=labels,state"):
-        labels = i.get("labels") or []
-        # `labels` here is a list of UUIDs (string), not objects, on /issues/
-        if audit_label and audit_label not in labels:
-            continue
-        wsslug = next((l for l in labels if isinstance(l, str)), None)
-        # We can't dereference label name from UUID here without a cache lookup.
-        ws_names = [n for n, uuid in ids["labels"].items() if uuid in labels]
-        ws_match = any(n.startswith("ws") for n in ws_names)
-        finding_match = any(
-            n in {"bug", "stub", "gap", "orphan", "governance",
-                   "tech-debt", "docs", "tests", "tooling", "security",
-                   "performance"}
-            for n in ws_names
-        )
-        desc = (i.get("description_stripped") or "").lower()
-        ac_present = "acceptance criteria" in desc
+def cmd_check(args) -> None:
+    """Validate two-label coverage (+ optional AC) on work items.
 
-        problems = []
-        if not ws_match:
+    Default scope is *open* items (Backlog / Todo / In Progress). Pass
+    ``--scope audit`` to restrict to ``audit-finding`` items (legacy
+    behaviour), or ``--scope all`` to include Done/Cancelled.
+
+    Two-label coverage is always checked. Acceptance-criteria presence
+    defaults on for ``open``/``audit``; override with ``--require-ac`` /
+    ``--no-require-ac``.
+    """
+    ids = load_ids()
+    label_by_id = {uuid: name for name, uuid in (ids.get("labels") or {}).items()}
+    state_by_id = {
+        v["id"]: {"name": k, "group": v.get("group", "")}
+        for k, v in (ids.get("states") or {}).items()
+    }
+    audit_label = (ids.get("labels") or {}).get("audit-finding")
+    scope = getattr(args, "scope", "open") or "open"
+
+    if getattr(args, "no_require_ac", False):
+        require_ac = False
+    elif getattr(args, "require_ac_flag", False):
+        require_ac = True
+    else:
+        # defaults: open/audit want AC; all does not (closed historical items)
+        require_ac = scope in ("open", "audit")
+
+    fail = 0
+    checked = 0
+    for i in paginate("/issues/?expand=labels,state"):
+        raw_labels = i.get("labels") or []
+        # labels may be UUIDs (str) or expanded objects
+        label_ids: list[str] = []
+        for l in raw_labels:
+            if isinstance(l, dict):
+                label_ids.append(l.get("id") or l.get("name") or "")
+            else:
+                label_ids.append(str(l))
+        label_ids = [x for x in label_ids if x]
+
+        state_info = i.get("state")
+        if isinstance(state_info, dict):
+            state_group = state_info.get("group") or ""
+            state_name = state_info.get("name") or ""
+        else:
+            sid = state_info if isinstance(state_info, str) else ""
+            meta = state_by_id.get(sid, {})
+            state_group = meta.get("group", "")
+            state_name = meta.get("name", "")
+
+        if scope == "audit":
+            if not audit_label or audit_label not in label_ids:
+                continue
+        elif scope == "open":
+            if state_group in ("completed", "cancelled"):
+                continue
+        # scope == "all": no filter
+
+        checked += 1
+        # Resolve UUIDs → names; keep unknown UUIDs as-is for diagnosis
+        names = [label_by_id.get(lid, lid) for lid in label_ids]
+        ws_hits, ft_hits = classify_labels(names)
+
+        problems: list[str] = []
+        if not ws_hits:
             problems.append("missing ws-label")
-        if not finding_match:
+        if not ft_hits:
             problems.append("missing finding-type label")
-        if not ac_present:
-            problems.append("missing AC section")
+        if require_ac:
+            desc = (i.get("description_stripped") or "").lower()
+            if "acceptance criteria" not in desc:
+                problems.append("missing AC section")
 
         if problems:
             fail += 1
-            print(f"WEFT-{i['sequence_id']}  {i['name']}: {', '.join(problems)}")
+            print(
+                f"WEFT-{i['sequence_id']}  [{state_name or state_group or '?'}]  "
+                f"{i['name']}: {', '.join(problems)}"
+            )
     if fail == 0:
-        print("check: clean")
+        print(f"check: clean ({checked} item(s) under scope={scope})")
     else:
-        print(f"check: {fail} item(s) need attention")
+        print(f"check: {fail}/{checked} item(s) need attention (scope={scope})")
         sys.exit(1)
 
 
@@ -897,16 +1020,34 @@ def cmd_batch_create(args) -> None:
         if not name:
             failures.append(("<no-name>", "missing 'name' field"))
             continue
+        # WEFT-682: validate labels even on --dry-run so a bad batch is
+        # rejected before any network write.
+        labels = spec.get("labels") or []
+        try:
+            if not isinstance(labels, list):
+                raise PlaneError(
+                    f"labels must be a list, got {type(labels).__name__}"
+                )
+            validate_two_label_rule(labels, context=f"batch-create[{i}]")
+        except PlaneError as e:
+            failures.append((name, str(e)))
+            print(
+                f"  [{i:>3}/{len(items)}] FAIL {name[:60]}: {str(e)[:120]}",
+                file=sys.stderr,
+            )
+            continue
         if args.dry_run:
-            print(f"  [{i:>3}/{len(items)}] DRY would create: {name}")
+            print(
+                f"  [{i:>3}/{len(items)}] DRY would create: {name} "
+                f"labels={labels}"
+            )
             continue
         try:
             payload: dict[str, Any] = {"name": name}
             if spec.get("priority"):
                 payload["priority"] = spec["priority"]
             payload["state"] = get_state_id(ids, spec.get("state_name", "Todo"))
-            if spec.get("labels"):
-                payload["labels"] = get_label_ids(ids, spec["labels"])
+            payload["labels"] = get_label_ids(ids, labels)
             if spec.get("description_md"):
                 payload["description_html"] = md_to_html(spec["description_md"])
                 payload["description_stripped"] = md_to_stripped(spec["description_md"])
@@ -960,12 +1101,23 @@ def main(argv: list[str]) -> int:
     sr.add_argument("query")
     sr.set_defaults(func=cmd_search)
 
-    ci = sub.add_parser("create-issue")
+    ci = sub.add_parser(
+        "create-issue",
+        help="Create a work item (requires --labels with workstream + finding-type)",
+    )
     ci.add_argument("--name", required=True)
     ci.add_argument("--priority", choices=["urgent", "high", "medium", "low", "none"])
     ci.add_argument("--state-name", default="Todo")
     ci.add_argument("--cycle")
-    ci.add_argument("--labels")
+    ci.add_argument(
+        "--labels",
+        required=True,
+        help=(
+            "Comma-separated labels. TWO-LABEL RULE (WEFT-682): at least one "
+            "workstream (wsNN-*) AND one finding-type (bug|gap|stub|orphan|"
+            "governance|tech-debt|docs|tests|tooling|security|performance|…)."
+        ),
+    )
     ci.add_argument("--assignee")
     ci.add_argument("--description")
     ci.add_argument("--description-md")
@@ -1003,12 +1155,38 @@ def main(argv: list[str]) -> int:
     co.add_argument("--body-md")
     co.set_defaults(func=cmd_comment)
 
-    sub.add_parser("check").set_defaults(func=cmd_check)
+    ck = sub.add_parser(
+        "check",
+        help="Validate two-label coverage (+ AC) on work items (WEFT-682)",
+    )
+    ck.add_argument(
+        "--scope",
+        choices=["open", "audit", "all"],
+        default="open",
+        help=(
+            "Which items to validate: open (default, non-Done/Cancelled), "
+            "audit (audit-finding only), all (every item)."
+        ),
+    )
+    ck.add_argument(
+        "--require-ac",
+        dest="require_ac_flag",
+        action="store_true",
+        help="Require an 'Acceptance criteria' section in the description.",
+    )
+    ck.add_argument(
+        "--no-require-ac",
+        dest="no_require_ac",
+        action="store_true",
+        help="Skip acceptance-criteria presence checks (label coverage only).",
+    )
+    ck.set_defaults(func=cmd_check)
 
     bc = sub.add_parser("batch-create")
     bc.add_argument("spec_files", nargs="+",
                     help="JSON files, each a list of "
-                         "{name, priority, cycle, labels, description_md}")
+                         "{name, priority, cycle, labels, description_md}. "
+                         "labels MUST satisfy the two-label rule (WEFT-682).")
     bc.add_argument("--dry-run", action="store_true")
     bc.add_argument("--map-out",
                     help="Write a {name → WEFT-N} JSON map to this path.")

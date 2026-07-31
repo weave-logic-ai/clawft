@@ -46,13 +46,19 @@ curl -sf -H "$H_AUTH" "$BASE/issues/?per_page=100" | jq '.results[] | {id, seque
 
 ## Create work item
 
+**Two-label rule (WEFT-682).** Prefer `scripts/plane.sh create-issue`
+— it refuses creates that lack both a workstream (`wsNN-*`) and a
+finding-type label. Raw curl / MCP bypasses the gate; if you must use
+them, still send both label UUIDs. `scripts/plane.sh check` fails the
+board on gaps.
+
 ```bash
 curl -sf -H "$H_AUTH" -H "$H_JSON" -X POST "$BASE/issues/" -d '{
   "name": "ws05: Email channel — implement IMAP poll loop",
   "description_html": "<p>Body in HTML. The wrapper does MD→HTML for you.</p>",
   "priority": "high",
   "state": "76d8ee2a-0afd-4359-bf45-7ddd64a59d6f",
-  "labels": ["<ws05-uuid>", "<audit-finding-uuid>"]
+  "labels": ["<ws05-uuid>", "<gap-or-audit-finding-uuid>"]
 }' | jq
 ```
 
