@@ -1,0 +1,71 @@
+# Fusion Graph ViewSpec fixture — room identity (evaluate-only champion baseline)
+# ADR-095/096/097 · WEFT-727 · docs/research/graph-views.md F1–F10
+#
+# This is a *policy fixture*, not live sensor wiring. Mutations go through
+# MetaHarness flywheel evaluate → receipt → promote (never silent edit of
+# production champion without receipt).
+
+schema_version: 1
+view_id: room-12-identity
+purpose: multi-cam / multi-session object identity for a single room volume
+materialization: incremental_hot
+status: fixture
+plane: WEFT-727
+
+caps:
+  max_nodes: 200000
+  max_edges: 2000000
+  max_soft_edges_per_node: 8
+  window:
+    max_age_hours: 168
+    max_live_events: 500000
+
+sources:
+  - kind: bvh
+    id: bvh-room-region
+    filter:
+      region_id: room-12
+      tags: [WM_OBJECT, WM_SURFACE, WM_VOLUME]
+    live: false
+  - kind: sensor_stream
+    id: co_observe
+    topic: co_observe
+    live: true
+    window:
+      max_edges: 500000
+  - kind: sensor_stream
+    id: track_continuity
+    topic: tracks
+    live: true
+  - kind: vector
+    id: visual_soft
+    index_id: VISUAL_FEATURES
+    soft_edge:
+      k: 8
+      min_score: 0.82
+  - kind: structure_extract
+    id: wm_partition
+    path: world_model.json
+    live: false
+
+hot_fuse:
+  admit_edge_kinds: [co_observe, track_link, soft_similar, human_confirm]
+  require_spatial_or_track: true
+
+batch:
+  enabled_when: ram_cliff_or_ops
+  algorithms: [wcc]
+  write_back: [component_id]
+
+promote:
+  target: bvh_object_leaves
+  min_confidence: 0.7
+  require_chain_event: true
+  # Changing these thresholds is a governance event (ADR-097)
+
+acl:
+  inherit: substrate
+  note: View must not expose edges principal cannot read from any source
+
+provenance:
+  required_fields: [source_system, observed_at, confidence]

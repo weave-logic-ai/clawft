@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "kind": "weftos-flywheel-anchor-manifest",
+  "plane": "WEFT-727",
+  "mode": "evaluate_only",
+  "note": "Anchors are never optimized against. Promotion requires confirm=true + keys (ADR-096).",
+  "anchors": [
+    {
+      "id": "fusion-identity-room12",
+      "path": "anchors/fusion-identity.json",
+      "description": "Room-12 identity ViewSpec structural checks + policy invariants"
+    },
+    {
+      "id": "governance-no-silent-promote",
+      "path": "anchors/governance-no-silent-promote.json",
+      "description": "Ensure promote path remains explicit (no auto champion swap)"
+    }
+  ],
+  "related": [
+    "config/views/room-12-identity.yaml",
+    "docs/research/graph-views.md",
+    "docs/adr/adr-096-metaharness-foundation.md",
+    "docs/adr/adr-097-metaharness-data-governance.md"
+  ]
+}
