@@ -406,7 +406,10 @@ mod tests {
         // Source: 200ms of -20 dBFS sine at 16 kHz mono.
         // Classifier with default -45 dB threshold → should emit speech.
         let substrate = SubstrateService::new();
-        let cfg = ClassifierServiceConfig::for_test("n-daemon", "n-bfc4cd");
+        // ADR-057: sensor/** is deny-by-default; subscriber must be the
+        // owning node (or scope:admin). Use the same node id for service
+        // and source so tests exercise the happy path without grants.
+        let cfg = ClassifierServiceConfig::for_test("n-bfc4cd", "n-bfc4cd");
         let input_path = cfg.input_path.clone();
         let output_path = cfg.output_path.clone();
         let actor = cfg.node_id.clone();
@@ -450,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn end_to_end_publishes_silence_for_zero_chunk() {
         let substrate = SubstrateService::new();
-        let cfg = ClassifierServiceConfig::for_test("n-daemon", "n-bfc4cd");
+        let cfg = ClassifierServiceConfig::for_test("n-bfc4cd", "n-bfc4cd");
         let input_path = cfg.input_path.clone();
         let output_path = cfg.output_path.clone();
         let actor = cfg.node_id.clone();
@@ -475,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_service_drops_chunks_no_publish() {
         let substrate = SubstrateService::new();
-        let mut cfg = ClassifierServiceConfig::for_test("n-daemon", "n-bfc4cd");
+        let mut cfg = ClassifierServiceConfig::for_test("n-bfc4cd", "n-bfc4cd");
         cfg.service_enabled = Arc::new(AtomicBool::new(false));
         let input_path = cfg.input_path.clone();
         let output_path = cfg.output_path.clone();
@@ -497,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_source_drops_chunks_no_publish() {
         let substrate = SubstrateService::new();
-        let mut cfg = ClassifierServiceConfig::for_test("n-daemon", "n-bfc4cd");
+        let mut cfg = ClassifierServiceConfig::for_test("n-bfc4cd", "n-bfc4cd");
         cfg.source_enabled = Arc::new(AtomicBool::new(false));
         let input_path = cfg.input_path.clone();
         let output_path = cfg.output_path.clone();
