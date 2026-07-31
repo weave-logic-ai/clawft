@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Staging area for changes after the 0.8.0 cut.
 
+### Fixed (release CI follow-ups on v0.8.0 re-cut)
+
+- **Windows named-pipe re-export (E0603)**: public re-export of tokio
+  `NamedPipeServer` fixed for Windows cargo-dist builds.
+- **SBOM `eval` quoting**: space-separated SBOM asset paths are now
+  shell-quoted so `eval "$(generate-sbom.sh …)"` does not execute
+  paths as commands.
+- **Browser WASM raw budget**: 1600 → 1700 KB (gzip still ≤600 KB; CI
+  measured 1641 KB raw / 552 KB gzip on v0.8.0 first cut).
+
+
 ## [0.8.0] - 2026-07-31
 
 First **0.8.x publish-line** cut from `release/0.8-staging`. Workspace

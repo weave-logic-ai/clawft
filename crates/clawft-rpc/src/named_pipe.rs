@@ -45,7 +45,11 @@ mod imp {
     use std::io;
     use std::path::Path;
 
-    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    // Re-export the real tokio type at this module boundary so
+    // `pub use imp::NamedPipeServer` is a public type, not a private
+    // import re-export (E0603 on recent rustc / tokio 1.53).
+    pub use tokio::net::windows::named_pipe::NamedPipeServer;
+    use tokio::net::windows::named_pipe::ServerOptions;
 
     use super::pipe_name;
 

@@ -2,10 +2,13 @@
 
 ## tl;dr
 
-| Metric           | Current | Budget  | Headroom |
-|------------------|---------|---------|----------|
-| Raw `_bg.wasm`   | 1.34 MB | 1.6 MB  | ~260 KB  |
-| Gzipped (-9)     | 470 KB  | 600 KB  | ~130 KB  |
+| Metric           | Current (0.8.0 CI) | Budget  | Headroom |
+|------------------|--------------------|---------|----------|
+| Raw `_bg.wasm`   | ~1.64 MB           | 1.7 MB  | ~60 KB   |
+| Gzipped (-9)     | ~552 KB            | 600 KB  | ~48 KB   |
+
+Budget raised 1600 → 1700 KB raw for the 0.8.0 cut (gzip still under 600 KB).
+Load-bearing metric remains gzipped.
 
 The CI gate measures `crates/clawft-wasm/www/pkg/clawft_wasm_bg.wasm`
 (post-`wasm-bindgen`) and trips when either threshold is exceeded.

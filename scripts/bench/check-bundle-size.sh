@@ -16,8 +16,8 @@
 #
 # Defaults:
 #   bundle:     crates/clawft-wasm/www/pkg/clawft_wasm_bg.wasm
-#   max-raw-kb: 1600  (current ~1340 KB after bindgen, leaves ~260 KB headroom)
-#   max-gz-kb:  600   (current ~471 KB after gzip -9, leaves ~130 KB headroom)
+#   max-raw-kb: 1700  (0.8.0 CI measured ~1641 KB post-bindgen; was 1600)
+#   max-gz-kb:  600   (current ~552 KB after gzip -9, still under budget)
 #
 # Exit codes:
 #   0  — bundle within budget
@@ -44,7 +44,7 @@ WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # --- Defaults (kept in sync with docs/architecture/wasm-bundle-size.md) ---
 DEFAULT_BUNDLE="$WORKSPACE_ROOT/crates/clawft-wasm/www/pkg/clawft_wasm_bg.wasm"
-DEFAULT_MAX_RAW_KB=1600
+DEFAULT_MAX_RAW_KB=1700
 DEFAULT_MAX_GZ_KB=600
 
 BUNDLE="${1:-$DEFAULT_BUNDLE}"

@@ -266,12 +266,15 @@ PY
     fi
   done
 
-  echo "out_dir=${abs_out}"
-  echo "primary=${primary}"
-  echo "assets=${assets_joined}"
-  echo "sha256sums=${sums}"
-  echo "workspace_version=${ws_ver}"
-  echo "tag=${tag}"
+  # Quote values for safe `eval "$(…)"` in CI. Unquoted space-separated
+  # assets=a b c makes bash try to execute `b` and `c` (Permission denied
+  # on .cdx.json during Release SBOM on v0.8.0).
+  printf "out_dir=%q\n" "${abs_out}"
+  printf "primary=%q\n" "${primary}"
+  printf "assets=%q\n" "${assets_joined}"
+  printf "sha256sums=%q\n" "${sums}"
+  printf "workspace_version=%q\n" "${ws_ver}"
+  printf "tag=%q\n" "${tag}"
 }
 
 main() {
