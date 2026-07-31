@@ -4,10 +4,11 @@
 //!
 //! * **In-memory** (default) — `HashMap`-backed store. Files live only for the
 //!   lifetime of the [`BrowserFileSystem`] instance and do not survive reloads.
-//! * **OPFS** (`browser-opfs` feature) — Origin Private File System via
-//!   `navigator.storage.getDirectory()` and web-sys `FileSystem*Handle`
-//!   bindings (stable since web-sys **0.3.70**; verified on **0.3.85**). When
-//!   OPFS is unavailable at runtime the constructor falls back to memory.
+//! * **OPFS** (`browser-opfs` feature; WEFT-13 / WEFT-392) — Origin Private
+//!   File System via `navigator.storage.getDirectory()` and web-sys
+//!   `FileSystem*Handle` bindings (stable since web-sys **0.3.70**; verified
+//!   on **0.3.85**). When OPFS is unavailable at runtime the constructor falls
+//!   back to memory.
 //!
 //! ## Virtual path layout (WEFT-392 home_dir collision)
 //!
@@ -50,7 +51,7 @@ pub struct BrowserFileSystem {
 
 enum BrowserFsInner {
     Memory(MemoryStore),
-    #[cfg(feature = "browser-opfs")]
+    #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
     Opfs(opfs::OpfsStore),
 }
 
@@ -74,17 +75,19 @@ impl BrowserFileSystem {
     pub fn backend(&self) -> BrowserFsBackend {
         match &self.inner {
             BrowserFsInner::Memory(_) => BrowserFsBackend::Memory,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(_) => BrowserFsBackend::Opfs,
         }
     }
 
     /// Open the best available backend.
     ///
-    /// * With `browser-opfs`: try OPFS; on failure fall back to memory.
+    /// * With `browser-opfs` on **wasm32**: try OPFS; on failure fall back to memory.
+    /// * Host (non-wasm) builds never call into `web_sys` — always memory
+    ///   (OPFS is a browser runtime API).
     /// * Without the feature: always memory (same as [`new`]).
     pub async fn open() -> Self {
-        #[cfg(feature = "browser-opfs")]
+        #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
         {
             match opfs::OpfsStore::open().await {
                 Ok(store) => {
@@ -292,7 +295,7 @@ impl FileSystem for BrowserFileSystem {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.read_to_string(path).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.read_to_string(path).await,
         }
     }
@@ -300,7 +303,7 @@ impl FileSystem for BrowserFileSystem {
     async fn write_string(&self, path: &Path, content: &str) -> std::io::Result<()> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.write_string(path, content).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.write_string(path, content).await,
         }
     }
@@ -308,7 +311,7 @@ impl FileSystem for BrowserFileSystem {
     async fn append_string(&self, path: &Path, content: &str) -> std::io::Result<()> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.append_string(path, content).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.append_string(path, content).await,
         }
     }
@@ -316,7 +319,7 @@ impl FileSystem for BrowserFileSystem {
     async fn exists(&self, path: &Path) -> bool {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.exists(path).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.exists(path).await,
         }
     }
@@ -324,7 +327,7 @@ impl FileSystem for BrowserFileSystem {
     async fn list_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.list_dir(path).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.list_dir(path).await,
         }
     }
@@ -332,7 +335,7 @@ impl FileSystem for BrowserFileSystem {
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.create_dir_all(path).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.create_dir_all(path).await,
         }
     }
@@ -340,7 +343,7 @@ impl FileSystem for BrowserFileSystem {
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.remove_file(path).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.remove_file(path).await,
         }
     }
@@ -353,17 +356,17 @@ impl FileSystem for BrowserFileSystem {
     async fn metadata(&self, path: &Path) -> std::io::Result<FsMetadata> {
         match &self.inner {
             BrowserFsInner::Memory(s) => s.metadata(path).await,
-            #[cfg(feature = "browser-opfs")]
+            #[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
             BrowserFsInner::Opfs(s) => s.metadata(path).await,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// OPFS backend (feature-gated)
+// OPFS backend (feature-gated; wasm32 browser only)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "browser-opfs")]
+#[cfg(all(feature = "browser-opfs", target_arch = "wasm32"))]
 mod opfs {
     use super::normalize;
     use crate::fs::FsMetadata;

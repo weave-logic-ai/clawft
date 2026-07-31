@@ -228,15 +228,15 @@ pub fn default_metrics_dir() -> Option<PathBuf> {
 fn dirs_home() -> Option<PathBuf> {
     // Avoid a hard `dirs` dependency in clawft-plugin: use std env vars
     // that match dirs::home_dir on the platforms we ship.
-    if let Ok(h) = std::env::var("HOME") {
-        if !h.is_empty() {
-            return Some(PathBuf::from(h));
-        }
+    if let Ok(h) = std::env::var("HOME")
+        && !h.is_empty()
+    {
+        return Some(PathBuf::from(h));
     }
-    if let Ok(h) = std::env::var("USERPROFILE") {
-        if !h.is_empty() {
-            return Some(PathBuf::from(h));
-        }
+    if let Ok(h) = std::env::var("USERPROFILE")
+        && !h.is_empty()
+    {
+        return Some(PathBuf::from(h));
     }
     None
 }
@@ -291,14 +291,14 @@ pub fn record_plugin_invocation(
 ) -> PluginMetrics {
     let snapshot =
         global_plugin_metrics().record(plugin_name, fuel_consumed, memory_peak_bytes, duration_ms);
-    if let Some(dir) = default_metrics_dir() {
-        if let Err(e) = save_metrics(&dir, &snapshot) {
-            tracing::warn!(
-                plugin = plugin_name,
-                error = %e,
-                "failed to persist plugin metrics"
-            );
-        }
+    if let Some(dir) = default_metrics_dir()
+        && let Err(e) = save_metrics(&dir, &snapshot)
+    {
+        tracing::warn!(
+            plugin = plugin_name,
+            error = %e,
+            "failed to persist plugin metrics"
+        );
     }
     snapshot
 }

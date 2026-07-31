@@ -8,12 +8,12 @@ how it differs from the native platform.
 | Aspect | Native (`wasm32-wasip1` / host) | Browser (`wasm32-unknown-unknown`) |
 |--------|--------------------------------|-----------------------------------|
 | HTTP | `reqwest` (native TLS) | `web_sys::fetch` (browser fetch API) |
-| Filesystem | `std::fs` / `tokio::fs` | In-memory `HashMap`, or OPFS with `--features browser-opfs` (WEFT-392) |
-| Environment | `std::env` | In-memory `HashMap` |
+| Filesystem | `std::fs` / `tokio::fs` | In-memory `HashMap`, or OPFS with `--features browser-opfs` (WEFT-13 / WEFT-392) |
+| Environment | `std::env` | In-memory `HashMap`, or OPFS snapshot at `/clawft/.clawft/env.json` with `browser-opfs` (WEFT-14) |
 | Process spawning | `std::process::Command` | Not available |
 | Async runtime | `tokio` (multi-threaded) | `wasm-bindgen-futures` (single-threaded) |
 | Networking | Direct TCP/TLS | CORS-constrained fetch |
-| Persistence | Disk files | OPFS when `browser-opfs` enabled (else session-only memory) |
+| Persistence | Disk files | OPFS when `browser-opfs` enabled (FS + env); else session-only memory |
 | Binary format | Native ELF/Mach-O/PE | `.wasm` loaded by browser |
 | Entry point | `fn main()` in `clawft-cli` | `init()` / `send_message()` via wasm-bindgen |
 | Size | ~20 MB (release, stripped) | < 300 KB target (wasm-opt) |
@@ -94,19 +94,20 @@ Feature: "browser"
           +-- BrowserPlatform
           |     +-- BrowserHttpClient (web_sys::fetch)
           |     +-- BrowserFileSystem (in-memory default)
-          |     +-- BrowserEnvironment (in-memory)
+          |     +-- BrowserEnvironment (in-memory default)
           +-- Platform trait: async_trait(?Send)
 
-Feature: "browser-opfs" (optional sub-feature of browser; WEFT-392)
+Feature: "browser-opfs" (optional sub-feature of browser; WEFT-13 / WEFT-14 / WEFT-392)
     |
     +-- clawft-platform/browser-opfs
     |     +-- BrowserFileSystem::open() → OPFS via navigator.storage.getDirectory()
+    |     +-- BrowserEnvironment::open() → same OPFS, snapshot at /clawft/.clawft/env.json
     |     +-- Runtime fallback to in-memory if OPFS API missing / non-secure context
     |     +-- Virtual home: /clawft  (workspace: /clawft/workspace, config: /clawft/.clawft/…)
     +-- clawft-tools/browser-opfs  (propagates platform feature)
-    +-- clawft-wasm/browser-opfs   (init() uses BrowserPlatform::with_env_arc_open)
+    +-- clawft-wasm/browser-opfs   (init() uses env open_with_seed + with_env_arc_open)
 
-### web-sys OPFS requirements (WEFT-392)
+### web-sys OPFS requirements (WEFT-13 / WEFT-392)
 
 OPFS bindings are **stable** in web-sys (no `web_sys_unstable_apis` cfg):
 

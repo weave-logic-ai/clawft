@@ -3967,7 +3967,7 @@
       "id": "ffc11e67-d260-410f-95c5-619da2ad7cf2",
       "sequence_id": 598,
       "name": "ws09: Dependabot \u2014 triage 142 npm-side vulnerabilities (5 critical/41 high)",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws09-clawft-dashboard",
@@ -17191,7 +17191,7 @@
       "id": "59ab0b0f-175c-4eba-bb02-2ff3e01421b8",
       "sequence_id": 217,
       "name": "ws10: EchoCanceller and NoiseSuppressor \u2014 replace deceptive passthroughs with real DSP",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws10-voice",
@@ -18839,7 +18839,7 @@
       "id": "9e278eeb-007a-44b6-a60f-d317defd6f58",
       "sequence_id": 170,
       "name": "ws05: PluginHost C7 unification \u2014 migrate Telegram/Discord/Slack to ChannelAdapter",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws05-channels",
@@ -20073,7 +20073,7 @@
       "id": "55e62398-8ef2-42f9-afe9-3fa1dfe98fd3",
       "sequence_id": 135,
       "name": "ws02: workspace \u2014 clean ~150 clippy errors (pre-existing debt)",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws02-kernel",
@@ -24360,7 +24360,7 @@
       "id": "06c1634e-08ce-4802-935e-d1516acfc141",
       "sequence_id": 14,
       "name": "ws01: platform \u2014 land OPFS-or-equivalent BrowserEnvironment persistence",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "low",
       "labels": [
         "ws01-core",
@@ -24395,7 +24395,7 @@
       "id": "f60f4c52-5a48-46f5-a658-3112e15648d3",
       "sequence_id": 13,
       "name": "ws01: platform \u2014 implement OPFS-backed BrowserFileSystem persistence",
-      "state": "Todo",
+      "state": "In Progress",
       "priority": "medium",
       "labels": [
         "ws01-core",

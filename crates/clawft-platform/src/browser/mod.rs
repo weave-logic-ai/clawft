@@ -5,8 +5,9 @@
 //!
 //! - [`BrowserHttpClient`] -- HTTP via the fetch API ([`web_sys`]).
 //! - [`BrowserFileSystem`] -- In-memory filesystem, or OPFS when built with
-//!   the `browser-opfs` feature (WEFT-392).
-//! - [`BrowserEnvironment`] -- In-memory key-value environment variables.
+//!   the `browser-opfs` feature (WEFT-13 / WEFT-392).
+//! - [`BrowserEnvironment`] -- In-memory env vars, optionally persisted to
+//!   OPFS under the same feature (WEFT-14).
 //!
 //! Process spawning is not available in WASM, so
 //! [`Platform::process`](crate::Platform::process) returns `None`.
@@ -15,7 +16,9 @@ pub mod env;
 pub mod fs;
 pub mod http;
 
-pub use env::BrowserEnvironment;
+pub use env::{
+    BrowserEnvBackend, BrowserEnvironment, ENV_PERSIST_PATH,
+};
 pub use fs::{
     BrowserFileSystem, BrowserFsBackend, BROWSER_HOME_DIR, BROWSER_WORKSPACE_DIR,
 };
@@ -34,15 +37,20 @@ use crate::Platform;
 ///
 /// - HTTP via the browser fetch API.
 /// - A filesystem: in-memory by default, or OPFS when constructed via
-///   [`BrowserPlatform::open`] / [`BrowserPlatform::with_env_arc_and_fs`]
+///   [`BrowserPlatform::open`] / [`BrowserPlatform::with_env_arc_open`]
 ///   under the `browser-opfs` feature (falls back to memory if OPFS is
 ///   unavailable).
-/// - An in-memory environment variable store.
+/// - An environment store: memory by default, or OPFS-backed snapshot at
+///   [`ENV_PERSIST_PATH`] when opened via [`BrowserPlatform::open`] /
+///   [`BrowserEnvironment::open`] (WEFT-14).
 /// - No process spawning capability.
 ///
 /// The environment is held behind an [`Arc`] so callers (e.g. the
 /// browser WASM `set_env` entry point) can retain a live handle after
 /// the platform is moved into the agent loop (WEFT-391).
+///
+/// [`Platform::env`] remains a **sync** accessor (same as native); async
+/// work lives on [`BrowserEnvironment::open`] / [`BrowserEnvironment::flush`].
 pub struct BrowserPlatform {
     http: BrowserHttpClient,
     fs: BrowserFileSystem,
@@ -59,15 +67,16 @@ impl BrowserPlatform {
         }
     }
 
-    /// Open a platform preferring OPFS when `browser-opfs` is enabled.
+    /// Open a platform preferring OPFS for filesystem **and** environment
+    /// when `browser-opfs` is enabled.
     ///
-    /// Falls back to the in-memory filesystem if OPFS is unavailable.
+    /// Falls back to in-memory stores if OPFS is unavailable.
     /// Without the feature this is equivalent to [`new`].
     pub async fn open() -> Self {
         Self {
             http: BrowserHttpClient::new(),
             fs: BrowserFileSystem::open().await,
-            env: Arc::new(BrowserEnvironment::new()),
+            env: Arc::new(BrowserEnvironment::open().await),
         }
     }
 
@@ -97,6 +106,9 @@ impl BrowserPlatform {
 
     /// Like [`with_env_arc`], but opens the best available filesystem
     /// backend (OPFS when `browser-opfs` is enabled).
+    ///
+    /// The provided `env` is used as-is (already opened / seeded by the
+    /// caller — e.g. wasm `init` via [`BrowserEnvironment::open_with_seed`]).
     pub async fn with_env_arc_open(env: Arc<BrowserEnvironment>) -> Self {
         Self {
             http: BrowserHttpClient::new(),
@@ -114,7 +126,7 @@ impl BrowserPlatform {
         }
     }
 
-    /// Shared handle to the live in-memory environment (WEFT-391).
+    /// Shared handle to the live environment (WEFT-391).
     ///
     /// Cloning the [`Arc`] lets the browser WASM runtime mutate env vars
     /// via `set_env` after this platform is owned by `AgentLoop`.
@@ -122,9 +134,14 @@ impl BrowserPlatform {
         Arc::clone(&self.env)
     }
 
-    /// Which filesystem backend is active (WEFT-392).
+    /// Which filesystem backend is active (WEFT-13 / WEFT-392).
     pub fn fs_backend(&self) -> BrowserFsBackend {
         self.fs.backend()
+    }
+
+    /// Which environment durability backend is active (WEFT-14).
+    pub fn env_backend(&self) -> BrowserEnvBackend {
+        self.env.backend()
     }
 }
 

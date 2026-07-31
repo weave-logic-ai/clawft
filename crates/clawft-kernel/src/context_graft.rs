@@ -328,6 +328,7 @@ impl SessionView {
     /// classification + voice cues) but the grafted payload must remain the
     /// original turn text for the prompt. Content hash is over `text` so
     /// dedup stays content-stable across verbalizer format bumps.
+    #[allow(clippy::too_many_arguments)] // embed vs store text split needs distinct params
     pub async fn index_chunk_with_embed(
         &self,
         embedder: &dyn EmbeddingProvider,

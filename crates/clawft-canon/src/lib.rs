@@ -185,8 +185,6 @@ mod tests {
     }
 }
 
-use egui;
-
 /// Typed state payload. Primitives return whatever shape their
 /// ontology IRI demands (`ui://field.value`, `ui://gauge.value`, …).
 /// The kernel serialises this via `serde_json::Value` at the frame

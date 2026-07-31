@@ -2268,17 +2268,16 @@ impl<P: Platform> AgentLoop<P> {
                 if matches!(
                     e,
                     crate::tools::registry::ToolError::InvalidArgs(_)
-                ) {
-                    if let Some(tool) = self.tools.get(tool_name) {
-                        let schema = tool.parameters();
-                        let schema_str =
-                            serde_json::to_string(&schema).unwrap_or_else(|_| "{}".into());
-                        let schema_preview = preview_truncate(&schema_str);
-                        msg = format!(
-                            "{msg}. Expected parameters schema: {schema_preview}. \
-                             Do not retry with the same invalid arguments."
-                        );
-                    }
+                ) && let Some(tool) = self.tools.get(tool_name)
+                {
+                    let schema = tool.parameters();
+                    let schema_str =
+                        serde_json::to_string(&schema).unwrap_or_else(|_| "{}".into());
+                    let schema_preview = preview_truncate(&schema_str);
+                    msg = format!(
+                        "{msg}. Expected parameters schema: {schema_preview}. \
+                         Do not retry with the same invalid arguments."
+                    );
                 }
                 serde_json::json!({"error": msg}).to_string()
             }
@@ -2639,10 +2638,10 @@ impl<P: Platform> AgentLoop<P> {
                             Ok(g) => g,
                             Err(p) => p.into_inner(),
                         };
-                        if det.learner().is_none() {
-                            if let Some(pipeline_learner) = self.pipeline.trajectory_learner() {
-                                det.set_learner(Some(Arc::clone(pipeline_learner)));
-                            }
+                        if det.learner().is_none()
+                            && let Some(pipeline_learner) = self.pipeline.trajectory_learner()
+                        {
+                            det.set_learner(Some(Arc::clone(pipeline_learner)));
                         }
                         (det.install_dir(), det.learner_arc())
                     };

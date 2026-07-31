@@ -202,7 +202,7 @@ impl RetryModel {
         // `EmlModel::train` no-ops below 50 samples; after that we retrain
         // every 25 samples so the hot path stays cheap.
         let n = self.model.training_sample_count();
-        if n >= 50 && n % 25 == 0 {
+        if n >= 50 && n.is_multiple_of(25) {
             let converged = self.model.train();
             if converged {
                 debug!(samples = n, "RetryModel train converged");

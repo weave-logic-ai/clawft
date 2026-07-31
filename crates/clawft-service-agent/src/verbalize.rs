@@ -48,16 +48,16 @@ pub fn verbalize_turn(
         parts.push(body.to_string());
     }
 
-    if let Some(blob) = classification {
-        if let Some(line) = verbalize_classification_value(blob) {
-            parts.push(line);
-        }
+    if let Some(blob) = classification
+        && let Some(line) = verbalize_classification_value(blob)
+    {
+        parts.push(line);
     }
 
-    if let Some(va) = voice_analysis {
-        if let Some(line) = verbalize_voice_analysis(va) {
-            parts.push(line);
-        }
+    if let Some(va) = voice_analysis
+        && let Some(line) = verbalize_voice_analysis(va)
+    {
+        parts.push(line);
     }
 
     parts.join("\n")
@@ -129,10 +129,10 @@ pub fn verbalize_voice_analysis(va: &Value) -> Option<String> {
         fields.push(verbalize_vad(&vad));
     }
 
-    if let Some(prosody) = va.get("prosody") {
-        if let Some(cue) = prosody_cue(prosody) {
-            fields.push(cue);
-        }
+    if let Some(prosody) = va.get("prosody")
+        && let Some(cue) = prosody_cue(prosody)
+    {
+        fields.push(cue);
     }
 
     if fields.is_empty() {
@@ -163,19 +163,11 @@ fn verbalize_vad(vad: &Vad) -> String {
 /// Bins: `low` (< −0.25 or < 0.33 for [0,1]-ish), `mid`, `high` (> 0.25 / 0.66).
 /// Absolute value thresholds work for both signed VAD and [0,1] arousal.
 fn bin_signed(x: f32) -> &'static str {
+    // low: x < −0.25; high: x > 0.5 (covers mid-high and ≥0.66); mid otherwise.
     if x < -0.25 {
         "low"
-    } else if x > 0.25 && x < 0.66 {
-        // mid-high for signed positive or mid for [0,1]
-        if x <= 0.5 {
-            "mid"
-        } else {
-            "high"
-        }
-    } else if x >= 0.66 {
+    } else if x > 0.5 {
         "high"
-    } else if x >= -0.25 && x <= 0.25 {
-        "mid"
     } else {
         "mid"
     }

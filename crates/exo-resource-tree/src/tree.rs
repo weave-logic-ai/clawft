@@ -326,7 +326,7 @@ impl ResourceTree {
     }
 
     fn recompute_path_inner(&mut self, id: &ResourceId, aggregate_origin: bool) -> usize {
-        if self.nodes.get(id).is_none() {
+        if !self.nodes.contains_key(id) {
             return 0;
         }
         self.mark_dirty(id);

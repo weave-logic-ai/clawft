@@ -304,13 +304,13 @@ async fn mcp_list(config_override: Option<&str>) -> anyhow::Result<()> {
     // Prefer live daemon registry when available (WEFT-494: mcp.list;
     // tools.mcp is the CLI-compat alias).
     for method in ["mcp.list", "tools.mcp"] {
-        if let Some(result) = try_daemon_rpc(method, serde_json::json!({})).await {
-            if let Some(output) = result.get("output").and_then(|v| v.as_str()) {
-                print!("{output}");
-                return Ok(());
-            }
-            // Fall through if the daemon shape is unexpected.
+        if let Some(result) = try_daemon_rpc(method, serde_json::json!({})).await
+            && let Some(output) = result.get("output").and_then(|v| v.as_str())
+        {
+            print!("{output}");
+            return Ok(());
         }
+        // Fall through if the daemon shape is unexpected.
     }
 
     let path = resolve_writable_config_path(config_override).ok();
@@ -484,10 +484,10 @@ fn resolve_writable_config_path(config_override: Option<&str>) -> anyhow::Result
     if let Some(path) = config_override {
         return Ok(PathBuf::from(path));
     }
-    if let Ok(env_path) = std::env::var("CLAWFT_CONFIG") {
-        if !env_path.is_empty() {
-            return Ok(PathBuf::from(env_path));
-        }
+    if let Ok(env_path) = std::env::var("CLAWFT_CONFIG")
+        && !env_path.is_empty()
+    {
+        return Ok(PathBuf::from(env_path));
     }
 
     let clawft_toml = PathBuf::from("clawft.toml");
@@ -606,12 +606,12 @@ fn extract_mcp_servers(
 
 /// Atomic write: temp file in same directory + rename; fall back to direct write.
 fn persist_config_document(path: &Path, doc: &ConfigDocument) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                anyhow::anyhow!("failed to create config directory {}: {e}", parent.display())
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create config directory {}: {e}", parent.display())
+        })?;
     }
 
     let output = match doc.format {

@@ -32,7 +32,7 @@
 //! [`BINDING_THREAD_EXCERPT`] hard-refuses the turn
 //! ([`IdentityError::BindingThreadMismatch`]). Set
 //! `binding_thread_mode = "warn_only"` to restore the legacy annotate
-//! + `warn!` degraded path. The agent loop also evaluates governance
+//! and `warn!` degraded path. The agent loop also evaluates governance
 //! rule `soul.binding_thread_intact` via `gate.check` every turn.
 //!
 //! Plan reference: `docs/plans/agent-core-v1.md` Phase D1; WEFT-342.

@@ -14,7 +14,7 @@
     "@tauri-apps/api": "^2.10.1",
     "@types/cytoscape": "^3.21.9",
     "cytoscape": "^3.33.1",
-    "esbuild": "^0.27.4",
+    "esbuild": "^0.28.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "zustand": "^5.0.12"
@@ -35,5 +35,10 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.57.0",
     "vite": "^8.0.1"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "minimatch": "^9.0.5",
+    "esbuild": "^0.28.1"
   }
 }

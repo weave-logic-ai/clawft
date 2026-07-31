@@ -139,24 +139,24 @@ pub fn memory_index_sidecar_path(index_path: &Path) -> PathBuf {
 
 /// Remove the index file and any companion sidecar so a rebuild starts clean.
 pub fn remove_memory_index(index_path: &Path) {
-    if index_path.exists() {
-        if let Err(e) = std::fs::remove_file(index_path) {
-            warn!(
-                path = %index_path.display(),
-                error = %e,
-                "failed to remove stale memory index"
-            );
-        }
+    if index_path.exists()
+        && let Err(e) = std::fs::remove_file(index_path)
+    {
+        warn!(
+            path = %index_path.display(),
+            error = %e,
+            "failed to remove stale memory index"
+        );
     }
     let sidecar = memory_index_sidecar_path(index_path);
-    if sidecar.exists() {
-        if let Err(e) = std::fs::remove_file(&sidecar) {
-            warn!(
-                path = %sidecar.display(),
-                error = %e,
-                "failed to remove stale memory index sidecar"
-            );
-        }
+    if sidecar.exists()
+        && let Err(e) = std::fs::remove_file(&sidecar)
+    {
+        warn!(
+            path = %sidecar.display(),
+            error = %e,
+            "failed to remove stale memory index sidecar"
+        );
     }
 }
 

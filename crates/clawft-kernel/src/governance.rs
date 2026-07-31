@@ -715,14 +715,14 @@ impl GovernanceEngine {
     ///    without scoring rules.
     /// 1. If any active [`GovernanceRuleType::BrowserPolicy`] rule denies the
     ///    action (platform-aware; independent of effect magnitude), deny.
-    /// 1b. If any active [`GovernanceRuleType::BindingThread`] rule denies
-    ///     the action (WEFT-342; independent of magnitude), deny with
-    ///     `binding-thread mismatch`.
-    /// 2. If any blocking/critical rule applies and magnitude exceeds threshold,
+    /// 2. If any active [`GovernanceRuleType::BindingThread`] rule denies
+    ///    the action (WEFT-342; independent of magnitude), deny with
+    ///    `binding-thread mismatch`.
+    /// 3. If any blocking/critical rule applies and magnitude exceeds threshold,
     ///    deny (or escalate when human approval is required).
-    /// 3. If any warning rule applies and magnitude exceeds threshold, permit
+    /// 4. If any warning rule applies and magnitude exceeds threshold, permit
     ///    with warning.
-    /// 4. Otherwise permit.
+    /// 5. Otherwise permit.
     ///
     /// NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
     /// The scalar fed into the threshold check is produced by

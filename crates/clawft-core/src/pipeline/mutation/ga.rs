@@ -241,7 +241,7 @@ impl Population {
         let mut offspring_i = 0usize;
         while next.len() < size {
             let parent_a = tournament_select(&self.candidates, offspring_i);
-            let use_crossover = ((parent_a.id as f32 * 0.6180339887) % 1.0)
+            let use_crossover = ((parent_a.id as f32 * 0.618_034) % 1.0)
                 < self.config.crossover_rate
                 && self.candidates.len() >= 2;
 
@@ -256,7 +256,7 @@ impl Population {
             } else {
                 // Prefer trajectory-informed strategy, then cycle for diversity
                 let preferred = auto_select_strategy(trajectories);
-                let strategy = if offspring_i % 2 == 0 {
+                let strategy = if offspring_i.is_multiple_of(2) {
                     preferred
                 } else {
                     strategy_cycle[offspring_i % strategy_cycle.len()]
@@ -352,7 +352,7 @@ fn crossover(a: &str, b: &str) -> String {
     if b_lines.is_empty() {
         return a.to_string();
     }
-    let mid_a = (a_lines.len() + 1) / 2;
+    let mid_a = a_lines.len().div_ceil(2);
     let mid_b = b_lines.len() / 2;
     let mut out = Vec::with_capacity(mid_a + (b_lines.len() - mid_b));
     out.extend_from_slice(&a_lines[..mid_a]);

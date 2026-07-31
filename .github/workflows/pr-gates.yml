@@ -477,6 +477,26 @@ jobs:
             --ignore RUSTSEC-2025-0141
 
   # -------------------------------------------------------------------
+  # npm Audit (WEFT-598): fail on critical/high in product npm lockfiles.
+  # Mirrors scripts/build.sh npm-audit. Residual moderates under the
+  # ruflo/@claude-flow/cli pin are documented in
+  # docs/security/npm-audit-residual.md and do not fail this job.
+  # -------------------------------------------------------------------
+  npm-audit:
+    name: npm audit (critical/high)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: npm audit (clawft-ui, root, docs/src, gui)
+        run: scripts/build.sh npm-audit
+
+  # -------------------------------------------------------------------
   # Cargo Check: fast workspace-wide compilation check
   # -------------------------------------------------------------------
   check:

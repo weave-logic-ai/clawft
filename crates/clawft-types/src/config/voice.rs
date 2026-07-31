@@ -496,14 +496,14 @@ impl VoiceConfig {
     /// agent has a `greeting_prefix`, prefix the body (or return the
     /// greeting alone when `body` is empty).
     pub fn tts_text_for(&self, agent_id: &str, body: &str, session_start: bool) -> String {
-        if session_start {
-            if let Some(g) = self.session_greeting_for(agent_id) {
-                let body = body.trim();
-                if body.is_empty() {
-                    return g;
-                }
-                return format!("{g} {body}");
+        if session_start
+            && let Some(g) = self.session_greeting_for(agent_id)
+        {
+            let body = body.trim();
+            if body.is_empty() {
+                return g;
             }
+            return format!("{g} {body}");
         }
         body.to_string()
     }

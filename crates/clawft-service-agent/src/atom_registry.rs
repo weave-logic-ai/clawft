@@ -205,6 +205,7 @@ impl AtomRegistry {
     ///
     /// Fire-and-forget: never returns an error. `uid` is derived via
     /// [`turn_universal_id`](crate::session_forest::turn_universal_id).
+    #[allow(clippy::too_many_arguments)] // locator fields are intentionally explicit
     pub fn mint_and_record(
         &self,
         conv_id: &str,

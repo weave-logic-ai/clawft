@@ -552,10 +552,10 @@ fn wire_map_to_configs(map: HashMap<String, McpServerConfigWire>) -> Vec<McpServ
 }
 
 fn extract_mcp_servers(doc: ConfigDocument) -> Vec<McpServerConfig> {
-    if let Some(tools) = doc.tools {
-        if !tools.mcp_servers.is_empty() {
-            return wire_map_to_configs(tools.mcp_servers);
-        }
+    if let Some(tools) = doc.tools
+        && !tools.mcp_servers.is_empty()
+    {
+        return wire_map_to_configs(tools.mcp_servers);
     }
     wire_map_to_configs(doc.mcp_servers)
 }

@@ -37,8 +37,10 @@ impl PersonalityTtsDispatch {
         personalities: impl IntoIterator<Item = (String, VoicePersonality)>,
         agent_id: impl Into<String>,
     ) -> Self {
-        let mut voice = VoiceConfig::default();
-        voice.personalities = personalities.into_iter().collect();
+        let voice = VoiceConfig {
+            personalities: personalities.into_iter().collect(),
+            ..Default::default()
+        };
         Self::new(voice, agent_id)
     }
 

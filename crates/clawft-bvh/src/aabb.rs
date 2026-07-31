@@ -59,30 +59,36 @@ impl Vec3 {
         self.x * o.x + self.y * o.y + self.z * o.z
     }
 
-    /// Subtraction.
-    pub fn sub(self, o: Self) -> Self {
-        Self {
-            x: self.x - o.x,
-            y: self.y - o.y,
-            z: self.z - o.z,
-        }
-    }
-
-    /// Addition.
-    pub fn add(self, o: Self) -> Self {
-        Self {
-            x: self.x + o.x,
-            y: self.y + o.y,
-            z: self.z + o.z,
-        }
-    }
-
     /// Scale.
     pub fn scale(self, s: f32) -> Self {
         Self {
             x: self.x * s,
             y: self.y * s,
             z: self.z * s,
+        }
+    }
+}
+
+impl std::ops::Add for Vec3 {
+    type Output = Self;
+
+    fn add(self, o: Self) -> Self {
+        Self {
+            x: self.x + o.x,
+            y: self.y + o.y,
+            z: self.z + o.z,
+        }
+    }
+}
+
+impl std::ops::Sub for Vec3 {
+    type Output = Self;
+
+    fn sub(self, o: Self) -> Self {
+        Self {
+            x: self.x - o.x,
+            y: self.y - o.y,
+            z: self.z - o.z,
         }
     }
 }
@@ -138,7 +144,7 @@ impl Aabb {
 
     /// Surface area (for SAH later; used lightly in build).
     pub fn surface_area(self) -> f32 {
-        let e = self.max.sub(self.min);
+        let e = self.max - self.min;
         2.0 * (e.x * e.y + e.y * e.z + e.z * e.x)
     }
 

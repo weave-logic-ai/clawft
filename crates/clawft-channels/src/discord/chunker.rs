@@ -623,12 +623,10 @@ fn char_prefix_bytes(s: &str, max_chars: usize) -> usize {
     if max_chars == 0 {
         return 0;
     }
-    let mut n = 0usize;
-    for (i, _) in s.char_indices() {
+    for (n, (i, _)) in s.char_indices().enumerate() {
         if n == max_chars {
             return i;
         }
-        n += 1;
     }
     s.len()
 }

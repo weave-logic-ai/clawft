@@ -1,4 +1,4 @@
-//! OPFS persistence regression — WEFT-392.
+//! OPFS filesystem persistence regression — WEFT-13 / WEFT-392.
 //!
 //! Verifies that with `--features browser-opfs`, a write through
 //! [`BrowserFileSystem::open`] survives a fresh open (simulates page

@@ -369,10 +369,10 @@ pub fn resolve_reload_path(explicit: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    if let Some(p) = DAEMON_MCP_CONFIG_PATH.get() {
-        if p.exists() {
-            return Some(p.clone());
-        }
+    if let Some(p) = DAEMON_MCP_CONFIG_PATH.get()
+        && p.exists()
+    {
+        return Some(p.clone());
     }
     if let Ok(env_path) = std::env::var("CLAWFT_CONFIG") {
         let p = PathBuf::from(env_path.trim());

@@ -384,24 +384,23 @@ impl ChatView {
             })
             .unwrap_or_default();
 
-        if chips.is_empty() {
-            if let Some(def) = response
+        if chips.is_empty()
+            && let Some(def) = response
                 .get("default_model")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-            {
-                let provider = response
-                    .get("default_provider")
-                    .and_then(Value::as_str)
-                    .unwrap_or("local")
-                    .to_owned();
-                chips.push(ModelChip {
-                    id: def.to_owned(),
-                    provider,
-                    label: def.to_owned(),
-                    is_default: true,
-                });
-            }
+        {
+            let provider = response
+                .get("default_provider")
+                .and_then(Value::as_str)
+                .unwrap_or("local")
+                .to_owned();
+            chips.push(ModelChip {
+                id: def.to_owned(),
+                provider,
+                label: def.to_owned(),
+                is_default: true,
+            });
         }
 
         self.available_models = chips;

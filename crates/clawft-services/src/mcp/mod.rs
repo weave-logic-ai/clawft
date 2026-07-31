@@ -672,10 +672,10 @@ impl McpSession {
                         if session.is_shutdown() {
                             break;
                         }
-                        if session.reconnect.is_some() {
-                            if let Err(re) = session.reconnect_with_backoff().await {
-                                warn!(error = %re, "mcp keepalive reconnect failed");
-                            }
+                        if session.reconnect.is_some()
+                            && let Err(re) = session.reconnect_with_backoff().await
+                        {
+                            warn!(error = %re, "mcp keepalive reconnect failed");
                         }
                     }
                 }
@@ -716,10 +716,10 @@ impl std::fmt::Debug for McpSession {
 impl Drop for McpSession {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        if let Ok(mut slot) = self.keepalive_handle.try_lock() {
-            if let Some(handle) = slot.take() {
-                handle.abort();
-            }
+        if let Ok(mut slot) = self.keepalive_handle.try_lock()
+            && let Some(handle) = slot.take()
+        {
+            handle.abort();
         }
     }
 }

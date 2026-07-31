@@ -614,7 +614,8 @@ cmd_test_browser() {
     if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
     timer_start
     # Default suite is browser (entry-point contracts). Pass FEATURES=browser-opfs
-    # to also exercise OPFS persistence (WEFT-392 / browser_opfs.rs).
+    # to also exercise OPFS FS (WEFT-13 / browser_opfs.rs) and env
+    # (WEFT-14 / browser_env_persist.rs) persistence.
     local feat="browser"
     if [ -n "$FEATURES" ]; then
         feat="browser,$FEATURES"
@@ -626,6 +627,7 @@ cmd_test_browser() {
         printf "  ${YELLOW}DRY${NC}   %s\n" "${args[*]}"
         if echo "$feat" | grep -q 'browser-opfs'; then
             printf "  ${YELLOW}DRY${NC}   … --test browser_opfs\n"
+            printf "  ${YELLOW}DRY${NC}   … --test browser_env_persist\n"
         fi
         timer_end
         return 0
@@ -634,11 +636,18 @@ cmd_test_browser() {
     "${args[@]}" 2>&1
     local rc=$?
     if [ "$rc" -eq 0 ] && echo "$feat" | grep -q 'browser-opfs'; then
-        info "Running WEFT-392 OPFS persistence suite"
+        info "Running WEFT-13 OPFS filesystem persistence suite"
         wasm-pack test --headless --chrome crates/clawft-wasm \
             --no-default-features --features "$feat" \
             --test browser_opfs 2>&1
         rc=$?
+        if [ "$rc" -eq 0 ]; then
+            info "Running WEFT-14 BrowserEnvironment OPFS persistence suite"
+            wasm-pack test --headless --chrome crates/clawft-wasm \
+                --no-default-features --features "$feat" \
+                --test browser_env_persist 2>&1
+            rc=$?
+        fi
     fi
     timer_end
     return "$rc"
@@ -975,6 +984,118 @@ cmd_audit() {
     timer_end
 }
 
+# ── npm audit (WEFT-598) ────────────────────────────────────────────
+# Audit npm lockfiles for critical/high. Moderates under the ruflo /
+# @claude-flow/cli pin (OpenTelemetry chain) are accepted residual risk
+# and do not fail the gate. See docs/security/npm-audit-residual.md.
+#
+# Directories audited when present with package-lock.json:
+#   clawft-ui, . (root), docs/src, gui
+#
+# Env:
+#   NPM_AUDIT_LEVEL  severity floor for fail (default: high)
+#                    values: critical | high | moderate | low | info
+#   NPM_AUDIT_SOFT=1 soft mode: print findings, never fail
+
+npm_audit_one() {
+    local dir="$1"
+    local label="${2:-$dir}"
+    local level="${NPM_AUDIT_LEVEL:-high}"
+    local audit_json audit_rc summary
+
+    if [ ! -f "$dir/package-lock.json" ]; then
+        info "skip $label — no package-lock.json"
+        return 0
+    fi
+    if [ ! -f "$dir/package.json" ]; then
+        info "skip $label — no package.json"
+        return 0
+    fi
+
+    # npm audit exits 1 when findings exist at/above audit-level.
+    set +e
+    audit_json=$(cd "$dir" && npm audit --json --audit-level="$level" 2>/dev/null)
+    audit_rc=$?
+    set -e
+
+    summary=$(printf '%s' "$audit_json" | node -e '
+        let d=""; process.stdin.on("data",c=>d+=c); process.stdin.on("end",()=>{
+          try {
+            const j=JSON.parse(d);
+            const v=j.metadata&&j.metadata.vulnerabilities||{};
+            console.log(
+              "crit="+ (v.critical||0) +
+              " high="+ (v.high||0) +
+              " mod="+ (v.moderate||0) +
+              " low="+ (v.low||0) +
+              " total="+ (v.total||0)
+            );
+          } catch(e) { console.log("parse-error"); }
+        });
+    ' 2>/dev/null || echo "parse-error")
+
+    if [ "$audit_rc" -eq 0 ]; then
+        pass "$label npm audit ($summary) — no ≥$level"
+        return 0
+    fi
+
+    # Non-zero: either findings at/above level, or npm error.
+    if printf '%s' "$audit_json" | grep -q '"vulnerabilities"'; then
+        if [ "${NPM_AUDIT_SOFT:-0}" = "1" ]; then
+            skip "$label npm audit ($summary) ≥$level present (soft)"
+            return 0
+        fi
+        fail "$label npm audit ($summary) — ≥$level present"
+        # Print human report for the failure path (truncated).
+        (cd "$dir" && npm audit --audit-level="$level" 2>&1 | tail -40) || true
+        return 1
+    fi
+
+    # npm audit infrastructure failure — soft skip so missing npm never
+    # blocks a Rust-only gate run.
+    skip "$label npm audit unavailable (npm error)"
+    return 0
+}
+
+cmd_npm_audit() {
+    header "Running npm audit (critical/high gate — WEFT-598)"
+    timer_start
+    local level="${NPM_AUDIT_LEVEL:-high}"
+    local failed=0
+
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   npm audit --audit-level=%s (clawft-ui, root, docs/src, gui)\n" "$level"
+        timer_end
+        return 0
+    fi
+
+    if ! command -v npm >/dev/null 2>&1; then
+        skip "npm not installed"
+        timer_end
+        return 0
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        skip "node not installed (needed to parse npm audit JSON)"
+        timer_end
+        return 0
+    fi
+
+    info "audit-level=$level soft=${NPM_AUDIT_SOFT:-0}"
+
+    # Primary: clawft-ui (product UI) and root (ruflo pin / agent tooling)
+    npm_audit_one "$ROOT/clawft-ui" "clawft-ui" || failed=$((failed + 1))
+    npm_audit_one "$ROOT" "root" || failed=$((failed + 1))
+    # Secondary product/docs surfaces when present
+    npm_audit_one "$ROOT/docs/src" "docs/src" || failed=$((failed + 1))
+    npm_audit_one "$ROOT/gui" "gui" || failed=$((failed + 1))
+
+    timer_end
+    if [ "$failed" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
 # ── Gate check 13 helper: clawft-kernel diskann + bench feature matrix ──
 check_kernel_diskann_and_bench_matrix() {
     # --tests included deliberately: cfg-gated test modules rot separately
@@ -1022,8 +1143,8 @@ cmd_pipeline_pass() {
 }
 
 cmd_gate() {
-    header "Phase Gate — 15 checks"
-    local total=15 passed=0 failed=0 skipped=0
+    header "Phase Gate — 16 checks"
+    local total=16 passed=0 failed=0 skipped=0
 
     run_gate_check() {
         local num="$1" label="$2"
@@ -1138,7 +1259,20 @@ cmd_gate() {
         skipped=$((skipped + 1))
     fi
 
-    # 13. diskann feature matrix (WEFT-656): the `diskann` cargo feature is
+    # 13. npm audit critical/high (WEFT-598). Hard fail when npm+node are
+    # present and any audited lockfile has ≥high. Moderates under the
+    # ruflo pin are residual — see docs/security/npm-audit-residual.md.
+    # Soft locally when npm is missing; CI always has node.
+    if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+        run_gate_check 13 "npm audit (critical/high — WEFT-598)" \
+            cmd_npm_audit
+    else
+        printf "\n${BOLD}[%2d/%d]${NC} %s\n" 13 "$total" "npm audit (critical/high — WEFT-598)"
+        skip "npm/node not installed"
+        skipped=$((skipped + 1))
+    fi
+
+    # 14. diskann feature matrix (WEFT-656): the `diskann` cargo feature is
     # NOT in kernel defaults; without this compile check the real backend's
     # cfg-gated code can rot while every default build silently uses the
     # brute-force stub. (The default-features side is covered by check 1.)
@@ -1146,25 +1280,25 @@ cmd_gate() {
     # feature states — `cargo check --workspace` (check 1 / cmd_check)
     # does not build [[bench]] targets by default, so without `--benches`
     # here the bench's diskann-gated arm could silently bit-rot.
-    run_gate_check 13 "diskann + bench feature compile (clawft-kernel)" \
+    run_gate_check 14 "diskann + bench feature compile (clawft-kernel)" \
         check_kernel_diskann_and_bench_matrix
 
-    # 14. WEFT-114: clawft-kernel wasm32-unknown-unknown with mesh OFF
+    # 15. WEFT-114: clawft-kernel wasm32-unknown-unknown with mesh OFF
     # (--no-default-features). Hard fail when the target is installed; skip
     # locally only if rustup target missing. CI always installs the target.
     if check_target_installed wasm32-unknown-unknown; then
-        run_gate_check 14 "kernel WASM no-mesh (wasm32-unknown-unknown)" \
+        run_gate_check 15 "kernel WASM no-mesh (wasm32-unknown-unknown)" \
             check_kernel_wasm_no_mesh
     else
-        printf "\n${BOLD}[%2d/%d]${NC} %s\n" 14 "$total" "kernel WASM no-mesh (wasm32-unknown-unknown)"
+        printf "\n${BOLD}[%2d/%d]${NC} %s\n" 15 "$total" "kernel WASM no-mesh (wasm32-unknown-unknown)"
         skip "wasm32-unknown-unknown target not installed"
         skipped=$((skipped + 1))
     fi
 
-    # 15. WEFT-56 — explicit pipeline-pass: focused clawft-core pipeline
+    # 16. WEFT-56 — explicit pipeline-pass: focused clawft-core pipeline
     # regression (router/rate_limiter/transport/… unit + related). Runs in
     # a few seconds vs full workspace; does not replace check 1.
-    run_gate_check 15 "pipeline pass (clawft-core test(pipeline))" \
+    run_gate_check 16 "pipeline pass (clawft-core test(pipeline))" \
         cmd_pipeline_pass_impl
 
     # Summary
@@ -1237,7 +1371,12 @@ ${BOLD}Commands:${NC}
                   Requires: cargo install --locked cargo-audit
                   Followups: WEFT-551/552 DONE; WEFT-553 residual paste+bincode
                   (see docs/plans/wave-0i-WEFT-553-result.md).
-  gate            Run full phase gate (15 checks, includes cargo audit +
+  npm-audit       Run npm audit on clawft-ui, root, docs/src, gui lockfiles
+                  (WEFT-598). Fails on critical/high by default
+                  (NPM_AUDIT_LEVEL=high). Set NPM_AUDIT_SOFT=1 to report only.
+                  Residual moderates under ruflo pin: docs/security/npm-audit-residual.md
+  gate            Run full phase gate (16 checks, includes cargo audit +
+                  npm audit critical/high / WEFT-598 +
                   kernel WASM no-mesh / WEFT-114 + pipeline pass / WEFT-56)
   pipeline-pass   Fast clawft-core pipeline regression
                   (nextest -E 'test(pipeline)'; typically <5s). Also gate #15.
@@ -1412,6 +1551,7 @@ main() {
         check)        cmd_check ;;
         clippy)       cmd_clippy ;;
         audit)        cmd_audit ;;
+        npm-audit)    cmd_npm_audit ;;
         gate)         cmd_gate ;;
         pipeline-pass) cmd_pipeline_pass ;;
         bench)        cmd_bench "$BENCH_CRATE" "$BENCH_NAME" ;;

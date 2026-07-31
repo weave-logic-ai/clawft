@@ -328,19 +328,15 @@ mod browser_entry {
         let mut config: Config = serde_json::from_str(config_json)
             .map_err(|e| JsValue::from_str(&format!("config parse error: {e}")))?;
 
-        // WEFT-391: build a shared BrowserEnvironment, optionally
-        // pre-seeded from the JS-side env map, then clone the Arc into
-        // BrowserRuntime so set_env can mutate after AgentLoop takes
-        // ownership of BrowserPlatform.
+        // WEFT-391 / WEFT-14: open a shared BrowserEnvironment (OPFS snapshot
+        // when `browser-opfs` is enabled), overlay optional JS-side env seed,
+        // then clone the Arc into BrowserRuntime so set_env can mutate after
+        // AgentLoop takes ownership of BrowserPlatform.
         let seed = parse_env_seed(env_json.as_deref())
             .map_err(|e| JsValue::from_str(&e))?;
-        let env = Arc::new(if seed.is_empty() {
-            BrowserEnvironment::new()
-        } else {
-            BrowserEnvironment::with_vars(seed)
-        });
-        // WEFT-392: when built with `browser-opfs`, prefer OPFS-backed FS
-        // (falls back to in-memory if OPFS is unavailable). Workspace is
+        let env = Arc::new(BrowserEnvironment::open_with_seed(seed).await);
+        // WEFT-13 / WEFT-392: when built with `browser-opfs`, prefer OPFS-backed
+        // FS (falls back to in-memory if OPFS is unavailable). Workspace is
         // always the absolute virtual path `/clawft/workspace`.
         let platform = Arc::new(BrowserPlatform::with_env_arc_open(Arc::clone(&env)).await);
 

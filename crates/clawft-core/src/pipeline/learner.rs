@@ -154,10 +154,10 @@ impl TrajectoryLearner {
     /// Builder: enable population persistence at `path` (WEFT-38).
     pub fn with_population_path(mut self, path: PathBuf) -> Self {
         self.config.population_path = Some(path.clone());
-        if let Ok(pop) = Population::load(&path) {
-            if let Ok(mut state) = self.state.lock() {
-                state.population = Some(pop);
-            }
+        if let Ok(pop) = Population::load(&path)
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.population = Some(pop);
         }
         self
     }

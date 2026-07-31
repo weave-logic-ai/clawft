@@ -223,4 +223,5 @@ mod factory_tests {
     }
 }
 
+#[cfg(feature = "native")]
 pub use llm_adapter::{persist_shared_retry_model, resolve_retry_model_path, shared_retry_model};

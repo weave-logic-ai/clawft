@@ -376,15 +376,15 @@ async fn run_mesh_status(as_json: bool) -> anyhow::Result<()> {
         let resp = client
             .call(Request::new("assess.mesh.status"))
             .await?;
-        if resp.ok {
-            if let Some(data) = resp.result {
-                if as_json {
-                    println!("{}", serde_json::to_string_pretty(&data)?);
-                } else {
-                    print_mesh_status_table(&data);
-                }
-                return Ok(());
+        if resp.ok
+            && let Some(data) = resp.result
+        {
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&data)?);
+            } else {
+                print_mesh_status_table(&data);
             }
+            return Ok(());
         }
         if let Some(ref err) = resp.error
             && !err.contains("unknown method")
@@ -451,8 +451,8 @@ fn print_mesh_status_table(data: &serde_json::Value) {
     }
 
     println!(
-        "{:<20} {:<20} {:>8} {:>9}  {}",
-        "NODE", "PROJECT", "FINDINGS", "ANALYZERS", "LAST_GOSSIP"
+        "{:<20} {:<20} {:>8} {:>9}  LAST_GOSSIP",
+        "NODE", "PROJECT", "FINDINGS", "ANALYZERS"
     );
     for p in &peers {
         let nid = p.get("node_id").and_then(|v| v.as_str()).unwrap_or("?");

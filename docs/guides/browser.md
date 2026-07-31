@@ -134,6 +134,53 @@ Actions matched for topic policy include `ipc.topic.*`,
 
 ---
 
+## WASM filesystem & environment persistence (WEFT-13 / WEFT-14)
+
+Browser agent runtime (`clawft-wasm`, target `wasm32-unknown-unknown`) can
+persist workspace files and env vars across reloads when built with the
+`browser-opfs` feature:
+
+| Store | Default | With `browser-opfs` |
+|-------|---------|---------------------|
+| `BrowserFileSystem` | Session `HashMap` | Origin Private File System (OPFS); virtual home `/clawft` |
+| `BrowserEnvironment` | Session `HashMap` | OPFS snapshot at `/clawft/.clawft/env.json` |
+
+Both constructors fall back to memory if OPFS is missing (non-secure
+context, no `navigator.storage.getDirectory()`).
+
+```bash
+# Build / test with OPFS backends
+cargo build -p clawft-wasm --target wasm32-unknown-unknown \
+  --no-default-features --features browser-opfs
+
+FEATURES=browser-opfs scripts/build.sh test-browser
+# → browser_pipeline + browser_opfs (FS) + browser_env_persist (env)
+```
+
+`Platform::env()` stays a **sync** accessor (same as native). Async work
+is on `BrowserEnvironment::open` / `open_with_seed` / `flush` and
+`BrowserFileSystem::open`.
+
+### Secrets-in-browser trade-off (WEFT-14)
+
+Persisting env (API keys via `set_env` / `env_json`) into OPFS means any
+script on the **same origin** can read those values (XSS, extensions,
+DevTools). This is a PWA convenience, not a vault:
+
+- Prefer short-lived tokens; never put long-lived root credentials in
+  browser env.
+- Treat OPFS as origin-scoped user data, equivalent to `localStorage`
+  for confidentiality.
+- `BrowserEnvironment`'s `Debug` impl redacts sensitive-looking keys
+  (`*API_KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*AUTH*`, …) so
+  logs do not amplify exposure. Config `SecretString` fields remain
+  redacted independently.
+
+Details and web-sys feature matrix:
+[`docs/browser/architecture.md`](../browser/architecture.md).
+
+---
+
 ## Related docs
 
 - Security model: [`docs/weftos/k5-symposium/03-security-and-identity.md`](../weftos/k5-symposium/03-security-and-identity.md) §6

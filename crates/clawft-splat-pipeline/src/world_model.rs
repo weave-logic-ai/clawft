@@ -24,9 +24,9 @@ impl SceneAabb {
     }
 
     fn expand(&mut self, p: [f64; 3]) {
-        for i in 0..3 {
-            self.min[i] = self.min[i].min(p[i]);
-            self.max[i] = self.max[i].max(p[i]);
+        for (i, &v) in p.iter().enumerate() {
+            self.min[i] = self.min[i].min(v);
+            self.max[i] = self.max[i].max(v);
         }
     }
 
@@ -165,7 +165,7 @@ fn aabb_from_ply(path: &Path) -> Option<SceneAabb> {
     let mut n_verts: Option<usize> = None;
     let mut props: Vec<String> = Vec::new();
     let mut ascii = false;
-    while let Some(line) = lines.next() {
+    for line in lines.by_ref() {
         let line = line.trim();
         if line.starts_with("element vertex") {
             n_verts = line.split_whitespace().nth(2)?.parse().ok();
