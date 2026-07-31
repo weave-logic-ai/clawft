@@ -1,0 +1,37 @@
+{
+  "id": "fusion-identity-room12",
+  "kind": "viewspec_invariant_anchor",
+  "view_path": "config/views/room-12-identity.yaml",
+  "invariants": [
+    {
+      "id": "has_view_id",
+      "check": "view_id == room-12-identity"
+    },
+    {
+      "id": "has_bvh_source",
+      "check": "sources contains kind=bvh"
+    },
+    {
+      "id": "has_live_sensor",
+      "check": "sources contains live=true sensor_stream"
+    },
+    {
+      "id": "soft_edge_bounded",
+      "check": "vector soft_edge.k <= 16 and min_score >= 0.5"
+    },
+    {
+      "id": "promote_requires_chain",
+      "check": "promote.require_chain_event == true"
+    },
+    {
+      "id": "caps_present",
+      "check": "caps.max_nodes > 0 and caps.max_edges > 0"
+    }
+  ],
+  "score_axes": {
+    "primary": "fraction_invariants_passed",
+    "noopRate": "0 if all checks ran else 1",
+    "costPerWin": "0",
+    "regressed": "true if promote.require_chain_event flipped false"
+  }
+}

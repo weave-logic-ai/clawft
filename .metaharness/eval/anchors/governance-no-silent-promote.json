@@ -1,0 +1,18 @@
+{
+  "id": "governance-no-silent-promote",
+  "kind": "process_anchor",
+  "invariants": [
+    {
+      "id": "eval_mode_default",
+      "check": "flywheel-anchor.manifest.json mode == evaluate_only"
+    },
+    {
+      "id": "no_auto_promote_script",
+      "check": "no scripts/metaharness/* promotes without confirm env"
+    },
+    {
+      "id": "adr_docs_present",
+      "check": "ADR-096 and ADR-097 exist under docs/adr/"
+    }
+  ]
+}
