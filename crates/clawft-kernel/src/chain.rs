@@ -2680,6 +2680,10 @@ pub struct GovernanceDecisionEvent {
     pub evaluated_rules: Vec<String>,
     /// Timestamp of the evaluation.
     pub timestamp: DateTime<Utc>,
+    /// Attributed principal for the verdict (WEFT-636). Optional for
+    /// backward-compat with older constructors; when set, appears in the
+    /// chain payload for audit attribution.
+    pub principal: Option<crate::governance::GatePrincipal>,
 }
 
 impl ChainLoggable for GovernanceDecisionEvent {
@@ -2698,7 +2702,7 @@ impl ChainLoggable for GovernanceDecisionEvent {
     }
 
     fn chain_event_payload(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "agent_id": self.agent_id,
             "action": self.action,
             "decision": self.decision,
@@ -2706,7 +2710,16 @@ impl ChainLoggable for GovernanceDecisionEvent {
             "threshold_exceeded": self.threshold_exceeded,
             "evaluated_rules": self.evaluated_rules,
             "timestamp": self.timestamp.to_rfc3339(),
-        })
+        });
+        if let Some(p) = &self.principal {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "principal".into(),
+                    serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        payload
     }
 }
 
@@ -4189,6 +4202,7 @@ mod tests {
             threshold_exceeded: true,
             evaluated_rules: vec!["security-check".into()],
             timestamp: Utc::now(),
+            principal: None,
         };
 
         assert_eq!(event.chain_event_source(), "governance");
@@ -4211,6 +4225,7 @@ mod tests {
             threshold_exceeded: false,
             evaluated_rules: vec![],
             timestamp: Utc::now(),
+            principal: None,
         };
 
         assert_eq!(make_event("Permit").chain_event_kind(), "governance.permit");

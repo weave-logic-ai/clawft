@@ -296,6 +296,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         }
     }
 

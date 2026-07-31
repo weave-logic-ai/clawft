@@ -1949,6 +1949,9 @@ pub async fn run(
                     reference_url: None,
                     sop_category: None,
                     rule_type: Default::default(),
+                    action_selector: None,
+                    tool_selector: None,
+                    force_on_match: false,
                 })
                 // WEFT-342: hard-refuse on binding-thread mismatch each turn.
                 .add_rule(clawft_kernel::governance::GovernanceRule::binding_thread(
@@ -6792,6 +6795,9 @@ async fn dispatch(
                             reference_url: None,
                             sop_category: None,
                             rule_type: Default::default(),
+                            action_selector: None,
+                            tool_selector: None,
+                            force_on_match: false,
                         })
                         .add_rule(GovernanceRule {
                             id: "cron-warn".into(),
@@ -6802,6 +6808,9 @@ async fn dispatch(
                             reference_url: None,
                             sop_category: None,
                             rule_type: Default::default(),
+                            action_selector: None,
+                            tool_selector: None,
+                            force_on_match: false,
                         });
                     Some(std::sync::Arc::new(g))
                 };

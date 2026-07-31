@@ -470,8 +470,9 @@ pub use floor::{
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 pub use governance::{
-    EffectVector, GateEffectKind, GovernanceBranch, GovernanceDecision, GovernanceEngine,
-    GovernanceRequest, GovernanceResult, GovernanceRule, RuleSeverity, with_effect_context,
+    EffectVector, GateEffectKind, GatePrincipal, GovernanceBranch, GovernanceDecision,
+    GovernanceEngine, GovernanceRequest, GovernanceResult, GovernanceRule, GovernanceRuleType,
+    RuleSeverity, selector_matches, with_effect_context,
 };
 pub use rule_distribution::{
     EscalationOutcome, EscalationRecord, RuleDistribution, RuleGossipEnvelope, VersionedRule,

@@ -506,6 +506,9 @@ async fn deny_dispatch_appends_deny_witness() {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             }),
     );
     let kernel_gate = Arc::new(KernelEffectGate::new(governance));

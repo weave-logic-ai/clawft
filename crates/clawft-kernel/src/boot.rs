@@ -1384,6 +1384,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "GOV-002".into(),
@@ -1394,6 +1397,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "GOV-003".into(),
@@ -1404,6 +1410,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "GOV-004".into(),
@@ -1414,6 +1423,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "GOV-005".into(),
@@ -1424,6 +1436,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "GOV-006".into(),
@@ -1434,6 +1449,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "GOV-007".into(),
@@ -1444,6 +1462,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: None,
                         sop_category: None,
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     // ── AI-SDLC SOP rules: Legislative (6) ──────────────────
                     GovernanceRule {
@@ -1455,6 +1476,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1300-01-AI_IRB_Approval.md".into()),
                         sop_category: Some("governance".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-L002".into(),
@@ -1465,6 +1489,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1003-01-AI_Version_Control.md".into()),
                         sop_category: Some("governance".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-L003".into(),
@@ -1475,6 +1502,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1040-01-AI_Requirements.md".into()),
                         sop_category: Some("engineering".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-L004".into(),
@@ -1485,6 +1515,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1005-01-AI_Release_Planning.md".into()),
                         sop_category: Some("lifecycle".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-L005".into(),
@@ -1495,6 +1528,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1303-01-AI_Data_Protection.md".into()),
                         sop_category: Some("ethics".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-L006".into(),
@@ -1505,6 +1541,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1062-01-AI_Risk_Register.md".into()),
                         sop_category: Some("governance".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     // ── AI-SDLC SOP rules: Executive (5) ────────────────────
                     GovernanceRule {
@@ -1516,6 +1555,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1200-01-AI_Secure_Coding.md".into()),
                         sop_category: Some("engineering".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-E002".into(),
@@ -1526,6 +1568,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1220-01-AI_Deployment_Clearance.md".into()),
                         sop_category: Some("lifecycle".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-E003".into(),
@@ -1536,6 +1581,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1008-01-AI_Incident_Response.md".into()),
                         sop_category: Some("security".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-E004".into(),
@@ -1546,6 +1594,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1011-01-AI_Decommissioning.md".into()),
                         sop_category: Some("lifecycle".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-E005".into(),
@@ -1556,6 +1607,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1004-01-AI_Procurement_Screening.md".into()),
                         sop_category: Some("governance".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     // ── AI-SDLC SOP rules: Judicial (4) ─────────────────────
                     GovernanceRule {
@@ -1567,6 +1621,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1301-01-AI_Bias_Fairness.md".into()),
                         sop_category: Some("ethics".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-J002".into(),
@@ -1577,6 +1634,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1302-01-AI_Explainability.md".into()),
                         sop_category: Some("ethics".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-J003".into(),
@@ -1587,6 +1647,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1009-01-AI_Drift_Detection.md".into()),
                         sop_category: Some("lifecycle".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     GovernanceRule {
                         id: "SOP-J004".into(),
@@ -1597,6 +1660,9 @@ impl<P: Platform> Kernel<P> {
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-2002-01-AI_Quality_Records.md".into()),
                         sop_category: Some("quality".into()),
                         rule_type: Default::default(),
+                        action_selector: None,
+                        tool_selector: None,
+                        force_on_match: false,
                     },
                     // ── Browser policy rules (S7 / WEFT-108) ────────────────
                     // Browser nodes are untrusted; these rules constrain IPC

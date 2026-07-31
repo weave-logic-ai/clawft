@@ -87,6 +87,33 @@ pub struct GovernanceRule {
     /// Serde defaults missing fields so older chain-anchored rules remain valid.
     #[serde(default)]
     pub rule_type: GovernanceRuleType,
+
+    /// Optional action selector (WEFT-634).
+    ///
+    /// When set, the rule only applies when the request's `action` matches.
+    /// Matching is exact, or prefix when the selector ends with `*`
+    /// (e.g. `"tool.agent_*"` matches `"tool.agent_spawn"`).
+    /// `None` / empty means "match any action" (magnitude-only rules).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_selector: Option<String>,
+
+    /// Optional tool selector (WEFT-634).
+    ///
+    /// When set, the rule only applies when the request context key
+    /// `"tool"` (or fallback `"gate_action"`) matches. Same exact/prefix
+    /// semantics as [`Self::action_selector`]. `None` means "any tool".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_selector: Option<String>,
+
+    /// When `true`, a selector-matching General rule applies its severity
+    /// **without** requiring effect magnitude to exceed the threshold
+    /// (WEFT-634 / WEFT-633 spawn-approval foundation).
+    ///
+    /// Magnitude-only rules leave this `false` (default) so behaviour is
+    /// backward-compatible. BrowserPolicy / BindingThread paths already
+    /// ignore magnitude and do not consult this flag.
+    #[serde(default)]
+    pub force_on_match: bool,
 }
 
 impl GovernanceRule {
@@ -112,6 +139,32 @@ impl GovernanceRule {
             .collect()
     }
 
+    /// Whether this rule's action/tool selectors match `request` (WEFT-634).
+    ///
+    /// - No selectors set → always matches (magnitude-only rule).
+    /// - Action selector: matches `request.action`.
+    /// - Tool selector: matches `context["tool"]`, else `context["gate_action"]`.
+    /// - Both set → both must match (AND).
+    pub fn selectors_match(&self, request: &GovernanceRequest) -> bool {
+        if let Some(sel) = self.action_selector.as_deref() {
+            if !selector_matches(sel, &request.action) {
+                return false;
+            }
+        }
+        if let Some(sel) = self.tool_selector.as_deref() {
+            let tool = request
+                .context
+                .get("tool")
+                .or_else(|| request.context.get("gate_action"))
+                .map(String::as_str)
+                .unwrap_or("");
+            if !selector_matches(sel, tool) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Build a blocking browser_policy rule (S7 / WEFT-108).
     pub fn browser_policy(id: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
@@ -123,6 +176,9 @@ impl GovernanceRule {
             reference_url: None,
             sop_category: Some("browser_policy".into()),
             rule_type: GovernanceRuleType::BrowserPolicy,
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         }
     }
 
@@ -140,8 +196,51 @@ impl GovernanceRule {
             reference_url: None,
             sop_category: Some("ethics".into()),
             rule_type: GovernanceRuleType::BindingThread,
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         }
     }
+
+    /// Build the spawn-approval rule (WEFT-633 foundation).
+    ///
+    /// Matches `tool.agent_spawn` / tool context `agent_spawn` and forces
+    /// a blocking decision independent of effect magnitude so the gate
+    /// maps to [`GovernanceDecision::EscalateToHuman`] →
+    /// [`crate::gate::GateDecision::Defer`] when the engine has
+    /// `human_approval_required`. Without human approval, the decision
+    /// is a hard deny (operator must grant via exemption or lower severity).
+    pub fn spawn_requires_approval() -> Self {
+        Self {
+            id: "SPAWN-APPROVAL".into(),
+            description: "Agent spawn requires in-conversation user approval (Defer + grant)"
+                .into(),
+            branch: GovernanceBranch::Legislative,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: Some("multi_agent".into()),
+            rule_type: GovernanceRuleType::General,
+            action_selector: Some("tool.agent_spawn".into()),
+            tool_selector: Some("agent_spawn".into()),
+            force_on_match: true,
+        }
+    }
+}
+
+/// Match a selector against a candidate string (WEFT-634).
+///
+/// - Empty selector → matches anything.
+/// - Trailing `*` → prefix match on the stem (e.g. `tool.*` matches `tool.exec`).
+/// - Otherwise exact equality.
+pub fn selector_matches(selector: &str, candidate: &str) -> bool {
+    if selector.is_empty() {
+        return true;
+    }
+    if let Some(prefix) = selector.strip_suffix('*') {
+        return candidate.starts_with(prefix);
+    }
+    selector == candidate
 }
 
 /// Governance rule / gate action id for binding-thread integrity (WEFT-342).
@@ -509,6 +608,70 @@ impl std::fmt::Display for GovernanceDecision {
     }
 }
 
+/// Attributed principal for a governance / gate evaluation (WEFT-636).
+///
+/// Control already holds via `agent_id`; this type makes **who** authorized
+/// the action and **which child** is acting first-class so chain records
+/// and multi-tenant spawn paths carry attribution, not just a bare agent id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatePrincipal {
+    /// Acting agent id (child or concierge). Always the evaluation principal
+    /// key when non-empty (see [`GovernanceEngine::eval_principal_key`]).
+    #[serde(default)]
+    pub agent_id: String,
+
+    /// Human / user authority under which the agent acts (spawn-at-user-level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+
+    /// Parent agent when this evaluation is for a spawned child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+
+    /// Conversation scope for attribution (parent or child conv id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conv_id: Option<String>,
+}
+
+impl GatePrincipal {
+    /// Build a principal for a bare agent (no user / parent attribution).
+    pub fn agent(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            user_id: None,
+            parent_agent_id: None,
+            conv_id: None,
+        }
+    }
+
+    /// Attach a user authority (WEFT-635 / WEFT-636).
+    pub fn with_user(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    /// Attach parent agent attribution for a child spawn.
+    pub fn with_parent(mut self, parent_agent_id: impl Into<String>) -> Self {
+        self.parent_agent_id = Some(parent_agent_id.into());
+        self
+    }
+
+    /// Attach conversation scope.
+    pub fn with_conv(mut self, conv_id: impl Into<String>) -> Self {
+        self.conv_id = Some(conv_id.into());
+        self
+    }
+
+    /// Effective rate-limit / evaluation key: prefer non-empty `agent_id`.
+    pub fn eval_key(&self) -> &str {
+        if !self.agent_id.is_empty() {
+            self.agent_id.as_str()
+        } else {
+            self.user_id.as_deref().unwrap_or("")
+        }
+    }
+}
+
 /// Governance evaluation request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceRequest {
@@ -529,17 +692,25 @@ pub struct GovernanceRequest {
     /// Node ID of the requesting node (for distributed governance in K6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+
+    /// Optional attributed principal (WEFT-636). When set, propagates onto
+    /// [`GovernanceResult::principal`] and chain audit payloads. When
+    /// absent, the engine synthesises a principal from `agent_id` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<GatePrincipal>,
 }
 
 impl GovernanceRequest {
     /// Create a new governance request.
     pub fn new(agent_id: impl Into<String>, action: impl Into<String>) -> Self {
+        let agent_id = agent_id.into();
         Self {
-            agent_id: agent_id.into(),
+            agent_id: agent_id.clone(),
             action: action.into(),
             effect: EffectVector::default(),
             context: std::collections::HashMap::new(),
             node_id: None,
+            principal: Some(GatePrincipal::agent(agent_id)),
         }
     }
 
@@ -552,6 +723,15 @@ impl GovernanceRequest {
     /// Set the effect vector.
     pub fn with_effect(mut self, effect: EffectVector) -> Self {
         self.effect = effect;
+        self
+    }
+
+    /// Set the attributed principal (WEFT-636).
+    pub fn with_principal(mut self, principal: GatePrincipal) -> Self {
+        if self.agent_id.is_empty() && !principal.agent_id.is_empty() {
+            self.agent_id = principal.agent_id.clone();
+        }
+        self.principal = Some(principal);
         self
     }
 
@@ -588,6 +768,18 @@ impl GovernanceRequest {
     pub fn with_context_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
         self
+    }
+
+    /// Resolve the principal for this request (explicit or synthesised).
+    pub fn resolved_principal(&self) -> GatePrincipal {
+        if let Some(p) = &self.principal {
+            let mut p = p.clone();
+            if p.agent_id.is_empty() {
+                p.agent_id = self.agent_id.clone();
+            }
+            return p;
+        }
+        GatePrincipal::agent(self.agent_id.clone())
     }
 }
 
@@ -723,6 +915,13 @@ pub struct GovernanceResult {
 
     /// Whether the effect magnitude exceeded the threshold.
     pub threshold_exceeded: bool,
+
+    /// Principal attribution for this verdict (WEFT-636).
+    ///
+    /// Always populated by [`GovernanceEngine::evaluate`] — either from
+    /// the request's explicit principal or synthesised from `agent_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<GatePrincipal>,
 }
 
 /// Governance engine.
@@ -806,16 +1005,19 @@ impl GovernanceEngine {
 
     /// Resolve the principal key used for evaluation rate limiting.
     ///
-    /// Prefers non-empty `agent_id`; falls back to `node_id`.
+    /// Prefers non-empty `agent_id`; then explicit principal's agent/user;
+    /// falls back to `node_id`.
     pub fn eval_principal_key(request: &GovernanceRequest) -> &str {
         if !request.agent_id.is_empty() {
-            request.agent_id.as_str()
-        } else {
-            request
-                .node_id
-                .as_deref()
-                .unwrap_or("")
+            return request.agent_id.as_str();
         }
+        if let Some(p) = request.principal.as_ref() {
+            let k = p.eval_key();
+            if !k.is_empty() {
+                return k;
+            }
+        }
+        request.node_id.as_deref().unwrap_or("")
     }
 
     /// Install a learned [`GovernanceScorerModel`](crate::eml_kernel::GovernanceScorerModel).
@@ -868,11 +1070,16 @@ impl GovernanceEngine {
     /// 2. If any active [`GovernanceRuleType::BindingThread`] rule denies
     ///    the action (WEFT-342; independent of magnitude), deny with
     ///    `binding-thread mismatch`.
-    /// 3. If any blocking/critical rule applies and magnitude exceeds threshold,
-    ///    deny (or escalate when human approval is required).
-    /// 4. If any warning rule applies and magnitude exceeds threshold, permit
+    /// 3. **Action/tool selectors** (WEFT-634): General rules whose selectors
+    ///    do not match the request are skipped (still listed in
+    ///    `evaluated_rules` only when they match — non-matching rules are
+    ///    not counted as evaluated for the verdict).
+    /// 4. If any blocking/critical rule applies and (magnitude exceeds
+    ///    threshold **or** `force_on_match`), deny (or escalate when human
+    ///    approval is required).
+    /// 5. If any warning rule applies and magnitude exceeds threshold, permit
     ///    with warning.
-    /// 5. Otherwise permit.
+    /// 6. Otherwise permit.
     ///
     /// NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
     /// The scalar fed into the threshold check is produced by
@@ -880,6 +1087,7 @@ impl GovernanceEngine {
     /// scorer and falls back to the L2 magnitude when no model is
     /// installed or the model is untrained.
     pub fn evaluate(&self, request: &GovernanceRequest) -> GovernanceResult {
+        let attributed = request.resolved_principal();
         // WEFT-148: per-principal evaluation rate limit.
         let principal = Self::eval_principal_key(request);
         if !self.eval_limiter.check(principal) {
@@ -895,6 +1103,7 @@ impl GovernanceEngine {
                 evaluated_rules: Vec::new(),
                 effect: request.effect.clone(),
                 threshold_exceeded: false,
+                principal: Some(attributed),
             };
         }
 
@@ -910,6 +1119,12 @@ impl GovernanceEngine {
         let mut blocking_reason = String::new();
 
         for rule in self.active_rules() {
+            // WEFT-634: selector filter (applies to all rule types that
+            // still want action/tool scoping; browser/binding also honor
+            // selectors when set so an operator can narrow them).
+            if !rule.selectors_match(request) {
+                continue;
+            }
             evaluated_rules.push(rule.id.clone());
 
             // Browser policy rules fire on platform/context match, independent
@@ -952,18 +1167,27 @@ impl GovernanceEngine {
                 continue;
             }
 
+            // General rules: magnitude path, or force_on_match (WEFT-634/633).
+            let applies = threshold_exceeded || rule.force_on_match;
             match rule.severity {
                 RuleSeverity::Blocking | RuleSeverity::Critical => {
-                    if threshold_exceeded {
+                    if applies {
                         has_blocking = true;
-                        blocking_reason = format!(
-                            "rule '{}': effect magnitude {magnitude:.2} > threshold {:.2}",
-                            rule.id, self.risk_threshold
-                        );
+                        blocking_reason = if rule.force_on_match && !threshold_exceeded {
+                            format!(
+                                "rule '{}': selector force-match on action '{}' / tool",
+                                rule.id, request.action
+                            )
+                        } else {
+                            format!(
+                                "rule '{}': effect magnitude {magnitude:.2} > threshold {:.2}",
+                                rule.id, self.risk_threshold
+                            )
+                        };
                     }
                 }
                 RuleSeverity::Warning => {
-                    if threshold_exceeded {
+                    if applies {
                         has_warning = true;
                     }
                 }
@@ -991,6 +1215,7 @@ impl GovernanceEngine {
             evaluated_rules,
             effect: request.effect.clone(),
             threshold_exceeded,
+            principal: Some(attributed),
         }
     }
 
@@ -1130,6 +1355,10 @@ impl GovernanceEngine {
             GovernanceDecision::Deny(_) => "Deny".to_owned(),
         };
 
+        let principal = result
+            .principal
+            .clone()
+            .unwrap_or_else(|| request.resolved_principal());
         let event = GovernanceDecisionEvent {
             agent_id: request.agent_id.clone(),
             action: request.action.clone(),
@@ -1138,6 +1367,7 @@ impl GovernanceEngine {
             threshold_exceeded: result.threshold_exceeded,
             evaluated_rules: result.evaluated_rules.clone(),
             timestamp: chrono::Utc::now(),
+            principal: Some(principal),
         };
         cm.append_loggable(&event);
     }
@@ -1336,6 +1566,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         }
     }
 
@@ -1479,6 +1712,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert_eq!(result.decision, GovernanceDecision::Permit);
@@ -1572,6 +1806,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(matches!(result.decision, GovernanceDecision::Deny(_)));
@@ -1615,6 +1850,7 @@ mod tests {
                 effect,
                 context: Default::default(),
                 node_id: None,
+                principal: None,
             };
             assert_eq!(
                 baseline.evaluate(&req).decision,
@@ -1669,6 +1905,7 @@ mod tests {
             effect,
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // With threshold between model_scalar and l2: outcome depends
@@ -1696,6 +1933,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(matches!(
@@ -1722,6 +1960,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(matches!(
@@ -1748,6 +1987,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert_eq!(result.decision, GovernanceDecision::Permit);
@@ -1791,6 +2031,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
         assert_eq!(engine.active_rules().len(), 0);
     }
@@ -1816,6 +2059,7 @@ mod tests {
             },
             context: std::collections::HashMap::from([("env".into(), "prod".into())]),
             node_id: None,
+            principal: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         let restored: GovernanceRequest = serde_json::from_str(&json).unwrap();
@@ -1886,6 +2130,9 @@ mod tests {
                 reference_url: Some("https://example.com".into()),
                 sop_category: Some("governance".into()),
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             },
             GovernanceRule {
                 id: "SOP-J001".into(),
@@ -1896,6 +2143,9 @@ mod tests {
                 reference_url: Some("https://example.com".into()),
                 sop_category: Some("ethics".into()),
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             },
             GovernanceRule {
                 id: "GOV-001".into(),
@@ -1906,6 +2156,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             },
         ];
         let ethics = GovernanceRule::filter_by_category(&rules, "ethics");
@@ -1930,6 +2183,9 @@ mod tests {
             reference_url: Some("https://example.com/sop".into()),
             sop_category: Some("governance".into()),
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         };
         let json = serde_json::to_string(&rule).unwrap();
         assert!(json.contains("reference_url"));
@@ -2069,6 +2325,9 @@ mod tests {
             reference_url: None,
             sop_category: category.map(|c| c.into()),
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         }
     }
 
@@ -2259,6 +2518,7 @@ mod tests {
                 "mismatch".into(),
             )]),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         match result.decision {
@@ -2287,6 +2547,7 @@ mod tests {
                 "ok".into(),
             )]),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(
@@ -2318,6 +2579,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(
@@ -2340,6 +2602,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert_eq!(result.decision, GovernanceDecision::Permit);
@@ -2358,6 +2621,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // magnitude = 0.8 > 0.7 threshold; blocking rules exist -> Deny
@@ -2386,6 +2650,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // magnitude = sqrt(0.81 + 0.25) ~ 1.03 > 0.7
@@ -2405,6 +2670,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(
@@ -2428,6 +2694,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // magnitude = sqrt(0.64 + 0.25) ~ 0.94 > 0.7
@@ -2447,6 +2714,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert_eq!(result.decision, GovernanceDecision::Permit);
@@ -2466,6 +2734,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // magnitude = sqrt(0.81 + 0.09) ~ 0.95 > 0.7
@@ -2492,6 +2761,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert!(
@@ -2597,6 +2867,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // magnitude ~ 0.71 > 0.7, only warnings -> PermitWithWarning
@@ -2633,6 +2904,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert_eq!(
@@ -2656,6 +2928,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         assert_eq!(
@@ -2710,6 +2983,7 @@ mod tests {
             },
             context: Default::default(),
             node_id: None,
+            principal: None,
         };
         let result = engine.evaluate(&request);
         // magnitude = sqrt(4 * 0.16) = sqrt(0.64) = 0.8 > 0.7
@@ -3013,6 +3287,7 @@ mod tests {
                 ..Default::default()
             },
             threshold_exceeded: false,
+            principal: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let restored: GovernanceResult = serde_json::from_str(&json).unwrap();
@@ -3032,6 +3307,7 @@ mod tests {
                 ..Default::default()
             },
             threshold_exceeded: true,
+            principal: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         let restored: GovernanceResult = serde_json::from_str(&json).unwrap();
@@ -3081,6 +3357,9 @@ mod tests {
             reference_url: Some("https://sops.example.com/001".into()),
             sop_category: Some("data-access".into()),
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         };
         let json = serde_json::to_string(&rule).unwrap();
         let restored: GovernanceRule = serde_json::from_str(&json).unwrap();
@@ -3186,6 +3465,7 @@ mod tests {
                 evaluated_rules: vec![],
                 effect: EffectVector::default(),
                 threshold_exceeded: false,
+                principal: None,
             };
             assert_eq!(
                 permit_result.to_rvf_task_outcome() as u8,
@@ -3197,6 +3477,7 @@ mod tests {
                 evaluated_rules: vec![],
                 effect: EffectVector::default(),
                 threshold_exceeded: true,
+                principal: None,
             };
             assert_eq!(
                 deny_result.to_rvf_task_outcome() as u8,
@@ -3208,6 +3489,7 @@ mod tests {
                 evaluated_rules: vec![],
                 effect: EffectVector::default(),
                 threshold_exceeded: true,
+                principal: None,
             };
             assert_eq!(
                 escalate_result.to_rvf_task_outcome() as u8,
@@ -3238,6 +3520,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
             let request = GovernanceRequest {
@@ -3249,6 +3534,7 @@ mod tests {
                 },
                 context: Default::default(),
                 node_id: None,
+                principal: None,
             };
 
             let result = engine.evaluate_logged(&request, Some(&cm));
@@ -3274,6 +3560,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
             let request = GovernanceRequest {
@@ -3285,6 +3574,7 @@ mod tests {
                 },
                 context: Default::default(),
                 node_id: None,
+                principal: None,
             };
 
             let result = engine.evaluate_logged(&request, Some(&cm));
@@ -3306,6 +3596,7 @@ mod tests {
                 effect: EffectVector::default(),
                 context: Default::default(),
                 node_id: None,
+                principal: None,
             };
 
             // Passing None should not panic, just skip logging
@@ -3328,6 +3619,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
             let request = GovernanceRequest {
@@ -3339,6 +3633,7 @@ mod tests {
                 },
                 context: Default::default(),
                 node_id: None,
+                principal: None,
             };
 
             let result = engine.evaluate(&request);
@@ -3348,6 +3643,235 @@ mod tests {
             let events = cm.tail(1);
             assert_eq!(events[0].kind, "governance.defer");
         }
+    }
+
+    // ── WEFT-634: action/tool selectors ─────────────────────────
+
+    #[test]
+    fn selector_matches_exact_and_prefix() {
+        assert!(selector_matches("tool.agent_spawn", "tool.agent_spawn"));
+        assert!(!selector_matches("tool.agent_spawn", "tool.exec"));
+        assert!(selector_matches("tool.*", "tool.agent_spawn"));
+        assert!(selector_matches("tool.agent_*", "tool.agent_spawn"));
+        assert!(!selector_matches("tool.agent_*", "tool.exec"));
+        assert!(selector_matches("", "anything"));
+    }
+
+    #[test]
+    fn action_selector_scopes_blocking_rule() {
+        let mut engine = GovernanceEngine::new(0.5, false);
+        let mut rule = make_rule(
+            "spawn-only",
+            RuleSeverity::Blocking,
+            GovernanceBranch::Legislative,
+        );
+        rule.action_selector = Some("tool.agent_spawn".into());
+        engine.add_rule(rule);
+
+        // High magnitude but wrong action → rule does not apply → Permit.
+        let other = GovernanceRequest {
+            agent_id: "a".into(),
+            action: "tool.exec".into(),
+            effect: EffectVector {
+                risk: 0.9,
+                security: 0.9,
+                ..Default::default()
+            },
+            context: Default::default(),
+            node_id: None,
+            principal: None,
+        };
+        assert_eq!(
+            engine.evaluate(&other).decision,
+            GovernanceDecision::Permit
+        );
+        assert!(engine.evaluate(&other).evaluated_rules.is_empty());
+
+        // Matching action + high magnitude → Deny.
+        let spawn = GovernanceRequest {
+            agent_id: "a".into(),
+            action: "tool.agent_spawn".into(),
+            effect: EffectVector {
+                risk: 0.9,
+                security: 0.9,
+                ..Default::default()
+            },
+            context: Default::default(),
+            node_id: None,
+            principal: None,
+        };
+        assert!(matches!(
+            engine.evaluate(&spawn).decision,
+            GovernanceDecision::Deny(_)
+        ));
+        assert_eq!(
+            engine.evaluate(&spawn).evaluated_rules,
+            vec!["spawn-only".to_string()]
+        );
+    }
+
+    #[test]
+    fn tool_selector_matches_context_tool() {
+        let mut engine = GovernanceEngine::new(0.5, false);
+        let mut rule = make_rule(
+            "tool-spawn",
+            RuleSeverity::Blocking,
+            GovernanceBranch::Legislative,
+        );
+        rule.tool_selector = Some("agent_spawn".into());
+        engine.add_rule(rule);
+
+        let miss = GovernanceRequest::new("a", "tool.exec")
+            .with_effect(EffectVector {
+                risk: 0.9,
+                security: 0.9,
+                ..Default::default()
+            })
+            .with_context_entry("tool", "exec");
+        assert_eq!(engine.evaluate(&miss).decision, GovernanceDecision::Permit);
+
+        let hit = GovernanceRequest::new("a", "tool.exec")
+            .with_effect(EffectVector {
+                risk: 0.9,
+                security: 0.9,
+                ..Default::default()
+            })
+            .with_context_entry("tool", "agent_spawn");
+        assert!(matches!(
+            engine.evaluate(&hit).decision,
+            GovernanceDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn force_on_match_applies_without_magnitude() {
+        let mut engine = GovernanceEngine::new(0.99, false); // high threshold
+        engine.add_rule(GovernanceRule::spawn_requires_approval());
+
+        // Low effect — would not trip magnitude, but force_on_match + selectors.
+        let req = GovernanceRequest::new("agent-1", "tool.agent_spawn")
+            .with_effect(EffectVector {
+                risk: 0.1,
+                ..Default::default()
+            })
+            .with_context_entry("tool", "agent_spawn");
+        let result = engine.evaluate(&req);
+        assert!(
+            matches!(result.decision, GovernanceDecision::Deny(_)),
+            "expected Deny from force_on_match, got {:?}",
+            result.decision
+        );
+        assert!(!result.threshold_exceeded);
+        assert!(result.evaluated_rules.contains(&"SPAWN-APPROVAL".into()));
+    }
+
+    #[test]
+    fn spawn_approval_escalates_when_human_approval_required() {
+        // WEFT-633 foundation: EscalateToHuman → gate Defer path.
+        let mut engine = GovernanceEngine::new(0.99, true);
+        engine.add_rule(GovernanceRule::spawn_requires_approval());
+
+        let req = GovernanceRequest::new("agent-1", "tool.agent_spawn")
+            .with_context_entry("tool", "agent_spawn");
+        let result = engine.evaluate(&req);
+        match result.decision {
+            GovernanceDecision::EscalateToHuman(ref reason) => {
+                assert!(
+                    reason.contains("SPAWN-APPROVAL") || reason.contains("force-match"),
+                    "reason={reason}"
+                );
+            }
+            other => panic!("expected EscalateToHuman, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selector_backward_compat_magnitude_only_rules() {
+        // Magnitude-only rules (no selectors) still apply to every action.
+        let mut engine = GovernanceEngine::new(0.5, false);
+        engine.add_rule(make_rule(
+            "global",
+            RuleSeverity::Blocking,
+            GovernanceBranch::Judicial,
+        ));
+        let req = GovernanceRequest {
+            agent_id: "a".into(),
+            action: "anything".into(),
+            effect: EffectVector {
+                risk: 0.9,
+                ..Default::default()
+            },
+            context: Default::default(),
+            node_id: None,
+            principal: None,
+        };
+        assert!(matches!(
+            engine.evaluate(&req).decision,
+            GovernanceDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn rule_serde_preserves_selectors() {
+        let rule = GovernanceRule::spawn_requires_approval();
+        let json = serde_json::to_string(&rule).unwrap();
+        let restored: GovernanceRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.action_selector.as_deref(),
+            Some("tool.agent_spawn")
+        );
+        assert_eq!(restored.tool_selector.as_deref(), Some("agent_spawn"));
+        assert!(restored.force_on_match);
+        // Older JSON without selector fields deserialises cleanly.
+        let legacy = r#"{"id":"x","description":"d","branch":"Legislative","severity":"Blocking"}"#;
+        let old: GovernanceRule = serde_json::from_str(legacy).unwrap();
+        assert!(old.action_selector.is_none());
+        assert!(!old.force_on_match);
+    }
+
+    // ── WEFT-636: gate principals ──────────────────────────────
+
+    #[test]
+    fn principal_propagates_to_result() {
+        let engine = GovernanceEngine::open();
+        let principal = GatePrincipal::agent("child-1")
+            .with_user("user-alice")
+            .with_parent("parent-agent")
+            .with_conv("conv-P");
+        let req = GovernanceRequest::new("child-1", "tool.read_file").with_principal(principal);
+        let result = engine.evaluate(&req);
+        let p = result.principal.expect("principal on result");
+        assert_eq!(p.agent_id, "child-1");
+        assert_eq!(p.user_id.as_deref(), Some("user-alice"));
+        assert_eq!(p.parent_agent_id.as_deref(), Some("parent-agent"));
+        assert_eq!(p.conv_id.as_deref(), Some("conv-P"));
+    }
+
+    #[test]
+    fn principal_synthesised_from_agent_id_when_absent() {
+        let engine = GovernanceEngine::open();
+        let req = GovernanceRequest {
+            agent_id: "solo".into(),
+            action: "noop".into(),
+            effect: EffectVector::default(),
+            context: Default::default(),
+            node_id: None,
+            principal: None,
+        };
+        let p = engine.evaluate(&req).principal.expect("synthesised");
+        assert_eq!(p.agent_id, "solo");
+        assert!(p.user_id.is_none());
+    }
+
+    #[test]
+    fn gate_principal_serde_roundtrip() {
+        let p = GatePrincipal::agent("a")
+            .with_user("u")
+            .with_parent("p")
+            .with_conv("c");
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: GatePrincipal = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, p);
     }
 
     // ── WEFT-506: explicit EffectVector schema per gate family ──

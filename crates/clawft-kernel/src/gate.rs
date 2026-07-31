@@ -298,13 +298,13 @@ pub struct GovernanceGate {
     engine: crate::governance::GovernanceEngine,
     chain: Option<std::sync::Arc<crate::chain::ChainManager>>,
     /// Actions granted a per-action exemption from the blocking-deny path.
-    /// The `GovernanceEngine` scores pure effect magnitude and never consults
-    /// the action string, so a specific high-magnitude action (e.g.
-    /// `tool.agent_spawn`, ~0.93) cannot be permitted through config without
-    /// globally lowering the threshold. This opt-in set lets an operator grant
-    /// exactly-named actions: an exempted action that would otherwise be
-    /// denied/deferred is permitted instead, and the override is still
-    /// witnessed (as `governance.grant`) so the audit trail is never silent.
+    /// With WEFT-634 action/tool selectors, rules can target specific
+    /// actions (e.g. `tool.agent_spawn`) without lowering the global
+    /// threshold. This opt-in set remains the operator override for
+    /// pre-granting exactly-named actions: an exempted action that would
+    /// otherwise be denied/deferred is permitted instead, and the
+    /// override is still witnessed (as `governance.grant`) so the audit
+    /// trail is never silent.
     exempt_actions: std::collections::HashSet<String>,
 }
 
@@ -418,7 +418,37 @@ impl GovernanceGate {
 impl GateBackend for GovernanceGate {
     fn check(&self, agent_id: &str, action: &str, context: &serde_json::Value) -> GateDecision {
         let effect = Self::extract_effect(context);
-        let ctx_map = Self::extract_context(context);
+        let mut ctx_map = Self::extract_context(context);
+
+        // WEFT-634: ensure tool identity is available for tool_selector matching.
+        // Chat path uses `tool.{name}` action strings; callers may also pass
+        // an explicit `"tool"` context field.
+        if !ctx_map.contains_key("tool") {
+            if let Some(tool) = action.strip_prefix("tool.") {
+                ctx_map.insert("tool".into(), tool.to_owned());
+            }
+        }
+
+        // WEFT-636: build attributed principal from agent_id + optional
+        // user / parent / conv context keys.
+        let mut principal = crate::governance::GatePrincipal::agent(agent_id);
+        if let Some(uid) = ctx_map.get("user_id").cloned() {
+            principal = principal.with_user(uid);
+        }
+        if let Some(pid) = ctx_map
+            .get("parent_agent_id")
+            .cloned()
+            .or_else(|| ctx_map.get("parent_agent").cloned())
+        {
+            principal = principal.with_parent(pid);
+        }
+        if let Some(cid) = ctx_map
+            .get("conv_id")
+            .cloned()
+            .or_else(|| ctx_map.get("conversation_id").cloned())
+        {
+            principal = principal.with_conv(cid);
+        }
 
         let request = crate::governance::GovernanceRequest {
             agent_id: agent_id.to_owned(),
@@ -426,6 +456,7 @@ impl GateBackend for GovernanceGate {
             effect,
             context: ctx_map,
             node_id: None,
+            principal: Some(principal),
         };
 
         let result = self.engine.evaluate(&request);
@@ -506,11 +537,17 @@ impl GateBackend for GovernanceGate {
                 "evaluated_rules": result.evaluated_rules,
             });
 
-            if let Some(obj) = payload.as_object_mut()
-                && let Some(extra_obj) = extra.as_object()
-            {
-                for (k, v) in extra_obj {
-                    obj.insert(k.clone(), v.clone());
+            if let Some(obj) = payload.as_object_mut() {
+                if let Some(p) = &result.principal {
+                    obj.insert(
+                        "principal".into(),
+                        serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(extra_obj) = extra.as_object() {
+                    for (k, v) in extra_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
                 }
             }
 
@@ -619,6 +656,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({
@@ -639,6 +679,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({
@@ -659,6 +702,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({
@@ -679,6 +725,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({
@@ -705,6 +754,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
         // Low risk → governance.permit
@@ -749,6 +801,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         // Context with effect embedded
@@ -791,6 +846,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.1}});
@@ -821,6 +879,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -928,6 +989,9 @@ mod tests {
                     reference_url: None,
                     sop_category: None,
                     rule_type: Default::default(),
+                    action_selector: None,
+                    tool_selector: None,
+                    force_on_match: false,
                 }),
         );
 
@@ -959,6 +1023,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         // Risk exactly at 0.5 — the magnitude of (0.5,0,0,0,0) = 0.5
@@ -984,6 +1051,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -1007,6 +1077,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -1030,6 +1103,9 @@ mod tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -1051,6 +1127,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             })
             .add_rule(GovernanceRule {
                 id: "rule-2".into(),
@@ -1061,6 +1140,9 @@ mod tests {
                 reference_url: None,
                 sop_category: None,
                 rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
             });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -1365,6 +1447,9 @@ mod tilezero_tests {
             reference_url: None,
             sop_category: None,
             rule_type: Default::default(),
+            action_selector: None,
+            tool_selector: None,
+            force_on_match: false,
         })
     }
 
@@ -1426,5 +1511,76 @@ mod tilezero_tests {
                 .is_some_and(|r| !r.is_empty()),
             "the witness records what the grant overrode"
         );
+    }
+
+    /// WEFT-633/634: spawn-approval rule + human_approval maps Escalate → Defer.
+    #[test]
+    fn spawn_approval_rule_defers_via_selector() {
+        let gate = GovernanceGate::new(0.99, true)
+            .add_rule(crate::governance::GovernanceRule::spawn_requires_approval());
+        // Low effect — force_on_match still trips; tool identity derived from action.
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.05, "security": 0.05 },
+            "user_id": "user-alice",
+            "conv_id": "conv-P",
+        });
+        let decision = gate.check("agent-1", "tool.agent_spawn", &ctx);
+        match decision {
+            GateDecision::Defer { reason } => {
+                assert!(
+                    reason.contains("SPAWN-APPROVAL") || reason.contains("force-match"),
+                    "defer reason={reason}"
+                );
+            }
+            other => panic!("expected Defer for spawn approval, got {other:?}"),
+        }
+
+        // Non-spawn tool is unaffected by the selector rule.
+        let other = gate.check("agent-1", "tool.read_file", &ctx);
+        assert!(other.is_permit());
+    }
+
+    /// WEFT-636: principal attribution appears on the chain payload.
+    #[test]
+    fn governance_gate_chain_payload_carries_principal() {
+        let cm = std::sync::Arc::new(crate::chain::ChainManager::new(0, 1000));
+        let gate = GovernanceGate::new(0.5, false)
+            .with_chain(cm.clone())
+            .add_rule(crate::governance::GovernanceRule {
+                id: "sec".into(),
+                description: "block".into(),
+                branch: crate::governance::GovernanceBranch::Judicial,
+                severity: crate::governance::RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+                rule_type: Default::default(),
+                action_selector: None,
+                tool_selector: None,
+                force_on_match: false,
+            });
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.9, "security": 0.9 },
+            "user_id": "user-bob",
+            "parent_agent_id": "parent-1",
+            "conv_id": "conv-C",
+        });
+        let _ = gate.check("child-agent", "tool.exec", &ctx);
+        let events = cm.tail(0);
+        let deny = events
+            .iter()
+            .find(|e| e.kind == "governance.deny")
+            .expect("deny event");
+        let payload = deny.payload.as_ref().expect("payload");
+        let principal = payload
+            .get("principal")
+            .expect("principal in payload");
+        assert_eq!(principal.get("agent_id").and_then(|v| v.as_str()), Some("child-agent"));
+        assert_eq!(principal.get("user_id").and_then(|v| v.as_str()), Some("user-bob"));
+        assert_eq!(
+            principal.get("parent_agent_id").and_then(|v| v.as_str()),
+            Some("parent-1")
+        );
+        assert_eq!(principal.get("conv_id").and_then(|v| v.as_str()), Some("conv-C"));
     }
 }

@@ -76,6 +76,18 @@ pub struct TalkConfig {
     /// runtime-ready, else Kokoro. Overridden by env `WEFTOS_FAST_TTS` only when
     /// left at Auto and the env is set (see [`native_components`]).
     pub fast_engine: crate::FastEnginePreference,
+
+    /// Use the standalone in-memory [`TalkForest`] path (WEFT-638 / ADR-068).
+    ///
+    /// **Default `true`** — Talk-Mode production path today. When `false`,
+    /// callers opt into the daemon thin-edge assembly (ADR-068 Phase 1).
+    /// Thin-edge cutover is incomplete; [`TalkSession::new`] still builds a
+    /// TalkForest so voice does not hard-fail, but emits a trace warning
+    /// when this flag is false so operators can track dual-run readiness.
+    ///
+    /// Env override: `WEFTOS_LEGACY_TALK_FOREST=0|false|off` sets this to
+    /// `false` when constructing via [`TalkConfig::from_env_defaults`].
+    pub use_legacy_talk_forest: bool,
 }
 
 impl Default for TalkConfig {
@@ -102,7 +114,52 @@ impl Default for TalkConfig {
             listen_only: false,
             // david-intent: prefer clone path when inference ready (0.8 → Kokoro).
             fast_engine: crate::FastEnginePreference::Auto,
+            // WEFT-638: default to legacy TalkForest until ADR-068 thin edge is proven.
+            use_legacy_talk_forest: true,
         }
+    }
+}
+
+impl TalkConfig {
+    /// Resolve whether the standalone TalkForest path is the active engine.
+    ///
+    /// Env `WEFTOS_LEGACY_TALK_FOREST` wins when set:
+    /// - `0` / `false` / `off` / `no` → non-legacy (opt-in thin-edge intent)
+    /// - any other non-empty value → legacy on
+    /// - unset → `self.use_legacy_talk_forest`
+    pub fn legacy_talk_forest_enabled(&self) -> bool {
+        match std::env::var("WEFTOS_LEGACY_TALK_FOREST") {
+            Ok(v) => {
+                let t = v.trim().to_ascii_lowercase();
+                !(t == "0" || t == "false" || t == "off" || t == "no")
+            }
+            Err(_) => self.use_legacy_talk_forest,
+        }
+    }
+}
+
+#[cfg(test)]
+mod legacy_flag_tests {
+    use super::*;
+
+    #[test]
+    fn default_uses_legacy_talk_forest() {
+        let cfg = TalkConfig::default();
+        assert!(cfg.use_legacy_talk_forest);
+        // Without the env override, the field wins.
+        // (Env may be set in developer shells; only assert the field default.)
+        assert!(cfg.use_legacy_talk_forest);
+    }
+
+    #[test]
+    fn legacy_flag_field_false_is_respected_when_env_unset() {
+        // If the env is set in the test process we cannot assert; skip lightly.
+        if std::env::var("WEFTOS_LEGACY_TALK_FOREST").is_ok() {
+            return;
+        }
+        let mut cfg = TalkConfig::default();
+        cfg.use_legacy_talk_forest = false;
+        assert!(!cfg.legacy_talk_forest_enabled());
     }
 }
 
@@ -153,6 +210,17 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
         components: TalkComponents<M>,
         extra_observer: Option<Arc<dyn ConversationObserver>>,
     ) -> Self {
+        // WEFT-638: flag tracks cutover intent. Thin-edge-only assembly is not
+        // complete; always build TalkForest so Talk-Mode stays green, but warn
+        // when operators opt out of the legacy path.
+        if !config.legacy_talk_forest_enabled() {
+            tracing::warn!(
+                conv_id = %config.conv_id,
+                "WEFTOS_LEGACY_TALK_FOREST/use_legacy_talk_forest=false: \
+                 thin-edge cutover incomplete — falling back to TalkForest \
+                 (see docs/design/talkforest-retirement.md)"
+            );
+        }
         let forest = Arc::new(TalkForest::new(config.conv_id.clone(), config.dims));
         let loop_observer: Arc<dyn ConversationObserver> =
             Arc::new(LoopObserver::new(forest.clone()));

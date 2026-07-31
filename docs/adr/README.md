@@ -86,6 +86,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-088](adr-088-bvh-leaf-vector-ref.md) | Optional VectorRef on BVH spatial leaf payloads (before WEFT-709) | Accepted | Architecture | Design note `bvh_schema_updates.md`; amends ADR-056 |
 | [ADR-089](adr-089-exochain-dag-merge-split-brain.md) | ExoChain DAG merge strategy + split-brain (not leader consensus) | Accepted | Architecture | WEFT-109 (K5 Q1/Q5) |
 | [ADR-093](adr-093-bvh-hnsw-phase-f-join.md) | BVH × HNSW Phase F dual-index join (spatial-first / feature-first) | Accepted | Architecture | WEFT-723; builds on ADR-088 |
+| [ADR-094](adr-094-spawn-user-level-permission.md) | Spawn-at-user-level permission story (principals + Defer grant) | Accepted (foundation) | Architecture / Security | WEFT-635; relates WEFT-633/634/636 |
 
 ## Categories
 
