@@ -381,6 +381,105 @@ fn memory_help_output() {
 }
 
 #[test]
+fn routing_help_lists_trace_and_replay() {
+    let output = weft_bin()
+        .args(["routing", "--help"])
+        .output()
+        .expect("failed to run weft");
+
+    assert!(
+        output.status.success(),
+        "weft routing --help should exit 0, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("trace") || stdout.contains("Trace"),
+        "routing help should list trace, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("replay") || stdout.contains("Replay"),
+        "routing help should list replay, got: {stdout}"
+    );
+}
+
+#[test]
+fn routing_trace_from_file_json() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("routing.json");
+    let mut f = std::fs::File::create(&path).expect("create dump");
+    writeln!(
+        f,
+        r#"[{{"decision_id":"rd-itest","query":"hi","selected_route":{{"skills":["s"],"complexity_hint":0.0}},"alternatives":[],"confidence":0.5,"latency_ms":9,"channel":"cli","chat_id":"c","fallback_used":false,"ts":"2026-07-30T00:00:00Z"}}]"#
+    )
+    .unwrap();
+
+    let output = weft_bin()
+        .args([
+            "routing",
+            "trace",
+            "--from-file",
+            path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("failed to run weft routing trace");
+
+    assert!(
+        output.status.success(),
+        "weft routing trace --from-file should exit 0, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rd-itest"),
+        "trace JSON should include decision_id, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("latency_ms") || stdout.contains("\"count\""),
+        "trace JSON should include metrics/count, got: {stdout}"
+    );
+}
+
+#[test]
+fn routing_replay_dry_run_from_file() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("routing.json");
+    let mut f = std::fs::File::create(&path).expect("create dump");
+    writeln!(
+        f,
+        r#"[{{"decision_id":"rd-replay","query":"ping","selected_route":{{"skills":[],"complexity_hint":0.0}},"alternatives":[],"latency_ms":1,"channel":"cli","chat_id":"c","fallback_used":false,"ts":"2026-07-30T00:00:00Z"}}]"#
+    )
+    .unwrap();
+
+    let output = weft_bin()
+        .args([
+            "routing",
+            "replay",
+            "rd-replay",
+            "--from-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run weft routing replay");
+
+    assert!(
+        output.status.success(),
+        "weft routing replay should exit 0, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rd-replay") && stdout.contains("dry-run"),
+        "replay should show decision id and dry-run mode, got: {stdout}"
+    );
+}
+
+#[test]
 fn sessions_help_output() {
     let output = weft_bin()
         .args(["sessions", "--help"])

@@ -100,6 +100,9 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     // WEFT-333: live agent.chat SystemService metrics from the daemon.
     print_agent_chat_status().await;
 
+    // WEFT-336: router p50/p99 latency + fallback rate from the decision log.
+    print_routing_metrics().await;
+
     if args.detailed {
         println!();
         println!("Gateway:");
@@ -292,6 +295,40 @@ fn extract_metrics_from_health(health: &str) -> Option<String> {
         Some(health.to_string())
     } else {
         None
+    }
+}
+
+/// Best-effort: load last-100 routing decisions and print p50/p99 +
+/// fallback rate (WEFT-336). Silent when the daemon is offline or the
+/// log is empty — never fails `weft status`.
+async fn print_routing_metrics() {
+    println!();
+    println!("context router:");
+    match super::routing_cmd::try_load_status_metrics().await {
+        Some(m) if m.count > 0 => {
+            println!("  Decisions (window): {}", m.count);
+            if let Some(p50) = m.p50_latency_ms {
+                println!("  p50 latency:        {p50} ms");
+            }
+            if let Some(p99) = m.p99_latency_ms {
+                println!("  p99 latency:        {p99} ms");
+            }
+            println!(
+                "  fallback rate:      {:.1}% ({}/{})",
+                m.fallback_rate * 100.0,
+                m.fallback_count,
+                m.count
+            );
+            println!("  (see also: weft routing trace / weft routing replay)");
+        }
+        Some(_) => {
+            println!("  Decisions (window): 0");
+            println!("  (no entries under substrate/_derived/agent/routing/recent)");
+        }
+        None => {
+            println!("  Daemon: not reachable (or substrate.list unavailable)");
+            println!("  (start daemon, or use `weft routing trace --from-file`)");
+        }
     }
 }
 

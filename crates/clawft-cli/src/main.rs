@@ -107,6 +107,9 @@ enum Commands {
     /// Inspect task-delegation routing decisions.
     Delegate(commands::delegate_cmd::DelegateArgs),
 
+    /// Context-router decision trace and replay (WEFT-336).
+    Routing(commands::routing_cmd::RoutingArgs),
+
     /// Environment and multi-agent readiness checks.
     Doctor(commands::doctor::DoctorArgs),
 
@@ -506,6 +509,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Agents(args) => commands::agents_cmd::run(args).await?,
         Commands::Swarm(args) => commands::swarm_cmd::run(args).await?,
         Commands::Delegate(args) => commands::delegate_cmd::run(args).await?,
+        Commands::Routing(args) => commands::routing_cmd::run(args).await?,
         Commands::Workspace(args) => commands::workspace_cmd::run(args).await?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
         Commands::Analyze(args) => commands::analyze_cmd::run(args).await?,

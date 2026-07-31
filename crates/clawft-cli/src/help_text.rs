@@ -24,6 +24,7 @@ pub fn general_help() -> String {
     output.push_str("  tools          Manage tools (list, show, search, deny/allow)\n");
     output.push_str("  agents         Manage agents (list, show, use)\n");
     output.push_str("  swarm          Multi-agent swarm demo (AgentBus + workers)\n");
+    output.push_str("  routing        Context-router decision trace and replay\n");
     output.push_str("  workspace      Manage workspaces\n");
     output.push_str("  onboard        Initialize clawft config and workspace\n");
     output.push_str("  ui             Start the web dashboard\n");
