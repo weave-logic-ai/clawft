@@ -29,6 +29,8 @@ use crate::wasm_time::epoch_minus;
 
 pub mod chat;
 pub mod control_toggle;
+/// ADR-067 conversation graph view (WEFT-630 G1–G5 scaffold).
+pub mod conversation_graph;
 pub mod terminal;
 pub mod tree;
 pub mod viewers;
