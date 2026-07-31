@@ -650,6 +650,19 @@ pub struct LlmClient {
     in_flight: Arc<Semaphore>,
 }
 
+/// Process-wide handle that can be replaced when env rotates (WEFT-343).
+///
+/// The daemon stores one of these in a `OnceLock` so `control.set_enabled`
+/// (and any other refresh path) can re-read env/config and swap the
+/// inner [`LlmClient`] without tearing down call-sites that already hold
+/// the outer `Arc`.
+pub type SharedLlmClient = Arc<tokio::sync::RwLock<LlmClient>>;
+
+/// Wrap a freshly-built [`LlmClient`] for shared, swappable use.
+pub fn share_llm_client(client: LlmClient) -> SharedLlmClient {
+    Arc::new(tokio::sync::RwLock::new(client))
+}
+
 impl LlmClient {
     /// Build a client with the supplied config.
     pub fn new(config: LlmConfig) -> Result<Self, LlmError> {
@@ -1774,5 +1787,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.choices[0].message.content.as_text(), "I see a red bicycle.");
+    }
+
+    /// WEFT-343: a `SharedLlmClient` swap must replace the inner client
+    /// so subsequent readers observe the new config (e.g. rotated API
+    /// key / URL after `control.set_enabled` refresh).
+    #[tokio::test]
+    async fn shared_client_swap_replaces_inner() {
+        let shared = share_llm_client(LlmClient::new(test_config("http://old.example".into())).unwrap());
+        assert_eq!(
+            shared.read().await.config().base_url,
+            "http://old.example"
+        );
+
+        let replacement =
+            LlmClient::new(test_config("http://new.example".into())).unwrap();
+        *shared.write().await = replacement;
+
+        assert_eq!(
+            shared.read().await.config().base_url,
+            "http://new.example"
+        );
+        // Outer Arc identity is stable — call-sites holding clones still
+        // see the swap.
+        let clone = Arc::clone(&shared);
+        assert_eq!(clone.read().await.config().base_url, "http://new.example");
     }
 }

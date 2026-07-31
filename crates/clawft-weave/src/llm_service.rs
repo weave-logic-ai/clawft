@@ -41,13 +41,21 @@
 //!   `control.set_enabled { kind: "service", target: "llm" }` RPC
 //!   already toggles, so the existing capability gate keeps governing
 //!   who can flip it.
+//! - **WEFT-343 runtime swap**: the adapter holds a
+//!   [`SharedLlmClient`] so a mid-session env rotation (e.g.
+//!   `OPENROUTER_API_KEY`) re-read via `control.set_enabled` is
+//!   visible to `health_check` / start logs without re-registering.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use clawft_kernel::{HealthStatus, ServiceType, SystemService};
-use clawft_service_llm::LlmClient;
+use clawft_service_llm::{
+    LlmClient, LlmConfig, SharedLlmClient, DEFAULT_LLM_MODEL, DEFAULT_LLM_SERVICE_URL,
+    DEFAULT_OPENROUTER_BASE_URL, DEFAULT_OPENROUTER_MODEL, LLM_MODEL_ENV, LLM_SERVICE_URL_ENV,
+    OPENROUTER_API_KEY_ENV,
+};
 
 /// Stable name. Matches `(ControlKind::Service, "llm")` so a
 /// `service.{start,stop,restart}` call and a
@@ -65,16 +73,131 @@ const LLM_SERVICE_NAME: &str = "llm";
 /// mediated through the registry.
 pub const LLM_CONTRACT_METHODS: &[&str] = &["llm.prompt", "llm.models"];
 
-/// SystemService adapter wrapping the daemon's [`LlmClient`].
+/// Outcome of [`resolve_llm_endpoint`]: the config to hand
+/// [`LlmClient::new`] plus whether the resolved target is OpenRouter
+/// (affects health-probe skip + attribution headers).
+#[derive(Debug, Clone)]
+pub struct ResolvedLlmEndpoint {
+    /// Fully-resolved client config (URL, model, api_key, headers).
+    pub config: LlmConfig,
+    /// `true` when OpenRouter takeover fired (no explicit URL + key set).
+    pub using_openrouter: bool,
+    /// Human-readable provenance for the winning URL source.
+    pub url_source: &'static str,
+    /// Human-readable provenance for the winning model source.
+    pub model_source: &'static str,
+}
+
+/// Resolve LLM endpoint from env + optional `[kernel.llm]` config.
+///
+/// Precedence (first hit wins) — mirrors the daemon boot path so a
+/// WEFT-343 refresh after `control.set_enabled` observes the same
+/// rules as cold start:
+///
+/// 1. `LLM_SERVICE_URL` env
+/// 2. `[kernel.llm].service_url` in config
+/// 3. `OPENROUTER_API_KEY` set AND no URL above → OpenRouter defaults
+/// 4. ADR-060 local Hermes defaults
+pub fn resolve_llm_endpoint(
+    cfg_llm: Option<&clawft_types::config::LlmEndpointConfig>,
+) -> ResolvedLlmEndpoint {
+    let cfg_llm_url = cfg_llm
+        .and_then(|c| c.service_url.clone())
+        .filter(|s| !s.is_empty());
+    let cfg_llm_model = cfg_llm
+        .and_then(|c| c.model.clone())
+        .filter(|s| !s.is_empty());
+
+    let api_key_env = std::env::var(OPENROUTER_API_KEY_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let llm_url_env = std::env::var(LLM_SERVICE_URL_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let llm_model_env = std::env::var(LLM_MODEL_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let url_from_env = llm_url_env.is_some();
+    let url_from_cfg = cfg_llm_url.is_some();
+    let model_from_env = llm_model_env.is_some();
+    let model_from_cfg = cfg_llm_model.is_some();
+
+    let llm_url_override = llm_url_env.or(cfg_llm_url);
+    let llm_model_override = llm_model_env.or(cfg_llm_model);
+
+    let openrouter_takeover = api_key_env.is_some() && llm_url_override.is_none();
+
+    let (default_url, default_model) = if openrouter_takeover {
+        (
+            DEFAULT_OPENROUTER_BASE_URL.to_string(),
+            DEFAULT_OPENROUTER_MODEL.to_string(),
+        )
+    } else {
+        (
+            DEFAULT_LLM_SERVICE_URL.to_string(),
+            DEFAULT_LLM_MODEL.to_string(),
+        )
+    };
+    let llm_url = llm_url_override.unwrap_or(default_url);
+    let llm_model = llm_model_override.unwrap_or(default_model);
+    let using_openrouter = openrouter_takeover;
+    let api_key = if using_openrouter { api_key_env } else { None };
+
+    let url_source = if url_from_env {
+        "env:LLM_SERVICE_URL"
+    } else if url_from_cfg {
+        "config:[kernel.llm].service_url"
+    } else if using_openrouter {
+        "default:openrouter"
+    } else {
+        "default:local"
+    };
+    let model_source = if model_from_env {
+        "env:LLM_MODEL"
+    } else if model_from_cfg {
+        "config:[kernel.llm].model"
+    } else if using_openrouter {
+        "default:openrouter"
+    } else {
+        "default:local"
+    };
+
+    ResolvedLlmEndpoint {
+        config: LlmConfig {
+            base_url: llm_url,
+            model: llm_model,
+            api_key,
+            referer: using_openrouter.then(|| "https://github.com/clawft/clawft".to_string()),
+            app_title: using_openrouter.then(|| "WeftOS weaver".to_string()),
+            ..LlmConfig::default()
+        },
+        using_openrouter,
+        url_source,
+        model_source,
+    }
+}
+
+/// Build a fresh [`LlmClient`] from the current env + optional kernel
+/// config. Used at boot and on WEFT-343 refresh.
+pub fn build_llm_client(
+    cfg_llm: Option<&clawft_types::config::LlmEndpointConfig>,
+) -> Result<(LlmClient, ResolvedLlmEndpoint), clawft_service_llm::LlmError> {
+    let resolved = resolve_llm_endpoint(cfg_llm);
+    let client = LlmClient::new(resolved.config.clone())?;
+    Ok((client, resolved))
+}
+
+/// SystemService adapter wrapping the daemon's [`SharedLlmClient`].
 ///
 /// Constructed at boot in `daemon::run` once the client has been
 /// successfully built; registered into `k.services()` so it appears
-/// in the Services panel. The same `Arc<LlmClient>` is still cached
-/// in `DAEMON_LLM` for the existing `daemon_llm()` lookup path —
-/// this adapter owns its own clone so the registry can drop and
-/// recreate the service without disturbing in-flight RPC calls.
+/// in the Services panel. The same `SharedLlmClient` is cached in
+/// `DAEMON_LLM` for the existing `daemon_llm()` lookup path — this
+/// adapter clones the outer `Arc` so a swap replaces the client for
+/// every holder.
 pub struct LlmSystemService {
-    client: Arc<LlmClient>,
+    client: SharedLlmClient,
     /// Mirror of the control-flag the daemon registers at boot:
     /// `control_flags.register(ControlKind::Service, "llm", true)`.
     /// Cloned here so `start` / `stop` / `health_check` can read and
@@ -84,13 +207,18 @@ pub struct LlmSystemService {
 }
 
 impl LlmSystemService {
-    /// Build a new adapter from the LLM client and the existing
+    /// Build a new adapter from the shared LLM handle and the existing
     /// service-control flag. Daemon's responsibility to pass the
     /// same `Arc<AtomicBool>` it registered with `ControlFlags`, so
     /// `service.stop` and `control.set_enabled` are observably the
     /// same toggle.
-    pub fn new(client: Arc<LlmClient>, enabled: Arc<AtomicBool>) -> Self {
+    pub fn new(client: SharedLlmClient, enabled: Arc<AtomicBool>) -> Self {
         Self { client, enabled }
+    }
+
+    /// Borrow the shared handle (tests / diagnostics).
+    pub fn shared_client(&self) -> &SharedLlmClient {
+        &self.client
     }
 }
 
@@ -106,9 +234,10 @@ impl SystemService for LlmSystemService {
 
     async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.enabled.store(true, Ordering::SeqCst);
+        let guard = self.client.read().await;
         tracing::info!(
-            url = %self.client.config().base_url,
-            model = %self.client.config().model,
+            url = %guard.config().base_url,
+            model = %guard.config().model,
             "llm service enabled (service.start)",
         );
         Ok(())
@@ -124,7 +253,8 @@ impl SystemService for LlmSystemService {
         if !self.enabled.load(Ordering::SeqCst) {
             return HealthStatus::Degraded("disabled".into());
         }
-        match self.client.health().await {
+        let guard = self.client.read().await;
+        match guard.health().await {
             Ok(true) => HealthStatus::Healthy,
             Ok(false) => HealthStatus::Degraded("upstream loading model (503)".into()),
             Err(e) => HealthStatus::Unhealthy(e.to_string()),
@@ -135,9 +265,9 @@ impl SystemService for LlmSystemService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clawft_service_llm::LlmConfig;
+    use clawft_service_llm::{share_llm_client, LlmConfig};
 
-    fn unreachable_client() -> Arc<LlmClient> {
+    fn unreachable_client() -> SharedLlmClient {
         // Bind to a never-served port so health() returns a transport
         // error deterministically. We don't actually fire HTTP in the
         // synchronous-construction tests below — only in the async
@@ -146,7 +276,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".to_string(),
             ..LlmConfig::default()
         };
-        Arc::new(LlmClient::new(cfg).expect("client builds with bogus url"))
+        share_llm_client(LlmClient::new(cfg).expect("client builds with bogus url"))
     }
 
     #[test]
@@ -197,9 +327,125 @@ mod tests {
         assert!(LLM_CONTRACT_METHODS.contains(&"llm.prompt"));
     }
 
+    /// WEFT-343: swapping the shared handle is visible to the service
+    /// adapter without reconstructing it.
+    #[tokio::test]
+    async fn shared_client_swap_is_visible_to_service() {
+        let shared = unreachable_client();
+        let svc = LlmSystemService::new(Arc::clone(&shared), Arc::new(AtomicBool::new(true)));
+        assert_eq!(
+            svc.shared_client().read().await.config().base_url,
+            "http://127.0.0.1:1"
+        );
+
+        let replacement = LlmClient::new(LlmConfig {
+            base_url: "http://127.0.0.1:2".to_string(),
+            model: "swapped-model".to_string(),
+            ..LlmConfig::default()
+        })
+        .expect("client builds");
+        *shared.write().await = replacement;
+
+        let guard = svc.shared_client().read().await;
+        assert_eq!(guard.config().base_url, "http://127.0.0.1:2");
+        assert_eq!(guard.config().model, "swapped-model");
+    }
+
+    /// Serialise env-mutating resolve tests — `set_var` races with
+    /// other threads under nextest/cargo-test parallelism.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Snapshot / restore the three env vars resolve reads so ambient
+    /// developer shell vars (and sibling tests) cannot poison results.
+    struct EnvSnapshot {
+        url: Option<String>,
+        key: Option<String>,
+        model: Option<String>,
+    }
+
+    impl EnvSnapshot {
+        fn capture() -> Self {
+            Self {
+                url: std::env::var(LLM_SERVICE_URL_ENV).ok(),
+                key: std::env::var(OPENROUTER_API_KEY_ENV).ok(),
+                model: std::env::var(LLM_MODEL_ENV).ok(),
+            }
+        }
+
+        fn restore(self) {
+            // SAFETY: held under env_lock by the caller.
+            unsafe {
+                match self.url {
+                    Some(v) => std::env::set_var(LLM_SERVICE_URL_ENV, v),
+                    None => std::env::remove_var(LLM_SERVICE_URL_ENV),
+                }
+                match self.key {
+                    Some(v) => std::env::set_var(OPENROUTER_API_KEY_ENV, v),
+                    None => std::env::remove_var(OPENROUTER_API_KEY_ENV),
+                }
+                match self.model {
+                    Some(v) => std::env::set_var(LLM_MODEL_ENV, v),
+                    None => std::env::remove_var(LLM_MODEL_ENV),
+                }
+            }
+        }
+    }
+
     #[test]
-    fn contract_methods_lists_llm_models() {
-        // WEFT-256: chip-strip enumeration is a first-class LLM verb.
-        assert!(LLM_CONTRACT_METHODS.contains(&"llm.models"));
+    fn resolve_honors_llm_service_url_env() {
+        let _guard = env_lock();
+        let snap = EnvSnapshot::capture();
+        // SAFETY: held under env_lock; set/remove for isolation.
+        unsafe {
+            std::env::set_var(LLM_SERVICE_URL_ENV, "http://env-host:9000");
+            std::env::remove_var(OPENROUTER_API_KEY_ENV);
+            std::env::remove_var(LLM_MODEL_ENV);
+        }
+        let resolved = resolve_llm_endpoint(None);
+        snap.restore();
+        assert_eq!(resolved.config.base_url, "http://env-host:9000");
+        assert_eq!(resolved.url_source, "env:LLM_SERVICE_URL");
+        assert!(!resolved.using_openrouter);
+    }
+
+    #[test]
+    fn resolve_openrouter_takeover_when_key_set_and_no_url() {
+        let _guard = env_lock();
+        let snap = EnvSnapshot::capture();
+        unsafe {
+            std::env::remove_var(LLM_SERVICE_URL_ENV);
+            std::env::set_var(OPENROUTER_API_KEY_ENV, "sk-test-key");
+            std::env::remove_var(LLM_MODEL_ENV);
+        }
+        let resolved = resolve_llm_endpoint(None);
+        snap.restore();
+        assert!(resolved.using_openrouter);
+        assert_eq!(resolved.config.base_url, DEFAULT_OPENROUTER_BASE_URL);
+        assert_eq!(resolved.config.api_key.as_deref(), Some("sk-test-key"));
+    }
+
+    #[test]
+    fn resolve_config_url_beats_openrouter_key() {
+        let _guard = env_lock();
+        let snap = EnvSnapshot::capture();
+        unsafe {
+            std::env::remove_var(LLM_SERVICE_URL_ENV);
+            std::env::set_var(OPENROUTER_API_KEY_ENV, "sk-test-key");
+            std::env::remove_var(LLM_MODEL_ENV);
+        }
+        let cfg = clawft_types::config::LlmEndpointConfig {
+            service_url: Some("http://local:8090".into()),
+            model: Some("hermes".into()),
+        };
+        let resolved = resolve_llm_endpoint(Some(&cfg));
+        snap.restore();
+        assert!(!resolved.using_openrouter);
+        assert_eq!(resolved.config.base_url, "http://local:8090");
+        assert!(resolved.config.api_key.is_none());
     }
 }

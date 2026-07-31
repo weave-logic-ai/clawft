@@ -157,10 +157,12 @@ impl LlmClassifierRouter {
         }
     }
 
-    /// Build a router from an `Arc<LlmClient>`. Native-only because
-    /// `LlmClient` itself is native-only (pulls reqwest).
+    /// Build a router from a shared (swappable) [`LlmClient`] handle.
+    /// Native-only because `LlmClient` itself is native-only (pulls
+    /// reqwest). WEFT-343: accepts [`SharedLlmClient`] so a daemon-side
+    /// env rotation is visible to the classifier without rebuild.
     #[cfg(feature = "native")]
-    pub fn new(llm: Arc<clawft_service_llm::LlmClient>) -> Self {
+    pub fn new(llm: clawft_service_llm::SharedLlmClient) -> Self {
         Self::from_backend(llm)
     }
 
@@ -305,6 +307,24 @@ impl Classifier for clawft_service_llm::LlmClient {
             .map(|c| c.message.content.as_text().into_owned())
             .unwrap_or_default();
         Ok(body)
+    }
+}
+
+/// WEFT-343: classify through a shared, swappable handle so a daemon
+/// env rotation is observed without rebuilding the classifier.
+#[cfg(feature = "native")]
+#[async_trait]
+impl Classifier for tokio::sync::RwLock<clawft_service_llm::LlmClient> {
+    async fn classify(
+        &self,
+        user_content: &str,
+        max_tokens: u32,
+        model_override: Option<&str>,
+    ) -> Result<String, String> {
+        let client = self.read().await;
+        client
+            .classify(user_content, max_tokens, model_override)
+            .await
     }
 }
 

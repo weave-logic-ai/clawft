@@ -42,14 +42,12 @@
 //! desired behavior until [`clawft-service-llm`] grows a streaming
 //! method.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use tracing::debug;
 
 use clawft_service_llm::{
-    ChatMessage, ChatResponse, ContentBlock, LlmClient, MessageContent, Tool, ToolCall,
-    ToolCallFunction, ToolChoice,
+    share_llm_client, ChatMessage, ChatResponse, ContentBlock, LlmClient, MessageContent,
+    SharedLlmClient, Tool, ToolCall, ToolCallFunction, ToolChoice,
 };
 
 use super::transport::LlmProvider;
@@ -57,31 +55,39 @@ use super::transport::LlmProvider;
 /// Adapts an [`LlmClient`] (narrow llama-server HTTP client) into the
 /// pipeline's [`LlmProvider`] trait.
 ///
-/// Cheap to clone — wraps an `Arc<LlmClient>`. Construct once, share
-/// across pipelines.
+/// Cheap to clone — wraps a [`SharedLlmClient`] (`Arc<RwLock<LlmClient>>`)
+/// so a daemon-side env rotation (WEFT-343) can swap the inner client
+/// without rebuilding the pipeline.
 #[derive(Debug, Clone)]
 pub struct ServiceLlmAdapter {
-    client: Arc<LlmClient>,
+    client: SharedLlmClient,
 }
 
 impl ServiceLlmAdapter {
-    /// Wrap a client. Typical use:
+    /// Wrap a shared, swappable client handle. Typical use:
     ///
     /// ```ignore
-    /// use clawft_service_llm::{LlmClient, LlmConfig};
+    /// use clawft_service_llm::{share_llm_client, LlmClient, LlmConfig};
     /// use clawft_core::pipeline::service_llm_adapter::ServiceLlmAdapter;
     ///
     /// let client = LlmClient::new(LlmConfig::from_env())?;
-    /// let adapter = ServiceLlmAdapter::new(Arc::new(client));
+    /// let adapter = ServiceLlmAdapter::new(share_llm_client(client));
     /// ```
-    pub fn new(client: Arc<LlmClient>) -> Self {
+    pub fn new(client: SharedLlmClient) -> Self {
         Self { client }
     }
 
-    /// Borrow the underlying client. Useful for tests and for the
+    /// Wrap a non-shared client (CLI / tests). Equivalent to
+    /// `new(share_llm_client(client))` — the resulting handle is
+    /// swappable but no other owner holds the outer `Arc`.
+    pub fn from_client(client: LlmClient) -> Self {
+        Self::new(share_llm_client(client))
+    }
+
+    /// Borrow the shared handle. Useful for tests and for the
     /// daemon's wiring where the same client backs both the
     /// `llm.prompt` RPC and the agent loop's transport.
-    pub fn client(&self) -> &Arc<LlmClient> {
+    pub fn client(&self) -> &SharedLlmClient {
         &self.client
     }
 }
@@ -132,8 +138,13 @@ impl LlmProvider for ServiceLlmAdapter {
             })
             .collect();
 
+        // Hold a read lock for the duration of the HTTP call so a
+        // concurrent WEFT-343 swap waits until in-flight work finishes
+        // (and never observes a half-swapped client).
+        let client = self.client.read().await;
+
         debug!(
-            base_url = %self.client.config().base_url,
+            base_url = %client.config().base_url,
             model = %model,
             messages = chat_messages.len(),
             tools = parsed_tools.len(),
@@ -151,8 +162,7 @@ impl LlmProvider for ServiceLlmAdapter {
         // reaches the upstream body instead of only the daemon default.
         let model_override = if model.is_empty() { None } else { Some(model) };
 
-        let resp = self
-            .client
+        let resp = client
             .complete_with_tools(
                 chat_messages,
                 parsed_tools,
@@ -539,7 +549,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let adapter = ServiceLlmAdapter::new(Arc::new(client));
+        let adapter = ServiceLlmAdapter::from_client(client);
 
         let messages = vec![serde_json::json!({"role":"user","content":"hi"})];
         let v = adapter
@@ -591,7 +601,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let adapter = ServiceLlmAdapter::new(Arc::new(client));
+        let adapter = ServiceLlmAdapter::from_client(client);
 
         let tools = vec![serde_json::json!({
             "type": "function",

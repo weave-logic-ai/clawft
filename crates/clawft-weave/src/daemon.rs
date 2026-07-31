@@ -36,10 +36,57 @@ fn daemon_control() -> Option<Arc<DaemonControlState>> {
 /// service spawns successfully; `None` otherwise. The `llm.prompt`
 /// handler reads this and returns a clean error when unset rather
 /// than panicking.
-static DAEMON_LLM: OnceLock<Arc<clawft_service_llm::LlmClient>> = OnceLock::new();
+///
+/// WEFT-343: wrapped in `Arc<RwLock<_>>` so a mid-session env rotation
+/// (e.g. `OPENROUTER_API_KEY`) can swap the inner client via
+/// `control.set_enabled {kind:"service", target:"llm"}` without
+/// rebuilding every agent-loop / adapter that holds a clone of the
+/// outer `Arc`.
+static DAEMON_LLM: OnceLock<clawft_service_llm::SharedLlmClient> = OnceLock::new();
 
-fn daemon_llm() -> Option<Arc<clawft_service_llm::LlmClient>> {
+fn daemon_llm() -> Option<clawft_service_llm::SharedLlmClient> {
     DAEMON_LLM.get().cloned()
+}
+
+/// WEFT-343: re-read env + `[kernel.llm]` and replace the inner
+/// [`LlmClient`] under `DAEMON_LLM`. Call-sites that already hold the
+/// shared handle observe the new client on their next read lock.
+///
+/// Returns `Err` when construction fails or when the client was never
+/// wired at boot (agent loop / service registration already skipped —
+/// a full re-wire is out of scope for this ticket).
+async fn refresh_daemon_llm_from_env(
+    kernel: &Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Result<(), String> {
+    let shared = daemon_llm().ok_or_else(|| {
+        "llm service not initialized (cannot refresh — was not wired at boot)".to_string()
+    })?;
+    let cfg_llm = {
+        let k = kernel.read().await;
+        k.kernel_config().llm.clone()
+    };
+    let (new_client, resolved) =
+        crate::llm_service::build_llm_client(cfg_llm.as_ref()).map_err(|e| e.to_string())?;
+
+    let (old_url, old_model) = {
+        let guard = shared.read().await;
+        (
+            guard.config().base_url.clone(),
+            guard.config().model.clone(),
+        )
+    };
+    *shared.write().await = new_client;
+    info!(
+        old_url = %old_url,
+        old_model = %old_model,
+        url = %resolved.config.base_url,
+        model = %resolved.config.model,
+        url_source = resolved.url_source,
+        model_source = resolved.model_source,
+        openrouter = resolved.using_openrouter,
+        "llm client swapped after env refresh (WEFT-343)"
+    );
+    Ok(())
 }
 
 /// Daemon-wide handle to the PTY-backed terminal manager. Set at boot;
@@ -1110,112 +1157,30 @@ pub async fn run(
     // user toggles it from the GUI.
     let _llm_service_flag = control_flags.register(ControlKind::Service, "llm", true);
     {
-        // LLM endpoint resolution.
+        // LLM endpoint resolution — shared with the WEFT-343 refresh
+        // path (`refresh_daemon_llm_from_env` / `llm_service::resolve_llm_endpoint`).
         //
         // Precedence (first hit wins):
         //   1. LLM_SERVICE_URL env — one-off override / experiments.
         //      Note: `main.rs` calls `dotenvy::dotenv()` early, so any
         //      `LLM_SERVICE_URL=` line in `./env` ALSO gets picked up
-        //      here and silently shadows `[kernel.llm]` below. If the
-        //      panel keeps hitting OpenRouter despite a localhost
-        //      `[kernel.llm].service_url`, look in `./env` first.
+        //      here and silently shadows `[kernel.llm]` below.
         //   2. [kernel.llm].service_url in config — durable operator
         //      choice.
         //   3. OPENROUTER_API_KEY set AND no URL above — opt-in
         //      OpenRouter takeover (bearer auth + OpenRouter defaults).
         //   4. ADR-060 local Hermes defaults (127.0.0.1:8090, hermes-4.3-36b).
-        //
-        // The earlier logic flipped `using_openrouter` purely on
-        // OPENROUTER_API_KEY presence, which meant a user pointing
-        // LLM_SERVICE_URL at a local llama-server while still having
-        // OPENROUTER_API_KEY in the shell got bearer-auth headers
-        // sent to localhost AND the OpenRouter model name as the
-        // request body's `model` field — confusing and wrong.
         let cfg_llm = {
             let k = kernel.read().await;
             k.kernel_config().llm.clone()
         };
-        let cfg_llm_url = cfg_llm
-            .as_ref()
-            .and_then(|c| c.service_url.clone())
-            .filter(|s| !s.is_empty());
-        let cfg_llm_model = cfg_llm
-            .as_ref()
-            .and_then(|c| c.model.clone())
-            .filter(|s| !s.is_empty());
+        let resolved = crate::llm_service::resolve_llm_endpoint(cfg_llm.as_ref());
+        let llm_url = resolved.config.base_url.clone();
+        let llm_model = resolved.config.model.clone();
+        let using_openrouter = resolved.using_openrouter;
+        let url_source = resolved.url_source;
+        let model_source = resolved.model_source;
 
-        let api_key_env = std::env::var(clawft_service_llm::OPENROUTER_API_KEY_ENV)
-            .ok()
-            .filter(|s| !s.is_empty());
-        let llm_url_env = std::env::var(clawft_service_llm::LLM_SERVICE_URL_ENV)
-            .ok()
-            .filter(|s| !s.is_empty());
-        let llm_model_env = std::env::var(clawft_service_llm::LLM_MODEL_ENV)
-            .ok()
-            .filter(|s| !s.is_empty());
-
-        // Provenance for observability — capture which layer supplied
-        // each value before `.or()` consumes the Options, so the boot
-        // log can name the winning source and warn when a (possibly
-        // stale) env value silently shadows an explicit [kernel.llm].
-        let url_from_env = llm_url_env.is_some();
-        let url_from_cfg = cfg_llm_url.is_some();
-        let model_from_env = llm_model_env.is_some();
-        let model_from_cfg = cfg_llm_model.is_some();
-
-        // Resolved override (env wins over config).
-        let llm_url_override = llm_url_env.or(cfg_llm_url);
-        let llm_model_override = llm_model_env.or(cfg_llm_model);
-
-        // OpenRouter takeover only fires when the operator hasn't
-        // explicitly pointed the URL elsewhere (env or config).
-        let openrouter_takeover = api_key_env.is_some() && llm_url_override.is_none();
-
-        let (default_url, default_model) = if openrouter_takeover {
-            (
-                clawft_service_llm::DEFAULT_OPENROUTER_BASE_URL.to_string(),
-                clawft_service_llm::DEFAULT_OPENROUTER_MODEL.to_string(),
-            )
-        } else {
-            (
-                clawft_service_llm::DEFAULT_LLM_SERVICE_URL.to_string(),
-                clawft_service_llm::DEFAULT_LLM_MODEL.to_string(),
-            )
-        };
-        let llm_url = llm_url_override.unwrap_or(default_url);
-        let llm_model = llm_model_override.unwrap_or(default_model);
-        // Only attach bearer auth + OpenRouter headers when we're
-        // actually targeting OpenRouter. If the user pointed the URL
-        // elsewhere, suppress them — local llama-server doesn't
-        // expect them and a routing proxy may reject them.
-        let using_openrouter = openrouter_takeover;
-        let api_key = if using_openrouter { api_key_env } else { None };
-
-        // Make endpoint resolution observable at boot: name the winning
-        // source for URL + model, and warn loudly when an env var —
-        // which `main.rs` also loads from `./env` via `dotenvy` —
-        // shadows an explicit `[kernel.llm]` value. The shadow itself is
-        // intended precedence (env = one-off override), but it was
-        // previously silent, which made a stale `./env` line a recurring
-        // "panel keeps hitting OpenRouter" footgun.
-        let url_source = if url_from_env {
-            "env:LLM_SERVICE_URL"
-        } else if url_from_cfg {
-            "config:[kernel.llm].service_url"
-        } else if using_openrouter {
-            "default:openrouter"
-        } else {
-            "default:local"
-        };
-        let model_source = if model_from_env {
-            "env:LLM_MODEL"
-        } else if model_from_cfg {
-            "config:[kernel.llm].model"
-        } else if using_openrouter {
-            "default:openrouter"
-        } else {
-            "default:local"
-        };
         info!(
             url = %llm_url,
             url_source,
@@ -1224,7 +1189,16 @@ pub async fn run(
             openrouter = using_openrouter,
             "llm endpoint resolved"
         );
-        if url_from_env && url_from_cfg {
+        // Warn when env (possibly from `./env` via dotenvy) shadows an
+        // explicit `[kernel.llm]` value — intended precedence, but a
+        // silent shadow was a recurring "panel keeps hitting OpenRouter"
+        // footgun.
+        if url_source == "env:LLM_SERVICE_URL"
+            && cfg_llm
+                .as_ref()
+                .and_then(|c| c.service_url.as_ref())
+                .is_some_and(|s| !s.is_empty())
+        {
             warn!(
                 env_url = %llm_url,
                 "LLM_SERVICE_URL (possibly from ./env) shadows \
@@ -1232,7 +1206,12 @@ pub async fn run(
                  to use the durable config value"
             );
         }
-        if model_from_env && model_from_cfg {
+        if model_source == "env:LLM_MODEL"
+            && cfg_llm
+                .as_ref()
+                .and_then(|c| c.model.as_ref())
+                .is_some_and(|s| !s.is_empty())
+        {
             warn!(
                 env_model = %llm_model,
                 "LLM_MODEL (possibly from ./env) shadows [kernel.llm].model \
@@ -1240,39 +1219,35 @@ pub async fn run(
             );
         }
 
-        let cfg = clawft_service_llm::LlmConfig {
-            base_url: llm_url.clone(),
-            model: llm_model.clone(),
-            api_key,
-            referer: using_openrouter.then(|| "https://github.com/clawft/clawft".to_string()),
-            app_title: using_openrouter.then(|| "WeftOS weaver".to_string()),
-            ..clawft_service_llm::LlmConfig::default()
-        };
-        match clawft_service_llm::LlmClient::new(cfg) {
+        match clawft_service_llm::LlmClient::new(resolved.config) {
             Ok(client) => {
-                let arc = Arc::new(client);
+                // WEFT-343: shared swappable handle — outer Arc is
+                // stable for the process lifetime; inner client can
+                // be replaced on control.set_enabled refresh.
+                let shared = clawft_service_llm::share_llm_client(client);
                 // Background health probe — only meaningful for
                 // local llama-server; OpenRouter has no `/health`
                 // endpoint and would always fail the probe, so we
-                // skip it when an api_key is configured.
+                // skip it when openrouter takeover is active.
                 if !using_openrouter {
-                    let probe = Arc::clone(&arc);
+                    let probe = Arc::clone(&shared);
                     tokio::spawn(async move {
-                        if probe.wait_for_healthy().await {
+                        let guard = probe.read().await;
+                        if guard.wait_for_healthy().await {
                             info!(
-                                url = %probe.config().base_url,
+                                url = %guard.config().base_url,
                                 "llm service: healthy"
                             );
                         } else {
                             warn!(
-                                url = %probe.config().base_url,
+                                url = %guard.config().base_url,
                                 "llm service: health probe failed at boot \
                                  (RPC will return a clean error per call)"
                             );
                         }
                     });
                 }
-                let _ = DAEMON_LLM.set(Arc::clone(&arc));
+                let _ = DAEMON_LLM.set(Arc::clone(&shared));
 
                 // Register the LLM as a first-class kernel service so
                 // it shows up in `kernel.services`, in the desktop
@@ -1287,7 +1262,7 @@ pub async fn run(
                 // every other kernel service gets at boot.
                 {
                     let svc = Arc::new(crate::llm_service::LlmSystemService::new(
-                        Arc::clone(&arc),
+                        Arc::clone(&shared),
                         Arc::clone(&_llm_service_flag),
                     ));
                     let k = kernel.read().await;
@@ -1321,7 +1296,7 @@ pub async fn run(
                                 name: "llm".to_string(),
                                 owner_pid: None,
                                 endpoint: clawft_kernel::ServiceEndpoint::External {
-                                    url: arc.config().base_url.clone(),
+                                    url: llm_url.clone(),
                                 },
                                 audit_level: clawft_kernel::ServiceAuditLevel::Full,
                                 registered_at: chrono::Utc::now(),
@@ -2497,9 +2472,10 @@ pub async fn run(
         // the choice visible in the Explorer's tree label and chat
         // header.
         let chat_path = format!("substrate/{}/ui/chat", daemon_identity.node_id,);
-        let model_name = daemon_llm()
-            .map(|c| c.config().model.clone())
-            .unwrap_or_else(|| clawft_service_llm::DEFAULT_LLM_MODEL.to_string());
+        let model_name = match daemon_llm() {
+            Some(c) => c.read().await.config().model.clone(),
+            None => clawft_service_llm::DEFAULT_LLM_MODEL.to_string(),
+        };
         let chat_sentinel = serde_json::json!({
             "kind": "chat",
             "model": model_name,
@@ -2881,8 +2857,9 @@ pub async fn run(
                                 Some(llm) => {
                                     match reaper_tier.conversation_digest(&conv_id, 16_384) {
                                         Some(digest) => {
+                                            let guard = llm.read().await;
                                             crate::conv_postmortem::summarize_durable_facts(
-                                                &llm, &digest,
+                                                &*guard, &digest,
                                             )
                                             .await
                                         }
@@ -4779,7 +4756,10 @@ async fn handle_llm_prompt(
         messages.insert(0, clawft_service_llm::ChatMessage::system(sys));
     }
 
-    match client.complete(messages, p.temperature, p.max_tokens).await {
+    // WEFT-343: read lock across the HTTP call so a concurrent swap
+    // waits for in-flight work and never observes a half-swapped client.
+    let guard = client.read().await;
+    match guard.complete(messages, p.temperature, p.max_tokens).await {
         Ok(resp) => {
             let first = &resp.choices[0]; // complete() rejects empty choices upstream
             let result = crate::protocol::LlmPromptResult {
@@ -4833,11 +4813,14 @@ async fn handle_llm_models(
         }
     };
 
-    let default_model = client.config().model.clone();
-    let base_url = client.config().base_url.clone();
+    // WEFT-343: snapshot config under the read lock, then probe models
+    // with the same guard so a mid-call swap cannot split the view.
+    let guard = client.read().await;
+    let default_model = guard.config().model.clone();
+    let base_url = guard.config().base_url.clone();
     let default_provider = llm_provider_label(&base_url).to_string();
 
-    let (live_ids, probe_error) = match client.list_models().await {
+    let (live_ids, probe_error) = match guard.list_models().await {
         Ok(ids) => (ids, None),
         Err(e) => (Vec::new(), Some(e.to_string())),
     };
@@ -5141,6 +5124,24 @@ async fn handle_control_set_enabled(
             "no flag registered for kind={:?} target={:?}",
             p.kind, p.target
         ));
+    }
+
+    // WEFT-343: any control.set_enabled cycle on the llm service
+    // re-reads env + [kernel.llm] and swaps the shared LlmClient so a
+    // rotated OPENROUTER_API_KEY / LLM_SERVICE_URL is picked up without
+    // a daemon restart. Best-effort: flag flip already succeeded; a
+    // failed rebuild is logged and reported but does not roll back.
+    if kind == ControlKind::Service && p.target == "llm" {
+        match refresh_daemon_llm_from_env(&kernel).await {
+            Ok(()) => {}
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "control.set_enabled(llm): env refresh / client swap failed \
+                     (flag was still flipped; prior client remains active)"
+                );
+            }
+        }
     }
 
     // Publish the new intent under the daemon's own prefix. Failure
@@ -6352,7 +6353,8 @@ async fn dispatch(
             let durable_fact = match (agent.session_tier(), daemon_llm()) {
                 (Some(tier), Some(llm)) => match tier.conversation_digest(&conv_id, 16_384) {
                     Some(digest) => {
-                        crate::conv_postmortem::summarize_durable_facts(&llm, &digest).await
+                        let guard = llm.read().await;
+                        crate::conv_postmortem::summarize_durable_facts(&*guard, &digest).await
                     }
                     None => None,
                 },

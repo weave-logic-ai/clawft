@@ -601,7 +601,7 @@ fn build_default_transport() -> Arc<OpenAiCompatTransport> {
     let llm_config = LlmConfig::from_env();
     match LlmClient::new(llm_config) {
         Ok(client) => {
-            let adapter: Arc<dyn LlmProvider> = Arc::new(ServiceLlmAdapter::new(Arc::new(client)));
+            let adapter: Arc<dyn LlmProvider> = Arc::new(ServiceLlmAdapter::from_client(client));
             tracing::info!(
                 "pipeline: transport wired to clawft-service-llm (LlmClient over llama-server)"
             );
@@ -727,7 +727,7 @@ pub fn build_browser_pipeline(
 #[cfg(feature = "native")]
 #[allow(clippy::too_many_arguments)]
 pub async fn build_daemon_agent_loop(
-    llm: Arc<clawft_service_llm::LlmClient>,
+    llm: clawft_service_llm::SharedLlmClient,
     tools: Arc<ToolRegistry>,
     _identity_loader: Arc<crate::agent::identity::IdentityLoader<clawft_platform::NativePlatform>>,
     workspace: &std::path::Path,
@@ -778,8 +778,12 @@ pub async fn build_daemon_agent_loop(
     // `model_override: true` permission the tiered router takes that
     // verbatim and the request goes out asking for a model the local
     // llama-server (or any non-deepseek upstream) doesn't host.
+    //
+    // WEFT-343: read through the shared lock so a post-boot swap is
+    // visible on subsequent loop rebuilds; the stamp itself is a
+    // one-shot at construction time.
     {
-        let upstream_model = llm.config().model.clone();
+        let upstream_model = llm.read().await.config().model.clone();
         if !upstream_model.is_empty() {
             config.agents.defaults.model = upstream_model;
         }

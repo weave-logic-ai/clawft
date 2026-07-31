@@ -45,9 +45,9 @@
 pub mod client;
 
 pub use client::{
-    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ChatTimings, ChatUsage,
-    ChatUsagePromptDetails, ContentBlock, ImageUrl, LlmClient, LlmConfig, LlmError,
-    MessageContent, Tool, ToolCall, ToolCallFunction, ToolChoice, ToolFunction,
+    share_llm_client, ChatChoice, ChatMessage, ChatRequest, ChatResponse, ChatTimings, ChatUsage,
+    ChatUsagePromptDetails, ContentBlock, ImageUrl, LlmClient, LlmConfig, LlmError, MessageContent,
+    SharedLlmClient, Tool, ToolCall, ToolCallFunction, ToolChoice, ToolFunction,
 };
 
 /// Environment variable read by [`LlmConfig::from_env`].
