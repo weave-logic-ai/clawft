@@ -1,0 +1,13 @@
+{
+  "routing": {
+    "permissions": {
+      "channels": {
+        "agent.chat": {
+          "level": 2,
+          "toolAccess": ["read_file", "message", "list_dir"],
+          "toolDenylist": ["shell"]
+        }
+      }
+    }
+  }
+}

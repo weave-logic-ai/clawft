@@ -1,0 +1,16 @@
+{
+  "routing": {
+    "permissions": {
+      "channels": {
+        "agent.chat": {
+          "level": 2,
+          "toolAccess": ["*"]
+        },
+        "cli": {
+          "level": 2,
+          "toolAccess": ["*"]
+        }
+      }
+    }
+  }
+}
