@@ -75,15 +75,39 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Verify that the proof chain leads to the expected root.
-    ///
-    /// **Stub**: This currently performs structural validation only
-    /// (non-empty fields). Full cryptographic verification -- recomputing
-    /// hashes from leaf to root -- requires the tree's hash function and
-    /// will be implemented when the exo-resource-tree crate exposes a
-    /// `verify_proof(proof, root)` API.
+    /// Structural validation (non-empty fields). For full cryptographic
+    /// verification use [`Self::from_inclusion`] +
+    /// [`exo_resource_tree::MerkleInclusionProof::verify`] (WEFT-106).
     pub fn verify(&self) -> bool {
         !self.path.is_empty() && !self.node_hash.is_empty() && !self.root_hash.is_empty()
+    }
+
+    /// Build a wire-format proof from a cryptographic inclusion proof.
+    pub fn from_inclusion(proof: &exo_resource_tree::MerkleInclusionProof) -> Self {
+        let sibling_hashes: Vec<String> = proof
+            .levels
+            .iter()
+            .flat_map(|level| {
+                level
+                    .child_hashes_sorted
+                    .iter()
+                    .map(|h| h.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            })
+            .collect();
+        Self {
+            path: proof.path.to_string(),
+            node_hash: proof
+                .node_hash
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            sibling_hashes,
+            root_hash: proof
+                .root_hash
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        }
     }
 }
 

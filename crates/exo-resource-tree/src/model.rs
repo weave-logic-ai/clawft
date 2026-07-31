@@ -162,7 +162,7 @@ pub enum Action {
 }
 
 /// Serde support for [u8; 32] as hex strings.
-mod hash_serde {
+pub mod hash_serde {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(hash: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>

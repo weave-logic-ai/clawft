@@ -9,7 +9,7 @@ use sha3::{
 
 /// Compute 256-bit (32-byte) SHAKE-256 hash.
 /// Inlined from rvf-crypto to remove the external path dependency.
-fn shake256_256(data: &[u8]) -> [u8; 32] {
+pub(crate) fn shake256_256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Shake256::default();
     hasher.update(data);
     let mut reader = hasher.finalize_xof();
@@ -28,7 +28,9 @@ use crate::scoring::NodeScoring;
 /// start with "/" and be inserted under an existing parent.
 #[derive(Debug)]
 pub struct ResourceTree {
-    nodes: HashMap<ResourceId, ResourceNode>,
+    /// Flat path → node map. `pub(crate)` so [`crate::merkle`] can walk
+    /// hashes without a public iterator API for every sync path (WEFT-106).
+    pub(crate) nodes: HashMap<ResourceId, ResourceNode>,
 }
 
 impl ResourceTree {

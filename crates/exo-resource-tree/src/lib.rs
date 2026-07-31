@@ -34,6 +34,7 @@
 pub mod boot;
 pub mod delegation;
 pub mod error;
+pub mod merkle;
 pub mod model;
 pub mod mutation;
 pub mod permission;
@@ -43,6 +44,10 @@ pub mod tree;
 pub use boot::{bootstrap_fresh, from_checkpoint, to_checkpoint};
 pub use delegation::DelegationCert;
 pub use error::{TreeError, TreeResult};
+pub use merkle::{
+    DiffNodePayload, MerkleDiff, MerkleDiffEntry, MerkleDiffKind, MerkleInclusionProof,
+    MerkleProofLevel, SiblingWitness,
+};
 pub use model::{Action, ResourceId, ResourceKind, ResourceNode, Role};
 pub use mutation::{MutationEvent, MutationLog};
 pub use permission::{
