@@ -525,6 +525,19 @@ pub async fn run_with_config(
         );
     }
 
+    // WEFT-348: attach Phase 4 skill auto-promoter when enabled.
+    if config.skills.promotion.enabled {
+        use clawft_core::agent::skill_autogen::{SkillPromotionConfig, SkillPromoter};
+        use std::sync::Mutex;
+        let promo_cfg = SkillPromotionConfig::from_types(&config.skills.promotion);
+        let promoter = Arc::new(Mutex::new(SkillPromoter::new(promo_cfg)));
+        agent = agent.with_skill_promoter(promoter);
+        info!(
+            threshold = config.skills.promotion.threshold,
+            "skill auto-promotion enabled (gateway, .claude/skills → .clawft/skills)"
+        );
+    }
+
     let agent_handle = tokio::spawn(async move {
         if let Err(e) = agent.run().await {
             error!(error = %e, "agent loop exited with error");

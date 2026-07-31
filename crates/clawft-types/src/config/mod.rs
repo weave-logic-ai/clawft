@@ -995,6 +995,9 @@ mod tests {
         assert!(!cfg.skills.autogen.enabled);
         assert_eq!(cfg.skills.autogen.threshold, 3);
         assert_eq!(cfg.skills.autogen.max_pending, 10);
+        // WEFT-348: promotion defaults on with threshold 10.
+        assert!(cfg.skills.promotion.enabled);
+        assert_eq!(cfg.skills.promotion.threshold, 10);
     }
 
     #[test]
@@ -1008,6 +1011,20 @@ mod tests {
         assert!(cfg.skills.autogen.enabled);
         assert_eq!(cfg.skills.autogen.threshold, 5);
         assert_eq!(cfg.skills.autogen.max_pending, 8);
+        assert!(cfg.skills.promotion.enabled);
+        assert_eq!(cfg.skills.promotion.threshold, 10);
+    }
+
+    #[test]
+    fn skills_promotion_deserializes_from_json() {
+        let json = r#"{
+            "skills": {
+                "promotion": { "enabled": false, "threshold": 20 }
+            }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(!cfg.skills.promotion.enabled);
+        assert_eq!(cfg.skills.promotion.threshold, 20);
     }
 
     #[test]

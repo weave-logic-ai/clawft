@@ -465,6 +465,12 @@ pub struct AgentLoop<P: Platform> {
     /// in `~/.clawft/skills/pending/`. The pending → live promotion
     /// stays manual (user approval), per the autogen module's design.
     autogen: Option<Arc<Mutex<crate::agent::skill_autogen::PatternDetector>>>,
+    /// Optional Phase 4 skill auto-promoter (WEFT-348).
+    ///
+    /// When set, successful uses of skills sourced from `.claude/skills/`
+    /// are counted; on threshold breach the skill is copied into
+    /// `.clawft/skills/` with an audit log entry.
+    skill_promoter: Option<Arc<Mutex<crate::agent::skill_autogen::SkillPromoter>>>,
     /// Pre-LLM context router (agent-core-v1 Phase B1).
     ///
     /// Defaults to
@@ -655,6 +661,7 @@ impl<P: Platform> AgentLoop<P> {
             auto_delegation: None,
             sandbox: None,
             autogen: None,
+            skill_promoter: None,
             context_router: Arc::new(NullRouter),
             gate: Arc::new(NoopGate),
             sink: Arc::new(InMemorySink::new()),
@@ -720,6 +727,57 @@ impl<P: Platform> AgentLoop<P> {
     ) -> Self {
         self.autogen = Some(detector);
         self
+    }
+
+    /// Attach a
+    /// [`SkillPromoter`](crate::agent::skill_autogen::SkillPromoter)
+    /// so successful uses of `.claude/skills/*` skills auto-promote into
+    /// `.clawft/skills/` after the configured threshold (WEFT-348).
+    pub fn with_skill_promoter(
+        mut self,
+        promoter: Arc<Mutex<crate::agent::skill_autogen::SkillPromoter>>,
+    ) -> Self {
+        self.skill_promoter = Some(promoter);
+        self
+    }
+
+    /// Borrow the attached skill promoter, if any.
+    pub fn skill_promoter(
+        &self,
+    ) -> Option<&Arc<Mutex<crate::agent::skill_autogen::SkillPromoter>>> {
+        self.skill_promoter.as_ref()
+    }
+
+    /// Record a successful skill invocation for auto-promotion (WEFT-348).
+    ///
+    /// No-op when no promoter is attached. Intended for call sites that
+    /// know a skill was used successfully and have its on-disk source path
+    /// (typically under `.claude/skills/`).
+    pub fn record_skill_success(&self, skill_name: &str, source_path: &std::path::Path) {
+        let Some(promoter) = self.skill_promoter.as_ref() else {
+            return;
+        };
+        let mut guard = match promoter.lock() {
+            Ok(g) => g,
+            Err(p) => {
+                warn!("skill promoter mutex poisoned, recovering");
+                p.into_inner()
+            }
+        };
+        match guard.record_success(skill_name, source_path) {
+            crate::agent::skill_autogen::PromotionOutcome::Promoted { entry } => {
+                info!(
+                    skill = %entry.skill_name,
+                    target = %entry.target_path.display(),
+                    count = entry.successful_invocations,
+                    "skill auto-promoted to .clawft/skills"
+                );
+            }
+            crate::agent::skill_autogen::PromotionOutcome::Error(e) => {
+                warn!(error = %e, skill = %skill_name, "skill promotion failed");
+            }
+            _ => {}
+        }
     }
 
     /// Attach a [`ContextRouter`] so the loop consults it before each

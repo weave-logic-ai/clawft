@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use clawft_types::skill::SkillDefinition;
 
@@ -916,6 +916,506 @@ pub fn generate_skill_md_with_learning(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4: auto-promotion (.claude/skills → .clawft/skills) — WEFT-348
+// ---------------------------------------------------------------------------
+
+/// Default successful-invocation count before promoting a skill.
+///
+/// Matches the chat-agent-v1 Phase 4 sketch ("after enough successful uses")
+/// and the AC example of ≥10 successful invocations.
+pub const DEFAULT_PROMOTION_THRESHOLD: usize = 10;
+
+/// Path component sequence that identifies Claude Code skill roots.
+pub const CLAUDE_SKILLS_MARKER: &str = ".claude/skills";
+
+/// Filename for the append-only promotion audit log (JSONL) under the
+/// target skills directory.
+pub const PROMOTION_AUDIT_FILENAME: &str = ".promotion-audit.jsonl";
+
+/// Runtime configuration for skill auto-promotion (WEFT-348).
+///
+/// Mirrors [`clawft_types::config::SkillPromotionConfig`] plus path knobs
+/// used by the promoter implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillPromotionConfig {
+    /// Master switch. When `false`, [`SkillPromoter::record_success`] is a
+    /// no-op that returns [`PromotionOutcome::Disabled`].
+    pub enabled: bool,
+    /// Successful invocations required before promoting. Default: 10.
+    pub threshold: usize,
+    /// Destination root for promoted skills (workspace or user
+    /// `.clawft/skills/`). When `None`, uses
+    /// [`default_user_skills_dir`] / relative `.clawft/skills`.
+    pub target_dir: Option<PathBuf>,
+    /// Optional explicit audit log path. When `None`, writes under
+    /// `{target_dir}/.promotion-audit.jsonl`.
+    pub audit_log_path: Option<PathBuf>,
+}
+
+impl Default for SkillPromotionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: DEFAULT_PROMOTION_THRESHOLD,
+            target_dir: None,
+            audit_log_path: None,
+        }
+    }
+}
+
+impl SkillPromotionConfig {
+    /// Build from the serializable config section (threshold + enabled).
+    pub fn from_types(cfg: &clawft_types::config::SkillPromotionConfig) -> Self {
+        Self {
+            enabled: cfg.enabled,
+            threshold: cfg.threshold.max(1),
+            target_dir: None,
+            audit_log_path: None,
+        }
+    }
+
+    /// Resolve the effective target skills directory.
+    pub fn target_dir(&self) -> PathBuf {
+        self.target_dir
+            .clone()
+            .or_else(default_user_skills_dir)
+            .unwrap_or_else(|| PathBuf::from(".clawft").join("skills"))
+    }
+
+    /// Resolve the audit log path.
+    pub fn audit_log_path(&self) -> PathBuf {
+        self.audit_log_path
+            .clone()
+            .unwrap_or_else(|| self.target_dir().join(PROMOTION_AUDIT_FILENAME))
+    }
+
+    /// Builder: override threshold (clamped to ≥1).
+    pub fn with_threshold(mut self, threshold: usize) -> Self {
+        self.threshold = threshold.max(1);
+        self
+    }
+
+    /// Builder: set target directory for promoted skills.
+    pub fn with_target_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.target_dir = Some(dir.into());
+        self
+    }
+
+    /// Builder: set explicit audit log path.
+    pub fn with_audit_log_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.audit_log_path = Some(path.into());
+        self
+    }
+}
+
+/// One promotion event written to the audit log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillPromotionAuditEntry {
+    /// Skill directory basename.
+    pub skill_name: String,
+    /// Source path under `.claude/skills/…`.
+    pub source_path: PathBuf,
+    /// Destination path under `.clawft/skills/…`.
+    pub target_path: PathBuf,
+    /// Successful invocation count that triggered promotion.
+    pub successful_invocations: usize,
+    /// Configured threshold at promotion time.
+    pub threshold: usize,
+    /// Unix epoch milliseconds when the promotion occurred.
+    pub timestamp_unix_ms: u64,
+    /// Event type constant for log consumers.
+    pub event: String,
+}
+
+impl SkillPromotionAuditEntry {
+    /// Event type string written into every promotion audit record.
+    pub const EVENT_TYPE: &'static str = "skill.promoted";
+
+    fn new(
+        skill_name: impl Into<String>,
+        source_path: PathBuf,
+        target_path: PathBuf,
+        successful_invocations: usize,
+        threshold: usize,
+    ) -> Self {
+        Self {
+            skill_name: skill_name.into(),
+            source_path,
+            target_path,
+            successful_invocations,
+            threshold,
+            timestamp_unix_ms: unix_ms_now(),
+            event: Self::EVENT_TYPE.into(),
+        }
+    }
+}
+
+/// Result of recording a successful skill invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionOutcome {
+    /// Promotion is disabled in config.
+    Disabled,
+    /// Skill source is not under `.claude/skills/` (not a candidate).
+    NotEligible,
+    /// Count updated; threshold not yet reached.
+    Counted {
+        /// Running success count for this skill.
+        success_count: usize,
+        /// Configured threshold.
+        threshold: usize,
+    },
+    /// Skill already lives under the target dir (or was promoted earlier).
+    AlreadyPromoted {
+        /// Existing target path.
+        target: PathBuf,
+    },
+    /// Threshold breached and the skill was copied to `.clawft/skills/`.
+    Promoted {
+        /// Audit entry written for this promotion.
+        entry: SkillPromotionAuditEntry,
+    },
+    /// Filesystem or I/O failure during promotion.
+    Error(String),
+}
+
+/// Tracks successful skill invocations and auto-promotes `.claude/skills/*`
+/// into `.clawft/skills/` when the configurable threshold is reached.
+///
+/// # Design (WEFT-348 / chat-agent-v1 Phase 4)
+///
+/// | Concern | Behavior |
+/// |---------|----------|
+/// | Eligibility | Only paths containing `.claude/skills` as components |
+/// | Counter | Per skill name, successful invocations only |
+/// | Threshold | Configurable (default 10); breach → promote once |
+/// | Promote | Recursive copy of skill directory → target root |
+/// | Audit | In-memory ring + append-only JSONL on disk |
+/// | Idempotency | Second promotion of same name is `AlreadyPromoted` |
+///
+/// Callers (agent loop, REPL, gateway) invoke
+/// [`SkillPromoter::record_success`] after a turn that successfully used
+/// a skill whose `source_path` is under `.claude/skills/`.
+pub struct SkillPromoter {
+    config: SkillPromotionConfig,
+    /// Per-skill successful invocation counts (eligible skills only).
+    success_counts: HashMap<String, usize>,
+    /// Skills already promoted this process (name → target path).
+    promoted: HashMap<String, PathBuf>,
+    /// In-memory audit log (capped).
+    audit_log: Vec<SkillPromotionAuditEntry>,
+    /// Cap on in-memory audit entries.
+    max_audit_entries: usize,
+}
+
+impl SkillPromoter {
+    /// Create a promoter with the given config.
+    pub fn new(config: SkillPromotionConfig) -> Self {
+        Self {
+            config,
+            success_counts: HashMap::new(),
+            promoted: HashMap::new(),
+            audit_log: Vec::new(),
+            max_audit_entries: 10_000,
+        }
+    }
+
+    /// Default-config promoter (enabled, threshold 10).
+    pub fn with_defaults() -> Self {
+        Self::new(SkillPromotionConfig::default())
+    }
+
+    /// Borrow the runtime config.
+    pub fn config(&self) -> &SkillPromotionConfig {
+        &self.config
+    }
+
+    /// Whether promotion is currently enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    /// Running success count for `skill_name` (0 if never recorded).
+    pub fn success_count(&self, skill_name: &str) -> usize {
+        self.success_counts.get(skill_name).copied().unwrap_or(0)
+    }
+
+    /// Whether `skill_name` has already been promoted.
+    pub fn is_promoted(&self, skill_name: &str) -> bool {
+        self.promoted.contains_key(skill_name)
+    }
+
+    /// In-memory audit entries (oldest first).
+    pub fn audit_log(&self) -> &[SkillPromotionAuditEntry] {
+        &self.audit_log
+    }
+
+    /// Reset counters and in-memory audit (does not delete on-disk audit).
+    pub fn reset(&mut self) {
+        self.success_counts.clear();
+        self.promoted.clear();
+        self.audit_log.clear();
+    }
+
+    /// Record a **successful** skill invocation and auto-promote on threshold.
+    ///
+    /// `source_path` is the on-disk skill directory (or a file inside it).
+    /// Only paths under `.claude/skills/` are counted; others return
+    /// [`PromotionOutcome::NotEligible`] without mutating state.
+    pub fn record_success(
+        &mut self,
+        skill_name: &str,
+        source_path: &Path,
+    ) -> PromotionOutcome {
+        if !self.config.enabled {
+            return PromotionOutcome::Disabled;
+        }
+
+        if skill_name.is_empty() {
+            return PromotionOutcome::Error("skill name is empty".into());
+        }
+
+        // Resolve skill directory (source_path may be SKILL.md).
+        let skill_dir = resolve_skill_dir(source_path);
+
+        if !is_claude_skills_path(&skill_dir) {
+            debug!(
+                skill = %skill_name,
+                path = %skill_dir.display(),
+                "skill promotion: not a .claude/skills source, skipping"
+            );
+            return PromotionOutcome::NotEligible;
+        }
+
+        if let Some(target) = self.promoted.get(skill_name) {
+            return PromotionOutcome::AlreadyPromoted {
+                target: target.clone(),
+            };
+        }
+
+        let target_root = self.config.target_dir();
+        let expected_target = target_root.join(skill_name);
+        if expected_target.exists() && expected_target.join("SKILL.md").exists() {
+            self.promoted
+                .insert(skill_name.to_string(), expected_target.clone());
+            return PromotionOutcome::AlreadyPromoted {
+                target: expected_target,
+            };
+        }
+
+        let count = {
+            let entry = self
+                .success_counts
+                .entry(skill_name.to_string())
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+            *entry
+        };
+
+        let threshold = self.config.threshold.max(1);
+        if count < threshold {
+            debug!(
+                skill = %skill_name,
+                count,
+                threshold,
+                "skill promotion: counted successful invocation"
+            );
+            return PromotionOutcome::Counted {
+                success_count: count,
+                threshold,
+            };
+        }
+
+        // Threshold breached — promote.
+        match promote_skill_directory(&skill_dir, &target_root, skill_name) {
+            Ok(target_path) => {
+                let entry = SkillPromotionAuditEntry::new(
+                    skill_name,
+                    skill_dir,
+                    target_path.clone(),
+                    count,
+                    threshold,
+                );
+                self.push_audit(entry.clone());
+                if let Err(e) = append_audit_log(&self.config.audit_log_path(), &entry) {
+                    warn!(
+                        error = %e,
+                        skill = %skill_name,
+                        "skill promotion: failed to write audit log file"
+                    );
+                }
+                self.promoted
+                    .insert(skill_name.to_string(), target_path);
+                info!(
+                    skill = %skill_name,
+                    count,
+                    threshold,
+                    "skill promotion: promoted .claude/skills → .clawft/skills"
+                );
+                PromotionOutcome::Promoted { entry }
+            }
+            Err(e) => {
+                warn!(error = %e, skill = %skill_name, "skill promotion: copy failed");
+                PromotionOutcome::Error(e)
+            }
+        }
+    }
+
+    fn push_audit(&mut self, entry: SkillPromotionAuditEntry) {
+        self.audit_log.push(entry);
+        if self.audit_log.len() > self.max_audit_entries {
+            let overflow = self.audit_log.len() - self.max_audit_entries;
+            self.audit_log.drain(..overflow);
+        }
+    }
+}
+
+/// Whether `path` is under a `.claude/skills` directory tree.
+///
+/// Matches both absolute paths (`/home/u/proj/.claude/skills/foo`) and
+/// relative ones (`.claude/skills/foo`). Component-wise so Windows
+/// separators also work when present as individual path parts.
+pub fn is_claude_skills_path(path: &Path) -> bool {
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+
+    components
+        .windows(2)
+        .any(|w| w[0] == ".claude" && w[1] == "skills")
+}
+
+/// Resolve the skill directory from a path that may point at `SKILL.md`
+/// or another file inside the skill folder.
+fn resolve_skill_dir(path: &Path) -> PathBuf {
+    if path.is_file()
+        || path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("SKILL.md") || n == "skill.json")
+    {
+        path.parent().unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Copy a skill directory into `target_root/{name}/`.
+///
+/// Creates parent directories as needed. Fails if the destination already
+/// exists (callers should check first for idempotency). Does **not** copy
+/// `.pending` markers — promoted skills are immediately active.
+pub fn promote_skill_directory(
+    source_dir: &Path,
+    target_root: &Path,
+    name: &str,
+) -> Result<PathBuf, String> {
+    if !source_dir.exists() {
+        return Err(format!(
+            "source skill directory does not exist: {}",
+            source_dir.display()
+        ));
+    }
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "source is not a directory: {}",
+            source_dir.display()
+        ));
+    }
+
+    // Basic name hygiene (reject path separators / traversal).
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+    {
+        return Err(format!("invalid skill name for promotion: {name:?}"));
+    }
+
+    let dest = target_root.join(name);
+    if dest.exists() {
+        return Err(format!(
+            "destination already exists: {}",
+            dest.display()
+        ));
+    }
+
+    std::fs::create_dir_all(target_root)
+        .map_err(|e| format!("create target root {}: {e}", target_root.display()))?;
+
+    copy_dir_recursive(source_dir, &dest)?;
+
+    // Strip any pending marker so promoted skills load immediately.
+    let pending = dest.join(PENDING_MARKER);
+    if pending.exists() {
+        let _ = std::fs::remove_file(&pending);
+    }
+
+    // Stamp a small sidecar so operators can see the skill was promoted.
+    let stamp = dest.join(".promoted-from-claude");
+    let stamp_body = format!(
+        "source={}\npromoted_at_ms={}\n",
+        source_dir.display(),
+        unix_ms_now()
+    );
+    let _ = std::fs::write(&stamp, stamp_body);
+
+    Ok(dest)
+}
+
+/// Recursively copy `src` directory into `dst` (which must not exist).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("file type: {e}"))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&from, &to)
+                .map_err(|e| format!("copy {} → {}: {e}", from.display(), to.display()))?;
+        }
+        // Skip symlinks for safety.
+    }
+    Ok(())
+}
+
+/// Append one audit entry as a JSON line.
+fn append_audit_log(path: &Path, entry: &SkillPromotionAuditEntry) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create audit parent {}: {e}", parent.display()))?;
+    }
+    let line = serde_json::to_string(entry).map_err(|e| format!("serialize audit: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open audit log {}: {e}", path.display()))?;
+    writeln!(file, "{line}").map_err(|e| format!("write audit log: {e}"))?;
+    Ok(())
+}
+
+fn unix_ms_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1638,4 +2138,276 @@ mod tests {
             improved.skill_md
         );
     }
+
+    // -- WEFT-348: skill auto-promotion (.claude/skills → .clawft/skills) --
+
+    fn write_claude_skill(root: &Path, name: &str, body: &str) -> PathBuf {
+        let skill_dir = root
+            .join(".claude")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let md = format!(
+            "---\nname: {name}\ndescription: \"test skill {name}\"\nversion: 0.1.0\n---\n\n{body}\n"
+        );
+        std::fs::write(skill_dir.join("SKILL.md"), md).unwrap();
+        skill_dir
+    }
+
+    fn promotion_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_skill = write_claude_skill(tmp.path(), "plane-workflow", "Do plane things.");
+        let target = tmp.path().join(".clawft").join("skills");
+        std::fs::create_dir_all(&target).unwrap();
+        (tmp, claude_skill, target)
+    }
+
+    #[test]
+    fn is_claude_skills_path_detects_marker() {
+        assert!(is_claude_skills_path(Path::new(
+            "/home/u/proj/.claude/skills/foo"
+        )));
+        assert!(is_claude_skills_path(Path::new(
+            ".claude/skills/foo/SKILL.md"
+        )));
+        assert!(!is_claude_skills_path(Path::new(
+            "/home/u/proj/.clawft/skills/foo"
+        )));
+        assert!(!is_claude_skills_path(Path::new("skills/foo")));
+        assert!(!is_claude_skills_path(Path::new(
+            "/home/u/.claude/not-skills/foo"
+        )));
+    }
+
+    #[test]
+    fn promotion_config_defaults() {
+        let cfg = SkillPromotionConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.threshold, DEFAULT_PROMOTION_THRESHOLD);
+        assert_eq!(DEFAULT_PROMOTION_THRESHOLD, 10);
+    }
+
+    #[test]
+    fn promotion_config_from_types() {
+        let types_cfg = clawft_types::config::SkillPromotionConfig {
+            enabled: false,
+            threshold: 25,
+        };
+        let cfg = SkillPromotionConfig::from_types(&types_cfg);
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.threshold, 25);
+    }
+
+    #[test]
+    fn promotion_disabled_is_noop() {
+        let (tmp, source, target) = promotion_fixture();
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(2)
+                .with_target_dir(&target),
+        );
+        // Force disabled
+        let mut cfg = promoter.config().clone();
+        cfg.enabled = false;
+        promoter = SkillPromoter::new(cfg.with_target_dir(&target).with_threshold(2));
+
+        let outcome = promoter.record_success("plane-workflow", &source);
+        assert_eq!(outcome, PromotionOutcome::Disabled);
+        assert_eq!(promoter.success_count("plane-workflow"), 0);
+        assert!(!target.join("plane-workflow").exists());
+        drop(tmp);
+    }
+
+    #[test]
+    fn promotion_not_eligible_for_clawft_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clawft_skill = tmp.path().join(".clawft").join("skills").join("local");
+        std::fs::create_dir_all(&clawft_skill).unwrap();
+        std::fs::write(clawft_skill.join("SKILL.md"), "---\nname: local\n---\n").unwrap();
+        let target = tmp.path().join("out");
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(1)
+                .with_target_dir(&target),
+        );
+        let outcome = promoter.record_success("local", &clawft_skill);
+        assert_eq!(outcome, PromotionOutcome::NotEligible);
+        assert_eq!(promoter.success_count("local"), 0);
+    }
+
+    #[test]
+    fn promotion_counts_below_threshold() {
+        let (tmp, source, target) = promotion_fixture();
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(5)
+                .with_target_dir(&target),
+        );
+
+        for i in 1..=4 {
+            match promoter.record_success("plane-workflow", &source) {
+                PromotionOutcome::Counted {
+                    success_count,
+                    threshold,
+                } => {
+                    assert_eq!(success_count, i);
+                    assert_eq!(threshold, 5);
+                }
+                other => panic!("expected Counted, got {other:?}"),
+            }
+        }
+        assert!(!target.join("plane-workflow").exists());
+        assert!(promoter.audit_log().is_empty());
+        drop(tmp);
+    }
+
+    #[test]
+    fn promotion_auto_promotes_at_threshold_and_audits() {
+        let (tmp, source, target) = promotion_fixture();
+        let audit = tmp.path().join("audit.jsonl");
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(3)
+                .with_target_dir(&target)
+                .with_audit_log_path(&audit),
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                promoter.record_success("plane-workflow", &source),
+                PromotionOutcome::Counted { .. }
+            ));
+        }
+
+        let outcome = promoter.record_success("plane-workflow", &source);
+        match outcome {
+            PromotionOutcome::Promoted { entry } => {
+                assert_eq!(entry.skill_name, "plane-workflow");
+                assert_eq!(entry.successful_invocations, 3);
+                assert_eq!(entry.threshold, 3);
+                assert_eq!(entry.event, SkillPromotionAuditEntry::EVENT_TYPE);
+                assert!(entry.target_path.ends_with("plane-workflow"));
+                assert!(entry.target_path.join("SKILL.md").exists());
+                assert!(entry.target_path.join(".promoted-from-claude").exists());
+            }
+            other => panic!("expected Promoted, got {other:?}"),
+        }
+
+        // Audit log in memory + on disk.
+        assert_eq!(promoter.audit_log().len(), 1);
+        let disk = std::fs::read_to_string(&audit).expect("audit file");
+        assert!(disk.contains("skill.promoted"));
+        assert!(disk.contains("plane-workflow"));
+
+        // Content was copied.
+        let promoted_md = std::fs::read_to_string(target.join("plane-workflow").join("SKILL.md"))
+            .expect("promoted SKILL.md");
+        assert!(promoted_md.contains("plane-workflow"));
+        assert!(promoted_md.contains("Do plane things."));
+        drop(tmp);
+    }
+
+    #[test]
+    fn promotion_is_idempotent_after_first() {
+        let (tmp, source, target) = promotion_fixture();
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(2)
+                .with_target_dir(&target),
+        );
+
+        assert!(matches!(
+            promoter.record_success("plane-workflow", &source),
+            PromotionOutcome::Counted { .. }
+        ));
+        assert!(matches!(
+            promoter.record_success("plane-workflow", &source),
+            PromotionOutcome::Promoted { .. }
+        ));
+        // Further successes do not re-promote / re-audit.
+        match promoter.record_success("plane-workflow", &source) {
+            PromotionOutcome::AlreadyPromoted { target: t } => {
+                assert!(t.ends_with("plane-workflow"));
+            }
+            other => panic!("expected AlreadyPromoted, got {other:?}"),
+        }
+        assert_eq!(promoter.audit_log().len(), 1);
+        drop(tmp);
+    }
+
+    #[test]
+    fn promotion_detects_preexisting_target_as_already_promoted() {
+        let (tmp, source, target) = promotion_fixture();
+        // Pre-create destination as if a previous process already promoted.
+        let dest = target.join("plane-workflow");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: plane-workflow\n---\n").unwrap();
+
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(1)
+                .with_target_dir(&target),
+        );
+        match promoter.record_success("plane-workflow", &source) {
+            PromotionOutcome::AlreadyPromoted { target: t } => {
+                assert_eq!(t, dest);
+            }
+            other => panic!("expected AlreadyPromoted, got {other:?}"),
+        }
+        assert_eq!(promoter.success_count("plane-workflow"), 0);
+        drop(tmp);
+    }
+
+    #[test]
+    fn promotion_accepts_skill_md_path_as_source() {
+        let (tmp, source, target) = promotion_fixture();
+        let skill_md = source.join("SKILL.md");
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(1)
+                .with_target_dir(&target),
+        );
+        match promoter.record_success("plane-workflow", &skill_md) {
+            PromotionOutcome::Promoted { entry } => {
+                assert!(entry.target_path.join("SKILL.md").exists());
+            }
+            other => panic!("expected Promoted, got {other:?}"),
+        }
+        drop(tmp);
+    }
+
+    #[test]
+    fn promote_skill_directory_rejects_traversal_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let dest_root = tmp.path().join("dest");
+        let err = promote_skill_directory(&src, &dest_root, "../escape").unwrap_err();
+        assert!(err.contains("invalid skill name"), "{err}");
+    }
+
+    #[test]
+    fn configurable_threshold_example_ten() {
+        // AC: configurable promotion threshold (e.g. ≥10 successful invocations).
+        let (tmp, source, target) = promotion_fixture();
+        let mut promoter = SkillPromoter::new(
+            SkillPromotionConfig::default()
+                .with_threshold(10)
+                .with_target_dir(&target),
+        );
+        for _ in 0..9 {
+            assert!(matches!(
+                promoter.record_success("plane-workflow", &source),
+                PromotionOutcome::Counted { .. }
+            ));
+        }
+        assert!(!target.join("plane-workflow").exists());
+        assert!(matches!(
+            promoter.record_success("plane-workflow", &source),
+            PromotionOutcome::Promoted { .. }
+        ));
+        assert!(target.join("plane-workflow").join("SKILL.md").exists());
+        drop(tmp);
+    }
 }
+
