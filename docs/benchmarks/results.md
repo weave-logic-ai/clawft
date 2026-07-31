@@ -64,6 +64,17 @@ negligible vs LLM latency, so a production `dashmap` dependency is not
 justified. Full table and rationale:
 `.planning/development_notes/01-tiered-router/consensus-log.md` (CONS-002).
 
+## Voice pipeline (WEFT-229)
+
+Latency (speech-end → first-response-byte), WER, and CPU wake-budget helpers live
+in `crates/clawft-bench-voice`. Default thresholds: p95 ≤ 500 ms, WER ≤ 15%,
+wake &lt; 2% of one core, full pipeline &lt; 10%. CI uses mock/fixture paths only
+(no ONNX). See [docs/guides/voice-bench.md](../guides/voice-bench.md).
+
+```bash
+scripts/build.sh test clawft-bench-voice
+```
+
 ## Running Benchmarks
 
 All scripts live in `scripts/bench/`.  They require a release build of `weft`:

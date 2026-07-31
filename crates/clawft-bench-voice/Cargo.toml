@@ -1,0 +1,24 @@
+[package]
+name = "clawft-bench-voice"
+version.workspace = true
+# Benchmark harness library (not a published product surface). publish=false
+# mirrors clawft-voice-onnx / clawft-bvh — CI-friendly metrics helpers only.
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Voice pipeline benchmark harness: latency (speech-end → first-response-byte), WER, and CPU wake-budget checks (WEFT-229)"
+keywords = ["voice", "benchmark", "latency", "wer", "cpu"]
+categories = ["development-tools"]
+
+[dependencies]
+# Thresholds + report JSON only — no ort / cpal / voice-model deps so CI stays light.
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Integration tests that drive the mock pipeline may sleep briefly.
+# No extra deps needed beyond serde for round-trip report tests.

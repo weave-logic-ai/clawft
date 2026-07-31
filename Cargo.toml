@@ -79,6 +79,8 @@ members = [
     "crates/clawft-splatd",
     # ADR-056 BVH-on-RVF spatial-temporal index (broad-phase; no chain yet).
     "crates/clawft-bvh",
+    # WEFT-229: voice pipeline latency / WER / CPU harness (mock-friendly, no ort).
+    "crates/clawft-bench-voice",
 ]
 exclude = [
     "gui/src-tauri",
