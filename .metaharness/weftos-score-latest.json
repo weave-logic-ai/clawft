@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "kind": "weftos-metaharness-score",
+  "generatedAt": "2026-07-31T21:48:07.431007Z",
+  "weftosFoundationScore": 100,
+  "components": {
+    "tasks": 3,
+    "views": 1,
+    "anchors": 3,
+    "patternsManifest": 7,
+    "adrs": 2,
+    "commands": 3,
+    "surfacesYaml": 1
+  },
+  "componentScores": {
+    "tasks": 25,
+    "views": 20,
+    "anchors": 15,
+    "patterns": 20,
+    "adrs": 10,
+    "commands": 10,
+    "surfaces": 5
+  },
+  "upstreamAdr041": {
+    "harnessFit": 75,
+    "taskCoverage": 65,
+    "memoryUsefulness": 53,
+    "note": "Upstream scorecard uses shallow HIGH_SIGNAL inventory; weftosFoundationScore tracks real harness assets + AgentDB patterns via seed script."
+  },
+  "targets": {
+    "weftosFoundationScore": 80,
+    "tasksMin": 3,
+    "patternsMin": 5,
+    "viewsMin": 1
+  },
+  "plane": [
+    "WEFT-724",
+    "WEFT-725",
+    "WEFT-726",
+    "WEFT-727",
+    "WEFT-728"
+  ]
+}

@@ -11,6 +11,7 @@
   - ADR-090 (LeWM decoupling — MH must not violate R1–R5)
   - rUv / ruflo ADR-150 (MetaHarness optional integration surfaces)
   - rUv ADR-148/149 (cost-optimal router)
+  - **ADR-097** (universal data-surface governance)
   - `@metaharness/flywheel` (receipts + signed promote)
   - `@metaharness/darwin` (“freeze the model, evolve the harness”)
 - **Source**:
@@ -113,7 +114,9 @@ Grok remains **executor**; Ruflo/MetaHarness remain **orchestrator / evolve**.
 
 - [x] `docs/research/metaharness-foundation.md`  
 - [x] `docs/research/ruv-worldgraph-vs-weftos.md`  
-- [ ] Phase 1 scripts + `.grok/rules/metaharness.md`  
+- [x] Phase 1 scripts + `.grok/rules/metaharness.md`
+- [x] Phase 1 tasks (WEFT-725), patterns (WEFT-726), ViewSpec anchors (WEFT-727)
+- [x] ADR-097 universal data-surface governance (WEFT-728)  
 - [ ] Mint harness tasks (gate, plane-dag, fusion-view)  
 - [ ] AgentDB pattern store for fusion/release wins  
 - [ ] Optional: promote `.planning/research/cosmos3-*.md` into `docs/research/`  

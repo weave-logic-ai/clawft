@@ -89,6 +89,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-094](adr-094-spawn-user-level-permission.md) | Spawn-at-user-level permission story (principals + Defer grant) | Accepted (foundation) | Architecture / Security | WEFT-635; relates WEFT-633/634/636 |
 | [ADR-095](adr-095-batch-graph-analytics-plane.md) | Batch graph analytics plane (disk-spill join-agg) — research hold for sensor scale | Draft (Proposed) | Architecture / Performance | Sinchenko DataFusion graphs; DiskANN companion research |
 | [ADR-096](adr-096-metaharness-foundation.md) | MetaHarness as foundational agent/fusion evolution layer (flywheel; optional runtime) | Draft (Proposed) | Architecture / Integration | rUv MetaHarness + Grok/Ruflo; Graph View churn |
+| [ADR-097](adr-097-metaharness-data-governance.md) | Universal MetaHarness governance over all WeftOS data surfaces | Draft (Proposed) | Architecture / Security / Integration | WEFT-728; fs/DB/sensors/mesh/substrate |
 
 ## Categories
 
@@ -97,9 +98,9 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | **Release** | 001, 002, 012, 029, 037, 044 | Versioning, distribution, and build decisions |
 | **GUI** | 003, 004, 005, 006, 007, 013, 016, 038, 055, 073 | UI/UX technology and architecture decisions |
 | **Architecture** | 010, 017, 019, 020, 021, 022, 023, 026, 027, 030, 031, 033, 034, 035, 036, 039, 040, 041, 042, 045, 046, 047, 048, 049, 053, 056, 061, 068, 070, 074, 078, 079, 080, 082, 084, 085, 086, 087, 088, 089, 093, 095 | Core system design decisions |
-| **Security** | 024, 025, 028, 043, 057, 071, 072 | Cryptography, identity, and chain-integrity decisions |
+| **Security** | 024, 025, 028, 043, 057, 071, 072, 097 | Cryptography, identity, and chain-integrity decisions |
 | **Performance** | 009, 011, 032, 095 | Algorithmic and optimization decisions |
-| **Integration** | 008, 018, 054, 075, 076, 077, 081, 096 | External system integration decisions |
+| **Integration** | 008, 018, 054, 075, 076, 077, 081, 096, 097 | External system integration decisions |
 | **Documentation** | 014, 015 | Documentation and web presence decisions |
 
 ## Decision Sources
