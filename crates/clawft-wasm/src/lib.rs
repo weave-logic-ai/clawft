@@ -183,16 +183,7 @@ mod browser_entry {
 
     /// Look up the user's `ProviderConfig` by provider name.
     fn user_provider_config(config: &Config, name: &str) -> clawft_types::config::ProviderConfig {
-        match name {
-            "anthropic" => config.providers.anthropic.clone(),
-            "openai" => config.providers.openai.clone(),
-            "openrouter" => config.providers.openrouter.clone(),
-            "deepseek" => config.providers.deepseek.clone(),
-            "groq" => config.providers.groq.clone(),
-            "gemini" => config.providers.gemini.clone(),
-            "xai" => config.providers.xai.clone(),
-            _ => config.providers.custom.clone(),
-        }
+        config.providers.provider_config(name).clone()
     }
 
     /// Route a model string like "anthropic/claude-sonnet-4-20250514" to the
@@ -200,10 +191,13 @@ mod browser_entry {
     ///
     /// Resolution order:
     /// 1. Exact prefix match against builtin providers (e.g. `openrouter/` → OpenRouter).
-    /// 2. Fallback: if no prefix matches, route to OpenRouter (or the first provider
-    ///    with an API key). The full model string is sent as-is since there's no
-    ///    prefix to strip. This handles models like `arcee-ai/trinity-large-preview:free`
-    ///    that are hosted on OpenRouter but don't use the `openrouter/` prefix.
+    /// 2. Fallback: if no prefix matches, walk
+    ///    [`ProvidersConfig::effective_provider_fallback_order`](clawft_types::config::ProvidersConfig::effective_provider_fallback_order)
+    ///    (config-driven, WEFT-404; default preserves the historical chain) and
+    ///    pick the first provider with an API key. The full model string is
+    ///    sent as-is since there's no prefix to strip. This handles models
+    ///    like `arcee-ai/trinity-large-preview:free` that are hosted on
+    ///    OpenRouter but don't use the `openrouter/` prefix.
     fn resolve_provider(
         config: &Config,
         model: &str,
@@ -238,18 +232,10 @@ mod browser_entry {
             }
         }
 
-        // 2. No prefix matched — fall back to OpenRouter if it has an API key,
-        //    since OpenRouter aggregates third-party models with vendor/ prefixes
-        //    (e.g. arcee-ai/, meta-llama/, mistralai/).
-        let fallback_order = [
-            "openrouter",
-            "openai",
-            "anthropic",
-            "groq",
-            "deepseek",
-            "gemini",
-            "xai",
-        ];
+        // 2. No prefix matched — walk config-driven fallback order (WEFT-404).
+        //    OpenRouter is first by default because it aggregates third-party
+        //    models with vendor/ prefixes (e.g. arcee-ai/, meta-llama/).
+        let fallback_order = config.providers.effective_provider_fallback_order();
 
         for name in &fallback_order {
             let user_cfg = user_provider_config(config, name);

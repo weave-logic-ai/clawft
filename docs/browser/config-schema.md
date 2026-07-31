@@ -261,9 +261,19 @@ From `clawft_llm::config::builtin_providers()`:
 
 1. Match `agents.defaults.model` against builtin `model_prefix` values.
 2. Load the matching `providers.<name>` for keys / CORS / base override.
-3. If no prefix matches, walk fallback order:
-   `openrouter` → `openai` → `anthropic` → `groq` → `deepseek` → `gemini` → `xai`
-   and pick the first with a non-empty `apiKey` (model string sent as-is).
+3. If no prefix matches, walk `providers.provider_fallback_order`
+   (`providerFallbackOrder`) and pick the first with a non-empty `apiKey`
+   (model string sent as-is). **Default** (WEFT-404 back-compat):
+   `openrouter` → `openai` → `anthropic` → `groq` → `deepseek` → `gemini` → `xai`.
+
+```json
+{
+  "providers": {
+    "providerFallbackOrder": ["openai", "anthropic", "openrouter"],
+    "openai": { "apiKey": "sk-…" }
+  }
+}
+```
 
 Names not in the explicit match table fall through to `providers.custom`.
 

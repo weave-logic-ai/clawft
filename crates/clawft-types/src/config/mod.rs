@@ -539,6 +539,22 @@ pub struct ProviderConfig {
     pub cors_proxy: Option<String>,
 }
 
+/// Default browser provider-routing fallback order (WEFT-404).
+///
+/// Used when a model string has no matching builtin `model_prefix`.
+/// Preserves the historical hard-coded chain for back-compat.
+pub fn default_provider_fallback_order() -> Vec<String> {
+    vec![
+        "openrouter".into(),
+        "openai".into(),
+        "anthropic".into(),
+        "groq".into(),
+        "deepseek".into(),
+        "gemini".into(),
+        "xai".into(),
+    ]
+}
+
 /// Configuration for all LLM providers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProvidersConfig {
@@ -618,6 +634,79 @@ pub struct ProvidersConfig {
     /// WEFT-604: same as [`Self::local`] — overrides must apply or fail loud.
     #[serde(default)]
     pub ollama: ProviderConfig,
+
+    /// Ordered list of provider names tried when a model has no matching
+    /// builtin prefix (browser `resolve_provider` fallback, WEFT-404).
+    ///
+    /// Default: `openrouter` → `openai` → `anthropic` → `groq` →
+    /// `deepseek` → `gemini` → `xai`. Empty / missing values resolve to
+    /// that default via [`Self::effective_provider_fallback_order`].
+    #[serde(
+        default = "default_provider_fallback_order",
+        alias = "providerFallbackOrder"
+    )]
+    pub provider_fallback_order: Vec<String>,
+}
+
+impl ProvidersConfig {
+    /// Effective provider-routing fallback order (WEFT-404).
+    ///
+    /// Returns the configured list when non-empty; otherwise the
+    /// historical default from [`default_provider_fallback_order`].
+    pub fn effective_provider_fallback_order(&self) -> Vec<String> {
+        if self.provider_fallback_order.is_empty() {
+            default_provider_fallback_order()
+        } else {
+            self.provider_fallback_order.clone()
+        }
+    }
+
+    /// Look up a named provider entry (borrowed).
+    ///
+    /// Unknown names fall through to [`Self::custom`] (same behaviour as
+    /// the browser `user_provider_config` helper).
+    pub fn provider_config(&self, name: &str) -> &ProviderConfig {
+        match name {
+            "anthropic" => &self.anthropic,
+            "openai" => &self.openai,
+            "openrouter" => &self.openrouter,
+            "deepseek" => &self.deepseek,
+            "groq" => &self.groq,
+            "zhipu" => &self.zhipu,
+            "dashscope" => &self.dashscope,
+            "vllm" => &self.vllm,
+            "gemini" => &self.gemini,
+            "moonshot" => &self.moonshot,
+            "minimax" => &self.minimax,
+            "aihubmix" => &self.aihubmix,
+            "openai_codex" | "openai-codex" => &self.openai_codex,
+            "xai" => &self.xai,
+            "elevenlabs" => &self.elevenlabs,
+            "local" => &self.local,
+            "ollama" => &self.ollama,
+            _ => &self.custom,
+        }
+    }
+
+    /// First provider name in `order` that has a non-empty API key.
+    ///
+    /// Used by browser provider routing when the model string has no
+    /// matching prefix (WEFT-404).
+    pub fn first_in_order_with_api_key<'a>(&'a self, order: &'a [String]) -> Option<&'a str> {
+        order
+            .iter()
+            .find(|name| !self.provider_config(name).api_key.is_empty())
+            .map(|s| s.as_str())
+    }
+
+    /// First provider in the effective fallback order with a non-empty API key.
+    pub fn first_fallback_with_api_key(&self) -> Option<String> {
+        let order = self.effective_provider_fallback_order();
+        // Re-borrow from owned order: return owned name.
+        order
+            .into_iter()
+            .find(|name| !self.provider_config(name).api_key.is_empty())
+    }
 }
 
 // ── Gateway ──────────────────────────────────────────────────────────────
@@ -1108,6 +1197,81 @@ mod tests {
         assert_eq!(cfg.api_key.expose(), "test");
         let headers = cfg.extra_headers.unwrap();
         assert_eq!(headers["X-Custom"], "value");
+    }
+
+    /// WEFT-404: default fallback order matches the historical hard-coded chain.
+    #[test]
+    fn provider_fallback_order_default_preserves_historical() {
+        let expected = [
+            "openrouter",
+            "openai",
+            "anthropic",
+            "groq",
+            "deepseek",
+            "gemini",
+            "xai",
+        ];
+        assert_eq!(default_provider_fallback_order(), expected);
+
+        // Rust Default leaves the field empty; effective_* restores default.
+        let cfg = ProvidersConfig::default();
+        assert!(cfg.provider_fallback_order.is_empty());
+        assert_eq!(cfg.effective_provider_fallback_order(), expected);
+
+        // Missing key on partial deserialize → serde default fills the list.
+        let json = r#"{ "openai": { "apiKey": "sk-test" } }"#;
+        let cfg: ProvidersConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.provider_fallback_order, expected);
+    }
+
+    /// WEFT-404: custom order is data-driven (snake_case + camelCase).
+    #[test]
+    fn provider_fallback_order_custom_selects_first_with_key() {
+        let snake = r#"{
+            "provider_fallback_order": ["gemini", "openai", "anthropic"],
+            "openai": { "apiKey": "sk-openai" },
+            "anthropic": { "apiKey": "sk-ant" }
+        }"#;
+        let cfg: ProvidersConfig = serde_json::from_str(snake).unwrap();
+        assert_eq!(
+            cfg.provider_fallback_order,
+            vec!["gemini", "openai", "anthropic"]
+        );
+        // gemini has no key → openai is first with a key.
+        assert_eq!(
+            cfg.first_fallback_with_api_key().as_deref(),
+            Some("openai")
+        );
+
+        let camel = r#"{
+            "providerFallbackOrder": ["xai", "groq", "openrouter"],
+            "xai": { "apiKey": "xai-key" },
+            "groq": { "apiKey": "groq-key" }
+        }"#;
+        let cfg: ProvidersConfig = serde_json::from_str(camel).unwrap();
+        assert_eq!(cfg.provider_fallback_order, vec!["xai", "groq", "openrouter"]);
+        assert_eq!(cfg.first_fallback_with_api_key().as_deref(), Some("xai"));
+
+        // Nested under root Config.
+        let root = r#"{
+            "providers": {
+                "providerFallbackOrder": ["anthropic", "openai"],
+                "openai": { "apiKey": "sk-oai" }
+            }
+        }"#;
+        let root_cfg: Config = serde_json::from_str(root).unwrap();
+        assert_eq!(
+            root_cfg.providers.effective_provider_fallback_order(),
+            vec!["anthropic", "openai"]
+        );
+        // anthropic has no key → openai.
+        assert_eq!(
+            root_cfg
+                .providers
+                .first_fallback_with_api_key()
+                .as_deref(),
+            Some("openai")
+        );
     }
 
     #[test]
