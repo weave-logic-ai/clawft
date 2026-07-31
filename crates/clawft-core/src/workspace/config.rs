@@ -19,7 +19,7 @@ use clawft_types::config::Config;
 use clawft_types::routing::RoutingConfig;
 use clawft_types::{ClawftError, Result};
 
-use crate::config_merge::{deep_merge, normalize_keys};
+use crate::config_merge::{deep_merge, normalize_keys, strip_null_entries};
 
 /// Split config layers: global ceiling + optional workspace overlay.
 ///
@@ -121,9 +121,15 @@ pub fn load_split_config_from(
     {
         normalize_keys(&mut ws_config);
         // Workspace-only Config (defaults fill missing fields via serde).
+        // Strip nulls for typed deserialize — null means "delete on merge"
+        // (e.g. `"mcpServers": { "slack": null }`) and is not a valid
+        // MCPServerConfig (WEFT residual / load_merged_config_mcp_servers).
+        let mut ws_for_typed = ws_config.clone();
+        strip_null_entries(&mut ws_for_typed);
         let ws_typed: Config =
-            serde_json::from_value(ws_config.clone()).map_err(ClawftError::Json)?;
+            serde_json::from_value(ws_for_typed).map_err(ClawftError::Json)?;
         workspace = Some(ws_typed);
+        // Keep nulls so deep_merge can delete keys from the merged view.
         deep_merge(&mut merged_value, &ws_config);
     }
 

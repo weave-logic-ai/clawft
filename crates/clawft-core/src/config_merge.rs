@@ -31,6 +31,29 @@ pub fn deep_merge(base: &mut Value, overlay: &Value) {
     }
 }
 
+/// Remove object entries whose value is JSON `null` (recursively).
+///
+/// Used when deserializing a partial overlay into a typed [`Config`]:
+/// `null` means "delete this key on merge" and is not a valid field value
+/// (e.g. `mcp_servers.slack: null`). Callers that still need null-delete
+/// semantics should deep-merge the pre-strip value.
+pub fn strip_null_entries(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_null_entries(v);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                strip_null_entries(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Recursively normalize JSON object keys from `camelCase` to `snake_case`.
 ///
 /// For example, `"mcpServers"` becomes `"mcp_servers"`, `"maxTokens"` becomes
@@ -116,6 +139,13 @@ mod tests {
         deep_merge(&mut base, &overlay);
 
         assert_eq!(base["list"], json!([4, 5]));
+    }
+
+    #[test]
+    fn strip_null_entries_removes_null_leaves() {
+        let mut v = json!({"a": 1, "b": null, "c": {"x": null, "y": 2}});
+        strip_null_entries(&mut v);
+        assert_eq!(v, json!({"a": 1, "c": {"y": 2}}));
     }
 
     #[test]
