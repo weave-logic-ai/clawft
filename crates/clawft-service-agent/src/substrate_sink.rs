@@ -19,13 +19,13 @@
 //! dispatch for a conv and `stop_heartbeat` at cancel/shutdown; C3
 //! only exposes the API, the lifecycle wiring is a follow-up.
 //!
-//! ## TurnContent (voice forward-compat per plan §10)
+//! ## TurnContent (WEFT-350 voice + streaming chat)
 //!
-//! Only [`TurnContent::Text`] is constructed today. The Audio /
-//! Mixed variants and [`AudioRef`] are defined now so the substrate
-//! JSONL doesn't reshape when voice ships. [`AudioRef::substrate_path`]
-//! always points at substrate-resident PCM — turn records never
-//! inline audio bytes.
+//! [`TurnContent::Text`] is the default. When [`Turn::audio`] is set
+//! (voice STT path / `agent.chat` message audio), the sink persists
+//! [`TurnContent::Audio`] or [`TurnContent::Mixed`] so substrate JSONL
+//! carries multimodal turns. [`AudioRef::substrate_path`] always points
+//! at substrate-resident PCM — turn records never inline audio bytes.
 //!
 //! ## Versus `agent/memory.rs`
 //!
@@ -45,7 +45,6 @@ use clawft_kernel::{
     CausalEdgeType, CausalGraph, ChainManager, NodeRegistry, SubstrateService,
 };
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -57,53 +56,9 @@ use tracing::{debug, warn};
 /// fan-out.
 pub const HEARTBEAT_PERIOD: Duration = Duration::from_secs(2);
 
-/// Wire-shape for a per-turn record's content.
-///
-/// Voice forward-compat per `agent-core-v1.md` §10. Wire shape is
-/// externally-tagged JSON (`{"text": "..."}` / `{"audio": {...}}` /
-/// `{"mixed": [...]}`); internally-tagged would reject newtype
-/// variants over primitives, untagged would be ambiguous.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TurnContent {
-    /// Plain UTF-8 text — every assistant/user/tool turn the chat
-    /// loop produces today.
-    Text(String),
-    /// A reference to substrate-resident audio. The PCM bytes
-    /// themselves live at [`AudioRef::substrate_path`]; turn records
-    /// never inline audio.
-    Audio(AudioRef),
-    /// An ordered mix of text and audio fragments — placeholder for
-    /// a multi-modal voice + text reply.
-    Mixed(Vec<TurnContentPart>),
-}
-
-/// One fragment of a [`TurnContent::Mixed`] payload. Same external
-/// tagging strategy as [`TurnContent`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TurnContentPart {
-    /// A text segment.
-    Text(String),
-    /// An audio segment (substrate-pointed; see [`AudioRef`]).
-    Audio(AudioRef),
-}
-
-/// Pointer to a substrate-resident audio asset.
-///
-/// The substrate path holds the actual PCM/encoded audio; this
-/// struct is the lightweight reference recorded in the conversation
-/// JSONL. `mime` is the wire's MIME type (e.g. `"audio/wav"`,
-/// `"audio/opus"`); `duration_ms` is the audio's wall-clock length.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AudioRef {
-    /// Substrate path where the audio bytes live.
-    pub substrate_path: String,
-    /// MIME type of the encoded audio (e.g. `"audio/wav"`).
-    pub mime: String,
-    /// Audio duration in milliseconds.
-    pub duration_ms: u64,
-}
+// WEFT-350: multimodal content types live in `clawft_types::turn_content`
+// so panels, the loop, and the sink share one wire shape.
+pub use clawft_types::{AudioRef, TurnContent, TurnContentPart};
 
 /// Wall-clock seam for turn-id minting and status timestamps.
 ///
@@ -643,16 +598,22 @@ impl ConversationSink for SubstrateConversationSink {
             turn.turn_id.clone()
         };
         let path = format!("{}/{}", Self::turns_prefix(conv_id), turn_id);
-        // `content_type: "text"` discriminant on the wire so future
-        // Audio/Mixed turns parse without a schema bump.
+        // WEFT-350: populate TurnContent::Audio / Mixed when the loop
+        // attaches a substrate audio ref; keep plain Text otherwise.
+        let rich = TurnContent::from_text_and_audio(turn.content.clone(), turn.audio.clone());
+        let content_type = rich.content_type();
+        let content_rich = serde_json::to_value(&rich).unwrap_or(Value::Null);
         let body = serde_json::json!({
             "turn_id": turn_id,
             "role": turn.role,
+            // Flat text always present for LLM rehydrate / legacy readers.
             "content": turn.content,
             "tool_calls": turn.tool_calls,
             "tool_call_id": turn.tool_call_id,
             "ts_ms": turn.ts_ms,
-            "content_type": "text",
+            "content_type": content_type,
+            // Externally-tagged TurnContent (text | audio | mixed).
+            "content_rich": content_rich,
         });
         // Substrate publish first — that's the durable record. Anchor
         // side-effects are best-effort and only run after the publish
@@ -773,6 +734,11 @@ fn turn_from_value(v: &Value) -> Option<Turn> {
         .get("tool_call_id")
         .and_then(|v| if v.is_null() { None } else { v.as_str() })
         .map(|s| s.to_string());
+    // WEFT-350: recover audio from content_rich when present.
+    let audio = obj
+        .get("content_rich")
+        .and_then(|cr| serde_json::from_value::<TurnContent>(cr.clone()).ok())
+        .and_then(|tc| tc.audio_ref().cloned());
     Some(Turn {
         turn_id,
         role,
@@ -784,6 +750,7 @@ fn turn_from_value(v: &Value) -> Option<Turn> {
         // it lives on the causal node metadata (served by conversation.graph),
         // which is the store of record for Wave 1. Read-back is honestly None.
         voice_analysis: None,
+        audio,
     })
 }
 

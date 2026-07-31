@@ -244,11 +244,13 @@ fn voice_dispatch_params(conv_id: &str, goal_text: &str) -> AgentChatParams {
     let system = AgentChatMessage {
         role: "system".into(),
         content: VOICE_REPLY_SYSTEM_MESSAGE.into(),
-    };
+                audio: None,
+        };
     let user = AgentChatMessage {
         role: "user".into(),
         content: goal_text.to_string(),
-    };
+                audio: None,
+        };
     AgentChatParams {
         messages: vec![system, user],
         temperature: None,

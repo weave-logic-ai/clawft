@@ -4616,45 +4616,19 @@ async fn handle_agent_chat_stream(
                 activity.insert(conv_id.clone(), std::time::Instant::now());
             }
 
-            // Cascade the final assistant text as progressive frames so
-            // the panel can paint tokens while this RPC is still open.
-            // Word-ish chunks (whitespace boundaries, max ~12 chars of
-            // run-on) keep frame count bounded without looking robotic.
+            // Cascade progressive frames with delta + speakable units
+            // (WEFT-350) so voice TTS can start sentence-by-sentence
+            // while the panel paints tokens. Word-ish chunks keep
+            // frame count bounded; SpeakableTracker closes on .!?
             let full = result.assistant_text.clone();
-            let mut seq: u64 = 1;
-            let mut emitted = 0usize;
-            let chars: Vec<char> = full.chars().collect();
-            while emitted < chars.len() {
-                // Grow by up to 8 chars, but always break on whitespace
-                // once we've taken at least 2 so words land cleanly.
-                let mut take = 0usize;
-                while emitted + take < chars.len() && take < 8 {
-                    take += 1;
-                    if take >= 2 && chars[emitted + take - 1].is_whitespace() {
-                        break;
-                    }
-                }
-                emitted += take;
-                let prefix: String = chars[..emitted].iter().collect();
-                publish_chat_stream_frame(
-                    &kernel,
-                    &conv_id,
-                    crate::protocol::AgentChatStreamFrame::generating(seq, prefix),
-                )
-                .await;
-                seq = seq.saturating_add(1);
-                // Yield so concurrent substrate.read polls (panel) can
-                // observe intermediate frames. 4ms × ~N/8 chunks keeps
-                // a 400-char reply under ~200ms of cascade.
+            let frames = clawft_types::agent_chat::cascade_stream_frames(&full, 8);
+            for frame in frames {
+                publish_chat_stream_frame(&kernel, &conv_id, frame).await;
+                // Yield so concurrent substrate.read polls (panel / TTS
+                // consumer) can observe intermediate frames. 4ms × N/8
+                // chunks keeps a 400-char reply under ~200ms of cascade.
                 tokio::time::sleep(std::time::Duration::from_millis(4)).await;
             }
-
-            publish_chat_stream_frame(
-                &kernel,
-                &conv_id,
-                crate::protocol::AgentChatStreamFrame::done_ok(seq, full),
-            )
-            .await;
 
             match serde_json::to_value(&result) {
                 Ok(mut v) => {
@@ -6460,6 +6434,10 @@ async fn dispatch(
                     // index_turn seam stores it as a sibling metadata key and
                     // overrides the classification emotion axis (tier:"voice").
                     voice_analysis: t.voice_analysis.clone(),
+                    // WEFT-350: agent.turn.record path does not attach
+                    // substrate AudioRef here (PCM already on voice capture
+                    // topics); chat_stream multimodal turns set `audio`.
+                    audio: None,
                 };
                 match sink.append_turn(&p.conv_id, turn).await {
                     Ok(()) => recorded += 1,
@@ -8233,11 +8211,13 @@ impl crate::voice_router::ChatHandler for DaemonAgentChatHandler {
                 clawft_service_agent::AgentChatMessage {
                     role: "system".into(),
                     content: system_prefix,
-                },
+                            audio: None,
+        },
                 clawft_service_agent::AgentChatMessage {
                     role: "user".into(),
                     content: turn.text,
-                },
+                            audio: None,
+        },
             ],
             temperature: None,
             max_tokens: None,

@@ -24,6 +24,7 @@ fn user_turn(id: &str, content: &str, ts_ms: u64) -> Turn {
         tool_call_id: None,
         ts_ms,
         voice_analysis: None,
+            audio: None,
     }
 }
 

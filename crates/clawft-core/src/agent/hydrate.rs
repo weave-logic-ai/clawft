@@ -93,6 +93,7 @@ mod tests {
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
             voice_analysis: None,
+            audio: None,
         }
     }
 
@@ -104,6 +105,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             voice_analysis: None,
+            audio: None,
             ts_ms: 1_700_000_000_000,
         }
     }

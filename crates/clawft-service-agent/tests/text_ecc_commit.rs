@@ -262,6 +262,7 @@ async fn anchor_turn_commits_on_the_kernel_global_forest() {
         tool_call_id: None,
         ts_ms: 1,
         voice_analysis: None,
+            audio: None,
     };
     anchor.anchor_turn(conv, "t1", &user).await;
 
@@ -304,6 +305,7 @@ async fn anchor_turn_commits_on_the_kernel_global_forest() {
         tool_call_id: None,
         ts_ms: 2,
         voice_analysis: None,
+            audio: None,
     };
     anchor.anchor_turn(conv, "t2", &reply).await;
     assert_eq!(causal.node_count(), 2, "reply dual-wrote a second node");

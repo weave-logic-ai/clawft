@@ -29,12 +29,32 @@ use serde::{Deserialize, Serialize};
 /// `role` is one of `"system"` / `"user"` / `"assistant"`. The daemon
 /// prepends its own system prompt; any `system` from the panel is
 /// appended after it.
+///
+/// WEFT-350: optional [`audio`](AgentChatMessage::audio) lets the voice
+/// path attach a substrate-pointed utterance so the sink can persist
+/// [`crate::turn_content::TurnContent::Audio`] / `Mixed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentChatMessage {
     /// `system` / `user` / `assistant`.
     pub role: String,
-    /// Message content.
+    /// Message content (STT transcript for voice turns).
     pub content: String,
+    /// Optional substrate-pointed audio for this message (WEFT-350).
+    /// When set on the trailing user message, the chat loop records a
+    /// multimodal turn (`Mixed` when content is non-empty, else `Audio`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::turn_content::AudioRef>,
+}
+
+impl AgentChatMessage {
+    /// Build a text-only chat message (no audio attachment).
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            audio: None,
+        }
+    }
 }
 
 /// Metadata key stamped by `AgentService` (WEFT-332) so
@@ -100,6 +120,11 @@ pub struct AgentChatParams {
     ///   `{"impulse_source":"agent.chat"}`) for the witness/audit trail.
     /// - [`GATE_AGENT_ID_META_KEY`] — set by the service (not panels);
     ///   per-caller principal for gate checks (WEFT-332).
+    /// - `audio: object` — WEFT-350 substrate audio ref
+    ///   (`substrate_path`, `mime`, `duration_ms`) when STT attaches
+    ///   utterance audio without message-level `AgentChatMessage.audio`.
+    /// - `audio_substrate_path` / `audio_mime` / `audio_duration_ms` —
+    ///   flattened alternate form of the audio ref for thin adapters.
     ///
     /// Additive and fully backward-compatible: absent on the wire when
     /// `None`, and older callers that omit it deserialize to `None`.
@@ -630,6 +655,12 @@ pub fn chat_defer_path(conv_id: &str) -> String {
 /// (not a delta), so a missed frame is self-healing — the next frame
 /// carries the full string so far. `seq` is a monotonic counter the
 /// panel can use to ignore stale out-of-order reads.
+///
+/// WEFT-350 voice path also reads:
+/// - [`delta`](AgentChatStreamFrame::delta) — partial token(s) since the
+///   previous frame (TTS / token consumers that want increments).
+/// - [`speakable`](AgentChatStreamFrame::speakable) — a completed
+///   sentence/clause ready for TTS (empty when no boundary yet).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentChatStreamFrame {
     /// Accumulated assistant text so far (empty while thinking /
@@ -661,6 +692,14 @@ pub struct AgentChatStreamFrame {
     /// substrate read. Absent on the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer: Option<DeferPromptEvent>,
+    /// Partial text since the previous progressive frame (WEFT-350).
+    /// Absent on thinking / terminal frames that carry no new tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<String>,
+    /// Completed speakable unit (sentence / clause) ready for TTS
+    /// (WEFT-350). Absent when no sentence boundary has closed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speakable: Option<String>,
 }
 
 impl AgentChatStreamFrame {
@@ -675,6 +714,8 @@ impl AgentChatStreamFrame {
             error: None,
             ts_ms: None,
             defer: None,
+            delta: None,
+            speakable: None,
         }
     }
 
@@ -689,6 +730,35 @@ impl AgentChatStreamFrame {
             error: None,
             ts_ms: None,
             defer: None,
+            delta: None,
+            speakable: None,
+        }
+    }
+
+    /// Progressive frame with partial-token `delta` and optional TTS
+    /// `speakable` unit (WEFT-350 voice path).
+    pub fn generating_voice(
+        seq: u64,
+        text: impl Into<String>,
+        delta: impl Into<String>,
+        speakable: Option<String>,
+    ) -> Self {
+        let delta = delta.into();
+        Self {
+            text: text.into(),
+            phase: "generating".into(),
+            seq,
+            done: false,
+            tool_name: None,
+            error: None,
+            ts_ms: None,
+            defer: None,
+            delta: if delta.is_empty() {
+                None
+            } else {
+                Some(delta)
+            },
+            speakable,
         }
     }
 
@@ -703,6 +773,8 @@ impl AgentChatStreamFrame {
             error: None,
             ts_ms: None,
             defer: None,
+            delta: None,
+            speakable: None,
         }
     }
 
@@ -717,6 +789,8 @@ impl AgentChatStreamFrame {
             error: Some(error.into()),
             ts_ms: None,
             defer: None,
+            delta: None,
+            speakable: None,
         }
     }
 
@@ -735,8 +809,179 @@ impl AgentChatStreamFrame {
             error: None,
             ts_ms: prompt.ts_ms,
             defer: Some(prompt),
+            delta: None,
+            speakable: None,
         }
     }
+}
+
+// ── Speakable unit tracker (WEFT-350 voice TTS handoff) ──────────
+
+/// Tracks accumulated assistant text and emits completed speakable
+/// units (sentence / clause boundaries) for the STT→chat_stream→TTS
+/// pipeline.
+///
+/// Boundaries: `.` `!` `?` `…` optionally followed by closing quotes /
+/// brackets, then whitespace or end-of-string. Also flushes on `\n`.
+#[derive(Debug, Default, Clone)]
+pub struct SpeakableTracker {
+    /// Text already emitted as speakable units (prefix of accumulated).
+    emitted_upto: usize,
+    /// Last full accumulated text seen (for delta computation).
+    last_text: String,
+}
+
+/// One progressive stream step produced by [`SpeakableTracker::push`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStep {
+    /// Accumulated text so far.
+    pub text: String,
+    /// New characters since the previous push.
+    pub delta: String,
+    /// Newly closed speakable unit(s), joined; `None` if no boundary.
+    pub speakable: Option<String>,
+}
+
+impl SpeakableTracker {
+    /// Create an empty tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ingest the latest **accumulated** draft and return delta +
+    /// any newly closed speakable unit(s).
+    pub fn push(&mut self, accumulated: &str) -> StreamStep {
+        let delta = if accumulated.starts_with(&self.last_text) {
+            accumulated[self.last_text.len()..].to_string()
+        } else if self.last_text.is_empty() {
+            accumulated.to_string()
+        } else {
+            // Non-prefix growth (rewrite) — treat full string as delta.
+            accumulated.to_string()
+        };
+        self.last_text = accumulated.to_string();
+
+        let speakable = self.drain_speakable(accumulated);
+        StreamStep {
+            text: accumulated.to_string(),
+            delta,
+            speakable,
+        }
+    }
+
+    /// Flush any remaining non-empty tail as a final speakable unit
+    /// (call on stream `done`).
+    pub fn flush(&mut self, accumulated: &str) -> Option<String> {
+        if self.emitted_upto >= accumulated.len() {
+            return None;
+        }
+        let rest = accumulated[self.emitted_upto..].trim();
+        self.emitted_upto = accumulated.len();
+        if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        }
+    }
+
+    fn drain_speakable(&mut self, accumulated: &str) -> Option<String> {
+        let bytes = accumulated.as_bytes();
+        let mut start = self.emitted_upto;
+        let mut units: Vec<String> = Vec::new();
+        let mut i = start;
+        while i < bytes.len() {
+            let ch = bytes[i] as char;
+            // UTF-8: only ASCII punctuation checked here; multi-byte
+            // ellipsis is rare in LLM output (models emit "...").
+            if matches!(ch, '.' | '!' | '?' | '\n') {
+                let mut end = i + 1;
+                // Swallow trailing closers: "')]}
+                while end < bytes.len()
+                    && matches!(bytes[end] as char, '"' | '\'' | ')' | ']' | '}')
+                {
+                    end += 1;
+                }
+                // Require whitespace or EOS after boundary (avoid
+                // "3.14" / "e.g." mid-token splits when next is alnum).
+                let ok = end >= bytes.len()
+                    || (bytes[end] as char).is_whitespace()
+                    || ch == '\n';
+                if ok {
+                    let unit = accumulated[start..end].trim();
+                    if !unit.is_empty() {
+                        units.push(unit.to_string());
+                    }
+                    // Skip whitespace after boundary.
+                    while end < bytes.len() && (bytes[end] as char).is_whitespace() {
+                        end += 1;
+                    }
+                    start = end;
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        self.emitted_upto = start;
+        if units.is_empty() {
+            None
+        } else {
+            Some(units.join(" "))
+        }
+    }
+}
+
+/// Cascade helper: split full assistant text into progressive frames
+/// with delta + speakable fields for the voice path (WEFT-350).
+///
+/// Word-ish chunks (whitespace boundaries, max `chunk_chars`) keep
+/// frame count bounded while still feeding TTS sentence units early.
+pub fn cascade_stream_frames(full: &str, chunk_chars: usize) -> Vec<AgentChatStreamFrame> {
+    let chunk = chunk_chars.max(2);
+    let chars: Vec<char> = full.chars().collect();
+    let mut tracker = SpeakableTracker::new();
+    let mut frames = Vec::new();
+    let mut seq: u64 = 1;
+    let mut emitted = 0usize;
+    while emitted < chars.len() {
+        let mut take = 0usize;
+        while emitted + take < chars.len() && take < chunk {
+            take += 1;
+            if take >= 2 && chars[emitted + take - 1].is_whitespace() {
+                break;
+            }
+        }
+        emitted += take;
+        let prefix: String = chars[..emitted].iter().collect();
+        let step = tracker.push(&prefix);
+        frames.push(AgentChatStreamFrame::generating_voice(
+            seq,
+            step.text,
+            step.delta,
+            step.speakable,
+        ));
+        seq = seq.saturating_add(1);
+    }
+    // Terminal flush of any trailing clause without punctuation.
+    if let Some(tail) = tracker.flush(full) {
+        if let Some(last) = frames.last_mut() {
+            // Attach residual speakable onto the last generating frame
+            // if it had none; otherwise emit an extra frame.
+            if last.speakable.is_none() {
+                last.speakable = Some(tail);
+            } else {
+                frames.push(AgentChatStreamFrame::generating_voice(
+                    seq,
+                    full,
+                    "",
+                    Some(tail),
+                ));
+                seq = seq.saturating_add(1);
+            }
+        }
+    }
+    frames.push(AgentChatStreamFrame::done_ok(seq, full));
+    frames
 }
 
 // ── Typed agent.chat errors (WEFT-334) ───────────────────────────
@@ -1082,6 +1327,39 @@ mod tests {
         let err = AgentChatStreamFrame::done_err(5, "boom");
         assert!(err.done);
         assert_eq!(err.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn stream_frame_voice_fields_round_trip() {
+        // WEFT-350: delta + speakable are optional and omit when None.
+        let f = AgentChatStreamFrame::generating_voice(2, "Hello. ", "Hello. ", Some("Hello.".into()));
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["delta"], "Hello. ");
+        assert_eq!(v["speakable"], "Hello.");
+        let back: AgentChatStreamFrame = serde_json::from_value(v).unwrap();
+        assert_eq!(back.delta.as_deref(), Some("Hello. "));
+        assert_eq!(back.speakable.as_deref(), Some("Hello."));
+        // Legacy frames without delta still deserialize.
+        let legacy = r#"{"text":"x","phase":"generating","seq":1,"done":false}"#;
+        let old: AgentChatStreamFrame = serde_json::from_str(legacy).unwrap();
+        assert!(old.delta.is_none());
+        assert!(old.speakable.is_none());
+    }
+
+    #[test]
+    fn cascade_stream_frames_emits_deltas_and_done() {
+        let frames = cascade_stream_frames("Hi. Bye.", 8);
+        assert!(frames.len() >= 2);
+        assert!(frames.last().unwrap().done);
+        assert_eq!(frames.last().unwrap().phase, "done");
+        let deltas: String = frames.iter().filter_map(|f| f.delta.clone()).collect();
+        assert!(deltas.contains('H') || deltas.contains("Hi"), "deltas={deltas:?}");
+        // Speakable should close at least the first sentence.
+        let spoken: Vec<_> = frames.iter().filter_map(|f| f.speakable.clone()).collect();
+        assert!(
+            spoken.iter().any(|s| s.contains("Hi")),
+            "speakable units={spoken:?}"
+        );
     }
 
     #[test]

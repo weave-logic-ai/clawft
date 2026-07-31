@@ -363,6 +363,7 @@ fn params(conv_id: &str, content: &str) -> AgentChatParams {
         messages: vec![AgentChatMessage {
             role: "user".into(),
             content: content.into(),
+                    audio: None,
         }],
         temperature: None,
         max_tokens: None,

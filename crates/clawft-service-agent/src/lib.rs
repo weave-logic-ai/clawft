@@ -62,6 +62,8 @@ pub mod system_service;
 pub mod text_structure;
 pub mod turn_classifier;
 pub mod verbalize;
+/// WEFT-350: STT → agent.chat_stream → TTS hooks.
+pub mod voice_stream;
 
 pub use atom_registry::{
     AtomKey, AtomLocator, AtomRegistry, ConsistencyIssue, ConsistencyReport, Disposition,
@@ -107,4 +109,8 @@ pub use substrate_sink::{
     AudioRef, Clock, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,
     SubstrateClient, SubstrateConversationSink, SystemClock, TurnAnchor, TurnContent,
     TurnContentPart,
+};
+pub use voice_stream::{
+    build_voice_chat_params, resolve_input_audio, simulate_stream, tts_units_from_frames,
+    user_turn_content,
 };

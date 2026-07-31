@@ -551,6 +551,7 @@ fn child_params(
         messages: vec![AgentChatMessage {
             role: "user".into(),
             content: text.to_string(),
+                    audio: None,
         }],
         temperature: None,
         max_tokens: None,

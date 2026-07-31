@@ -731,6 +731,7 @@ mod tests {
             tool_call_id: None,
             ts_ms: ts,
             voice_analysis: None,
+            audio: None,
         }
     }
 

@@ -34,6 +34,8 @@ pub mod agent_chat;
 pub mod agent_routing;
 /// SC-2 secure PCM buffers (WEFT-223) — zeroize-on-drop raw audio holders.
 pub mod audio_buffer;
+/// Multimodal turn content + voice chat metadata keys (WEFT-350).
+pub mod turn_content;
 pub mod canvas;
 pub mod company;
 pub mod config;
@@ -56,3 +58,6 @@ pub use audio_buffer::{
 };
 pub use error::{ChannelError, ClawftError, Result};
 pub use registry::Registry;
+pub use turn_content::{
+    audio_from_metadata, AudioRef, TurnContent, TurnContentPart,
+};

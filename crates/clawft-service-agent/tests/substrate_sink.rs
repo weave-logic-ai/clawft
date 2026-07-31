@@ -97,6 +97,20 @@ fn turn_text(role: &str, content: &str, ts_ms: u64) -> Turn {
         tool_call_id: None,
         ts_ms,
         voice_analysis: None,
+        audio: None,
+    }
+}
+
+fn turn_with_audio(role: &str, content: &str, ts_ms: u64, audio: AudioRef) -> Turn {
+    Turn {
+        turn_id: String::new(),
+        role: role.into(),
+        content: content.into(),
+        tool_calls: None,
+        tool_call_id: None,
+        ts_ms,
+        voice_analysis: None,
+        audio: Some(audio),
     }
 }
 
@@ -120,6 +134,37 @@ async fn append_turn_writes_to_substrate() {
     assert_eq!(val["content"], "hello");
     assert_eq!(val["ts_ms"], 1_700_000_000_000u64);
     assert_eq!(val["content_type"], "text");
+    assert_eq!(val["content_rich"]["text"], "hello");
+}
+
+#[tokio::test]
+async fn append_turn_with_audio_persists_mixed_content() {
+    // WEFT-350: loop populates TurnContent::Mixed when transcript + audio.
+    let stub = Arc::new(StubClient::default());
+    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+    let audio = AudioRef {
+        substrate_path: "substrate/_derived/chat/c1/audio/0".into(),
+        mime: "audio/wav".into(),
+        duration_ms: 1_200,
+    };
+    sink.append_turn(
+        "c1",
+        turn_with_audio("user", "hello from mic", 1_700_000_000_000, audio),
+    )
+    .await
+    .unwrap();
+
+    let snap = stub.snapshot();
+    let (_path, val) = snap.iter().next().unwrap();
+    assert_eq!(val["content_type"], "mixed");
+    assert_eq!(val["content"], "hello from mic");
+    assert!(val["content_rich"]["mixed"].is_array());
+    // load_history recovers the audio ref.
+    let history = sink.load_history("c1").await.unwrap();
+    assert_eq!(history.len(), 1);
+    let recovered = history[0].audio.as_ref().expect("audio round-trip");
+    assert_eq!(recovered.duration_ms, 1_200);
+    assert!(recovered.substrate_path.contains("/audio/0"));
 }
 
 #[tokio::test]
@@ -430,8 +475,7 @@ async fn drop_aborts_outstanding_heartbeats() {
 
 #[test]
 fn turn_content_text_only_for_v1() {
-    // The chat path constructs only Text today; round-trip through
-    // serde to lock the externally-tagged wire shape.
+    // Text remains the default wire shape for pure chat turns.
     let c = TurnContent::Text("hello".into());
     let s = serde_json::to_string(&c).unwrap();
     assert!(s.contains("\"text\""), "wire shape: {s}");
@@ -441,9 +485,8 @@ fn turn_content_text_only_for_v1() {
 
 #[test]
 fn turn_content_audio_serde_round_trips() {
-    // Even though the chat path doesn't construct Audio, the wire
-    // must serde-round-trip so future voice work doesn't reshape
-    // the substrate JSONL.
+    // WEFT-350: Audio / Mixed are constructed by the chat path when
+    // STT attaches an AudioRef; wire must still round-trip.
     let a = TurnContent::Audio(AudioRef {
         substrate_path: "substrate/_derived/chat/c/audio/0".into(),
         mime: "audio/wav".into(),

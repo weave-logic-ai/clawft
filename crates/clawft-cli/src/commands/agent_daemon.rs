@@ -71,6 +71,7 @@ async fn daemon_turn(client: &mut DaemonClient, user_input: &str) -> anyhow::Res
         messages: vec![AgentChatMessage {
             role: "user".into(),
             content: user_input.to_owned(),
+                    audio: None,
         }],
         temperature: None,
         max_tokens: None,
@@ -253,7 +254,8 @@ mod tests {
             messages: vec![AgentChatMessage {
                 role: "user".into(),
                 content: "hello".into(),
-            }],
+                        audio: None,
+        }],
             temperature: None,
             max_tokens: None,
             conv_id: CLI_CONV_ID.to_owned(),

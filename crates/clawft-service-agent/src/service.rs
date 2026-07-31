@@ -829,7 +829,6 @@ fn inbound_from_params(
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
-
     let caller = normalize_caller_id(params.caller_id.as_deref());
     let sender_id = caller
         .clone()
@@ -850,15 +849,39 @@ fn inbound_from_params(
         );
     }
 
+    // WEFT-350: promote message-level audio onto metadata so the loop
+    // can populate TurnContent::Audio / Mixed via sink_append_user.
+    if let Some(audio) = last_user_audio(&params.messages) {
+        if let Ok(v) = serde_json::to_value(&audio) {
+            metadata
+                .entry(clawft_types::turn_content::voice_meta::AUDIO.into())
+                .or_insert(v);
+        }
+    }
+    let media = last_user_audio(&params.messages)
+        .map(|a| vec![a.substrate_path])
+        .unwrap_or_default();
     InboundMessage {
         channel: AGENT_CHAT_CHANNEL.into(),
         sender_id,
         chat_id: conv_id.into(),
         content,
         timestamp: chrono::Utc::now(),
-        media: Vec::new(),
+        media,
         metadata,
     }
+}
+
+/// Audio ref on the most recent user message (WEFT-350).
+fn last_user_audio(
+    messages: &[crate::protocol::AgentChatMessage],
+) -> Option<clawft_types::AudioRef> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.audio.clone())
+        .or_else(|| messages.last().and_then(|m| m.audio.clone()))
 }
 
 /// Pick the most recent `role == "user"` content from the wire's
@@ -943,10 +966,7 @@ mod tests {
 
     fn params_for(conv_id: &str, content: &str) -> AgentChatParams {
         AgentChatParams {
-            messages: vec![crate::protocol::AgentChatMessage {
-                role: "user".into(),
-                content: content.into(),
-            }],
+            messages: vec![crate::protocol::AgentChatMessage::text("user", content)],
             temperature: None,
             max_tokens: None,
             conv_id: conv_id.into(),
@@ -966,10 +986,7 @@ mod tests {
             serde_json::Value::String("be terse".into()),
         );
         let p = AgentChatParams {
-            messages: vec![crate::protocol::AgentChatMessage {
-                role: "user".into(),
-                content: "hi".into(),
-            }],
+            messages: vec![crate::protocol::AgentChatMessage::text("user", "hi")],
             temperature: None,
             max_tokens: None,
             conv_id: "c".into(),
@@ -994,22 +1011,10 @@ mod tests {
     fn inbound_from_params_picks_last_user_content() {
         let p = AgentChatParams {
             messages: vec![
-                crate::protocol::AgentChatMessage {
-                    role: "system".into(),
-                    content: "ignore".into(),
-                },
-                crate::protocol::AgentChatMessage {
-                    role: "user".into(),
-                    content: "first user".into(),
-                },
-                crate::protocol::AgentChatMessage {
-                    role: "assistant".into(),
-                    content: "ignore me too".into(),
-                },
-                crate::protocol::AgentChatMessage {
-                    role: "user".into(),
-                    content: "actual ask".into(),
-                },
+                crate::protocol::AgentChatMessage::text("system", "ignore"),
+                crate::protocol::AgentChatMessage::text("user", "first user"),
+                crate::protocol::AgentChatMessage::text("assistant", "ignore me too"),
+                crate::protocol::AgentChatMessage::text("user", "actual ask"),
             ],
             temperature: None,
             max_tokens: None,
@@ -1024,13 +1029,44 @@ mod tests {
     }
 
     #[test]
+    fn inbound_from_params_promotes_message_audio() {
+        // WEFT-350: message-level audio becomes metadata + media so the
+        // loop can persist TurnContent::Mixed.
+        let audio = clawft_types::AudioRef::new(
+            "substrate/_derived/chat/c/audio/1",
+            "audio/wav",
+            800,
+        );
+        let p = AgentChatParams {
+            messages: vec![crate::protocol::AgentChatMessage {
+                role: "user".into(),
+                content: "said aloud".into(),
+                audio: Some(audio.clone()),
+            }],
+            temperature: None,
+            max_tokens: None,
+            conv_id: "c".into(),
+            metadata: None,
+        };
+        let inbound = inbound_from_params(&p, "c");
+        assert_eq!(inbound.content, "said aloud");
+        assert_eq!(inbound.media, vec![audio.substrate_path.clone()]);
+        let got = clawft_types::audio_from_metadata(
+            &inbound
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+        .expect("audio metadata");
+        assert_eq!(got.duration_ms, 800);
+    }
+
+    #[test]
     fn inbound_from_params_falls_back_to_last_message() {
         // No `user` role at all — fallback to the last entry.
         let p = AgentChatParams {
-            messages: vec![crate::protocol::AgentChatMessage {
-                role: "assistant".into(),
-                content: "lone".into(),
-            }],
+            messages: vec![crate::protocol::AgentChatMessage::text("assistant", "lone")],
             temperature: None,
             max_tokens: None,
             conv_id: "c".into(),

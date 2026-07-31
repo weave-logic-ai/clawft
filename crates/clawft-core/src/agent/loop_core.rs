@@ -1434,7 +1434,8 @@ impl<P: Platform> AgentLoop<P> {
         //     turn landed via `agent.turn.record` WITH its voice decomposition
         //     — a second plain append would double it on the sink + forest).
         if !Self::user_turn_already_recorded(&msg) {
-            self.sink_append_plain(&conv_id, "user", &msg.content).await;
+            // WEFT-350: when STT attaches an audio ref, persist Mixed/Audio.
+            self.sink_append_user(&conv_id, &msg).await;
         }
 
         // 4. Context messages are already pipeline::traits::LlmMessage (B2 unification).
@@ -1915,7 +1916,7 @@ impl<P: Platform> AgentLoop<P> {
                 "Delegation refused: maximum recursive delegation depth ({cap}) reached at hop {next_depth}. Override via CLAWFT_DELEGATION_DEPTH if intentional."
             );
             if !Self::user_turn_already_recorded(msg) {
-                self.sink_append_plain(&conv_id, "user", &msg.content).await;
+                self.sink_append_user(&conv_id, msg).await;
             }
             self.sink_append_plain(&conv_id, "assistant", &body).await;
             return Ok(OutboundMessage {
@@ -1937,7 +1938,7 @@ impl<P: Platform> AgentLoop<P> {
         // Record the user turn to the sink for history (unless the caller
         // already did — see `user_turn_already_recorded`).
         if !Self::user_turn_already_recorded(msg) {
-            self.sink_append_plain(&conv_id, "user", &msg.content).await;
+            self.sink_append_user(&conv_id, msg).await;
         }
 
         // Resolve auth context for permission checks.
@@ -2091,6 +2092,42 @@ impl<P: Platform> AgentLoop<P> {
     /// assistant appends in [`Self::handle_turn`] and the auto-delegation
     /// path so all three record turns identically.
     async fn sink_append_plain(&self, conv_id: &str, role: &str, content: &str) {
+        self.sink_append_plain_with_audio(conv_id, role, content, None)
+            .await;
+    }
+
+    /// WEFT-350: append a user turn, pulling an optional [`AudioRef`] from
+    /// inbound metadata so the substrate sink can persist
+    /// `TurnContent::Audio` / `Mixed`.
+    async fn sink_append_user(&self, conv_id: &str, msg: &InboundMessage) {
+        let audio = Self::audio_from_inbound(msg);
+        self.sink_append_plain_with_audio(conv_id, "user", &msg.content, audio)
+            .await;
+    }
+
+    /// Extract a substrate audio ref from inbound metadata (WEFT-350).
+    fn audio_from_inbound(msg: &InboundMessage) -> Option<clawft_types::AudioRef> {
+        let map: serde_json::Map<String, serde_json::Value> = msg
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(a) = clawft_types::audio_from_metadata(&map) {
+            return Some(a);
+        }
+        // Fallback: first media URL treated as substrate path.
+        msg.media
+            .first()
+            .map(|path| clawft_types::AudioRef::new(path.clone(), "audio/wav", 0))
+    }
+
+    async fn sink_append_plain_with_audio(
+        &self,
+        conv_id: &str,
+        role: &str,
+        content: &str,
+        audio: Option<clawft_types::AudioRef>,
+    ) {
         if let Err(e) = self
             .sink
             .append_turn(
@@ -2103,6 +2140,7 @@ impl<P: Platform> AgentLoop<P> {
                     tool_call_id: None,
                     ts_ms: Self::now_ms(),
                     voice_analysis: None,
+                    audio,
                 },
             )
             .await
@@ -2655,6 +2693,7 @@ impl<P: Platform> AgentLoop<P> {
                         tool_call_id: None,
                         ts_ms: Self::now_ms(),
                         voice_analysis: None,
+            audio: None,
                     },
                 )
                 .await
@@ -2845,6 +2884,7 @@ impl<P: Platform> AgentLoop<P> {
                                 tool_call_id: Some(id.clone()),
                                 ts_ms: Self::now_ms(),
                                 voice_analysis: None,
+            audio: None,
                             },
                         )
                         .await
@@ -2922,6 +2962,7 @@ impl<P: Platform> AgentLoop<P> {
                                 tool_call_id: Some(id.clone()),
                                 ts_ms: Self::now_ms(),
                                 voice_analysis: None,
+            audio: None,
                             },
                         )
                         .await
@@ -3001,6 +3042,7 @@ impl<P: Platform> AgentLoop<P> {
                                 tool_call_id: Some(id.clone()),
                                 ts_ms: Self::now_ms(),
                                 voice_analysis: None,
+            audio: None,
                             },
                         )
                         .await
@@ -3062,6 +3104,7 @@ impl<P: Platform> AgentLoop<P> {
                             tool_call_id: Some(id.clone()),
                             ts_ms: Self::now_ms(),
                             voice_analysis: None,
+            audio: None,
                         },
                     )
                     .await

@@ -41,7 +41,7 @@ pub struct Turn {
     pub turn_id: String,
     /// One of `"user" | "assistant" | "tool" | "system"`.
     pub role: String,
-    /// Text payload — the message body.
+    /// Text payload — the message body (STT transcript for voice).
     pub content: String,
     /// JSON tool_calls array on assistant turns that invoked tools.
     pub tool_calls: Option<Vec<serde_json::Value>>,
@@ -56,6 +56,33 @@ pub struct Turn {
     /// classification emotion axis (`tier:"voice"`). An opaque `serde_json`
     /// value — the daemon never reshapes it (the flat-key parity contract).
     pub voice_analysis: Option<serde_json::Value>,
+    /// Optional substrate-pointed audio for multimodal turns (WEFT-350).
+    /// When set, the substrate sink persists
+    /// [`clawft_types::TurnContent::Audio`] or `Mixed` instead of plain
+    /// `Text`.
+    pub audio: Option<clawft_types::AudioRef>,
+}
+
+impl Turn {
+    /// Build a plain text turn (no tools, no voice analysis, no audio).
+    pub fn plain(role: impl Into<String>, content: impl Into<String>, ts_ms: u64) -> Self {
+        Self {
+            turn_id: String::new(),
+            role: role.into(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            ts_ms,
+            voice_analysis: None,
+            audio: None,
+        }
+    }
+
+    /// Attach a substrate audio ref (builder-style).
+    pub fn with_audio(mut self, audio: clawft_types::AudioRef) -> Self {
+        self.audio = Some(audio);
+        self
+    }
 }
 
 /// Per-conversation persistence seam.
@@ -264,6 +291,7 @@ mod tests {
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
             voice_analysis: None,
+            audio: None,
         }
     }
 
@@ -453,6 +481,7 @@ mod tests {
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
             voice_analysis: None,
+            audio: None,
         };
         sink.append_turn("c1", turn.clone()).await.unwrap();
         let history = sink.load_history("c1").await.unwrap();
