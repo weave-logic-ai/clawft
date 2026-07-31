@@ -47,6 +47,11 @@ voice-xai = ["voice"]
 # (see voice::diarization); enabling this flag today only documents intent
 # — SherpaDiarizer still returns a clear "not staged" error until models land.
 diarization-sherpa = ["voice"]
+# WEFT-232: Discord VC bridge (VC PCM → STT → agent → TTS → VC).
+# Trait-injected transport; tests use MockDiscordVcTransport (no bot token,
+# no serenity/songbird). Real songbird adapter is scaffold-only until a
+# dedicated optional dep lands (SONGBIRD_TRANSPORT_IMPLEMENTED = false).
+discord-voice = ["voice"]
 
 [dependencies]
 clawft-types = { workspace = true }
