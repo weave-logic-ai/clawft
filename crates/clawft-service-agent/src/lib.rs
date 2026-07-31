@@ -99,6 +99,7 @@ pub use verbalize::{
     verbalize_voice_analysis,
 };
 pub use substrate_sink::{
-    AudioRef, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,
-    SubstrateClient, SubstrateConversationSink, TurnAnchor, TurnContent, TurnContentPart,
+    AudioRef, Clock, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,
+    SubstrateClient, SubstrateConversationSink, SystemClock, TurnAnchor, TurnContent,
+    TurnContentPart,
 };

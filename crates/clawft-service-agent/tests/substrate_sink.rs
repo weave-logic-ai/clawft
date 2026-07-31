@@ -20,15 +20,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use clawft_core::agent::sink::{ConversationSink, Turn};
 use clawft_service_agent::{
-    AudioRef, HEARTBEAT_PERIOD, SubstrateClient, SubstrateConversationSink, TurnAnchor,
+    AudioRef, Clock, HEARTBEAT_PERIOD, SubstrateClient, SubstrateConversationSink, TurnAnchor,
     TurnContent, TurnContentPart,
 };
 use serde_json::Value;
+
+/// Fixed [`Clock`] — always returns the same instant so ULID
+/// timestamps collide and the per-conv counter prefix is the sole
+/// lexicographic sort key (WEFT-326).
+struct FixedClock(SystemTime);
+
+impl Clock for FixedClock {
+    fn now(&self) -> SystemTime {
+        self.0
+    }
+}
 
 /// `Mutex<HashMap>` stub — exercises sink semantics without a full
 /// kernel. Tracks every publish (path → value) plus a write counter
@@ -113,9 +124,19 @@ async fn append_turn_writes_to_substrate() {
 
 #[tokio::test]
 async fn append_turns_are_monotonic() {
-    // Two appends within the same ms must produce sortable ids.
+    // Two appends forced into the same ULID millisecond via an
+    // injectable fixed clock. Counter prefix alone must keep path
+    // order = append order (WEFT-326; wall-clock ULIDs used to flake).
     let stub = Arc::new(StubClient::default());
-    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+    let fixed = UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
+    let sink = Arc::new(
+        SubstrateConversationSink::with_client(
+            Arc::clone(&stub) as Arc<dyn SubstrateClient>,
+            "n-test",
+            HEARTBEAT_PERIOD,
+        )
+        .with_clock(Arc::new(FixedClock(fixed))),
+    );
 
     sink.append_turn("c", turn_text("user", "a", 1_700_000_000_000))
         .await
@@ -137,6 +158,20 @@ async fn append_turns_are_monotonic() {
     let second = snap.get(&paths[1]).unwrap();
     assert_eq!(first["role"], "user");
     assert_eq!(second["role"], "assistant");
+
+    // Both turn ids share the frozen ULID timestamp; the fixed-width
+    // counter prefix is what distinguishes and orders them.
+    let id0 = paths[0].rsplit('/').next().unwrap();
+    let id1 = paths[1].rsplit('/').next().unwrap();
+    let (prefix0, ulid0) = id0.split_once('-').expect("counter-ulid form");
+    let (prefix1, ulid1) = id1.split_once('-').expect("counter-ulid form");
+    assert!(prefix0 < prefix1, "counter prefixes must sort: {prefix0} < {prefix1}");
+    // Same-ms ULIDs: timestamp portion (first 10 Crockford chars) equal.
+    assert_eq!(
+        &ulid0[..10],
+        &ulid1[..10],
+        "fixed clock must yield identical ULID timestamps"
+    );
 }
 
 #[tokio::test]
@@ -218,10 +253,20 @@ async fn history_orders_same_ms_burst_by_counter_prefix() {
     // Several appends stamped with the SAME ts_ms must come back in
     // append order — the fixed-width per-conv counter prefix on the
     // minted turn_id is the tiebreak the ts_ms sort falls through to.
+    // Fixed clock freezes ULID ms so the counter prefix is the only
+    // discriminant (WEFT-326).
     let stub = Arc::new(StubClient::default());
-    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
-
     let same_ms = 1_700_000_000_000;
+    let fixed = UNIX_EPOCH + Duration::from_millis(same_ms);
+    let sink = Arc::new(
+        SubstrateConversationSink::with_client(
+            Arc::clone(&stub) as Arc<dyn SubstrateClient>,
+            "n-test",
+            HEARTBEAT_PERIOD,
+        )
+        .with_clock(Arc::new(FixedClock(fixed))),
+    );
+
     for i in 0..6u64 {
         sink.append_turn("burst", turn_text("user", &i.to_string(), same_ms))
             .await

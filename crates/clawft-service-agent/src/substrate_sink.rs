@@ -36,7 +36,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use clawft_core::agent::sink::{ConversationSink, Turn};
@@ -103,6 +103,28 @@ pub struct AudioRef {
     pub mime: String,
     /// Audio duration in milliseconds.
     pub duration_ms: u64,
+}
+
+/// Wall-clock seam for turn-id minting and status timestamps.
+///
+/// Production uses [`SystemClock`] (`SystemTime::now()`). Tests inject
+/// a fixed clock so two appends share the same millisecond and the
+/// per-conv counter prefix is the sole sort key — eliminates the
+/// `append_turns_are_monotonic` race on wall-clock ULID timestamps
+/// (WEFT-326).
+pub trait Clock: Send + Sync + 'static {
+    /// Current wall-clock instant.
+    fn now(&self) -> SystemTime;
+}
+
+/// Production [`Clock`] — delegates to [`SystemTime::now`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
 }
 
 /// Test seam over [`SubstrateService`] + [`NodeRegistry`].
@@ -387,6 +409,9 @@ pub struct SubstrateConversationSink {
     /// swaps in [`KernelTurnAnchor`] when any `[kernel.agent]` flag
     /// is enabled.
     anchor: Arc<dyn TurnAnchor>,
+    /// Wall clock for ULID minting and status `ts_ms`. Defaults to
+    /// [`SystemClock`]; tests inject a fixed clock (WEFT-326).
+    clock: Arc<dyn Clock>,
 }
 
 impl SubstrateConversationSink {
@@ -421,12 +446,33 @@ impl SubstrateConversationSink {
 
     /// Build a sink with an explicit [`TurnAnchor`]. Daemon path —
     /// pass [`KernelTurnAnchor`] when any `[kernel.agent]` flag is
-    /// enabled, [`NoopTurnAnchor`] otherwise.
+    /// enabled, [`NoopTurnAnchor`] otherwise. Clock defaults to
+    /// [`SystemClock`].
     pub fn with_client_and_anchor(
         client: Arc<dyn SubstrateClient>,
         node_id: impl Into<String>,
         heartbeat_period: Duration,
         anchor: Arc<dyn TurnAnchor>,
+    ) -> Self {
+        Self::with_client_anchor_and_clock(
+            client,
+            node_id,
+            heartbeat_period,
+            anchor,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// Full constructor: client, anchor, and wall [`Clock`].
+    ///
+    /// Tests pass a fixed clock so same-ms ULID appends are
+    /// deterministic (WEFT-326). Production keeps [`SystemClock`].
+    pub fn with_client_anchor_and_clock(
+        client: Arc<dyn SubstrateClient>,
+        node_id: impl Into<String>,
+        heartbeat_period: Duration,
+        anchor: Arc<dyn TurnAnchor>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             client,
@@ -435,7 +481,15 @@ impl SubstrateConversationSink {
             heartbeats: DashMap::new(),
             counters: DashMap::new(),
             anchor,
+            clock,
         }
+    }
+
+    /// Replace the wall clock. Builder-style for test seams without
+    /// re-listing every constructor argument.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Daemon convenience over [`Self::new`] that also installs an
@@ -477,8 +531,9 @@ impl SubstrateConversationSink {
     }
 
     /// Mint a sortable per-turn id: a fixed-width base-32 per-conv
-    /// counter PREFIX followed by a [`ulid::Ulid::new()`] suffix
-    /// (ms-prefixed timestamp + 80-bit randomness for uniqueness).
+    /// counter PREFIX followed by a ULID suffix minted from
+    /// [`Self`]'s [`Clock`] (ms-prefixed timestamp + 80-bit
+    /// randomness for uniqueness).
     ///
     /// The counter leads so a lexicographic sort of turn_ids preserves
     /// append order even for several turns in the same millisecond — a
@@ -487,13 +542,28 @@ impl SubstrateConversationSink {
     /// ~50% of the time). `base32_u64` is big-endian, so left-padding
     /// with '0' to 13 chars (width of u64::MAX in base 32) keeps the
     /// lexicographic order numeric.
+    ///
+    /// ULID timestamp comes from the injectable clock so tests can
+    /// force same-ms collisions (WEFT-326) while production keeps
+    /// [`SystemClock`].
     fn turn_id_for(&self, conv_id: &str) -> String {
         let counter_entry = self
             .counters
             .entry(conv_id.to_string())
             .or_insert_with(|| AtomicU64::new(0));
         let n = counter_entry.fetch_add(1, Ordering::AcqRel);
-        format!("{:0>13}-{}", base32_u64(n), ulid::Ulid::new())
+        let ulid = ulid::Ulid::from_datetime(self.clock.now());
+        format!("{:0>13}-{}", base32_u64(n), ulid)
+    }
+
+    /// Wall-clock millisecond timestamp via the injected [`Clock`];
+    /// `0` on clock failure (pre-epoch).
+    fn now_ms(&self) -> u64 {
+        self.clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
     }
 
     /// Spawn the per-conv heartbeat task. Idempotent. The task holds
@@ -520,7 +590,7 @@ impl SubstrateConversationSink {
                 let Some(me) = me_weak.upgrade() else {
                     return; // sink dropped — exit cleanly
                 };
-                let payload = serde_json::json!({ "ts_ms": now_ms() });
+                let payload = serde_json::json!({ "ts_ms": me.now_ms() });
                 if let Err(e) = me.publish_status(&conv_for_task, "alive", payload).await {
                     warn!(error = %e, conv_id = %conv_for_task, "heartbeat publish failed");
                 }
@@ -607,7 +677,7 @@ impl ConversationSink for SubstrateConversationSink {
         let body = serde_json::json!({
             "status": status,
             "payload": payload,
-            "ts_ms": now_ms(),
+            "ts_ms": self.now_ms(),
         });
         self.client
             .publish(&self.node_id, &Self::status_path(conv_id), body)
@@ -715,15 +785,6 @@ fn turn_from_value(v: &Value) -> Option<Turn> {
         // which is the store of record for Wave 1. Read-back is honestly None.
         voice_analysis: None,
     })
-}
-
-/// Wall-clock millisecond timestamp; `0` on clock failure.
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Encode a `u64` in base-32 (Crockford alphabet) for the per-conv
