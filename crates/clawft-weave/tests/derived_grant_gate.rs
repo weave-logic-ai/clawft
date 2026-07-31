@@ -42,6 +42,7 @@ fn minimal_kernel_config() -> KernelConfig {
         enabled: true,
         max_processes: 64,
         health_check_interval_secs: 5,
+        brand: "WeftOS".to_string(),
         cluster: None,
         chain: None,
         resource_tree: None,
