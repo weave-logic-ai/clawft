@@ -689,12 +689,15 @@ pub fn build_browser_pipeline(
 ///   `clawft_kernel::GovernanceGate::check`. See `agent-core-v1.md`
 ///   Phase D2.
 /// - `agent_id`: caller-supplied daemon agent id used by every
-///   `gate.check` call. `None` keeps the pre-D2 behaviour of
+///   `gate.check` call when the inbound message has no per-turn
+///   `gate_agent_id` metadata. `None` keeps the pre-D2 behaviour of
 ///   synthesizing `"{channel}:{sender_id}"` from the inbound message.
-///   Phase D2's daemon construction site registers a single concierge
+///   Phase D2's daemon construction site registers a concierge
 ///   principal in `clawft-kernel::AgentRegistry` at boot and threads
-///   the resulting id through here. v1 chat is single-tenant; per-user
-///   agent ids land in a future phase.
+///   the resulting id through here as the single-tenant fallback.
+///   WEFT-332 multi-tenant chat stamps a per-caller principal into
+///   inbound metadata (via `AgentService::with_caller_registry`),
+///   which wins over this boot-time default.
 /// - `sink`: caller-supplied [`ConversationSink`](crate::agent::sink::ConversationSink).
 ///   `None` falls back to the in-memory sink (the C1/C2 default). The
 ///   C3 daemon construction site passes `Some(SubstrateConversationSink)`

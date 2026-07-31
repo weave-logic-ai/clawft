@@ -544,18 +544,21 @@ static DAEMON_ENRICH_CLASSIFIER: OnceLock<Arc<clawft_service_agent::EnrichmentCl
 static DAEMON_CONV_ACTIVITY: OnceLock<Arc<dashmap::DashMap<String, std::time::Instant>>> =
     OnceLock::new();
 
-/// agent-core-v1 Phase D2: daemon-wide handle to the concierge
-/// agent's kernel-issued `agent_id`.
+/// agent-core-v1 Phase D2 / WEFT-332: daemon-wide handle to the
+/// concierge agent's kernel-issued `agent_id`.
 ///
-/// Set at boot when the daemon registers a single concierge
-/// principal in `clawft-kernel::AgentRegistry::register` (right next
-/// to the existing node registration). Every `agent.chat` request in
-/// v1 dispatches through this id — chat is single-tenant by design;
-/// per-user agent ids are a future phase. The `AgentService` reads it
-/// via `daemon_concierge_agent_id()` to thread the id into
-/// `AgentLoop::with_daemon_agent_id` (then every `gate.check` call in
-/// `run_tool_loop` sees the concierge id rather than the
-/// `"{channel}:{sender_id}"` synthesis).
+/// Set at boot when the daemon registers a concierge principal in
+/// `clawft-kernel::AgentRegistry::register` (right next to the
+/// existing node registration). Used as the single-tenant fallback
+/// when an `agent.chat` request has no `caller_id`. Multi-tenant
+/// callers (WEFT-332) get a lazily-registered
+/// `agent.chat:user:<caller_id>` principal via
+/// [`clawft_service_agent::AgentService::with_caller_registry`]; that
+/// UUID is stamped into inbound metadata and wins over this default
+/// in `AgentLoop` gate checks. Also threaded into
+/// `AgentLoop::with_daemon_agent_id` so requests without metadata
+/// still use the concierge principal rather than the
+/// `"{channel}:{sender_id}"` synthesis.
 static DAEMON_CONCIERGE_AGENT_ID: OnceLock<String> = OnceLock::new();
 
 /// Per-service restart counter. Bumped each time `service.restart`
@@ -1825,14 +1828,14 @@ pub async fn run(
             ))
         };
 
-        // agent-core-v1 Phase D2: register a single concierge
-        // principal in the kernel's AgentRegistry. v1 chat is
-        // single-tenant by design — every `agent.chat` request is
-        // first-party traffic from the same agent talking to a user
-        // — so one id covers the whole panel. Per-user agent ids
-        // ship in a future phase. The agent reuses the daemon's
-        // own pubkey (PoP is unnecessary for a self-registration
-        // happening before the listener is up).
+        // agent-core-v1 Phase D2 / WEFT-332: register the boot-time
+        // concierge principal in the kernel's AgentRegistry. Used as
+        // the single-tenant fallback when `agent.chat` has no
+        // `caller_id`. Multi-tenant callers register lazily via
+        // `AgentService::with_caller_registry` under
+        // `agent.chat:user:<caller_id>`. The agent reuses the
+        // daemon's own pubkey (PoP is unnecessary for a
+        // self-registration happening before the listener is up).
         let concierge_agent_id: String = {
             let k = kernel.read().await;
             let pubkey: [u8; 32] = daemon_identity.signing_key.verifying_key().to_bytes();
@@ -2064,7 +2067,7 @@ pub async fn run(
             tool_registry,
             identity_loader,
             &workspace,
-            Some(concierge_agent_id),
+            Some(concierge_agent_id.clone()),
             context_router,
             Some(chat_gate),
             Some(agent_sink),
@@ -2187,8 +2190,25 @@ pub async fn run(
         // ADR-058 Phase 5 deferred step 4: also hand the SAME tier to the
         // service so the `agent.chat.end` signal can drive conversation-end
         // promotion (the loop grafts from it; the service promotes from it).
+        //
+        // WEFT-332: hand the kernel AgentRegistry so multi-tenant
+        // `agent.chat` callers get a lazily-registered principal
+        // (`agent.chat:user:<caller_id>`) instead of sharing the boot
+        // concierge UUID. Absent `caller_id` still falls back to the
+        // concierge id registered above.
+        let caller_registry = {
+            let k = kernel.read().await;
+            k.agent_registry().clone()
+        };
+        let caller_pubkey: [u8; 32] =
+            daemon_identity.signing_key.verifying_key().to_bytes();
         let mut service = clawft_service_agent::AgentService::new(agent_loop)
-            .with_defer_broker(defer_broker);
+            .with_defer_broker(defer_broker)
+            .with_caller_registry(
+                caller_registry,
+                caller_pubkey,
+                Some(concierge_agent_id.clone()),
+            );
         if let Some(tier) = session_tier {
             service = service.with_session_tier(tier);
         }
@@ -8223,6 +8243,7 @@ impl crate::voice_router::ChatHandler for DaemonAgentChatHandler {
             max_tokens: None,
             conv_id: turn.conv_id,
             metadata: None,
+            caller_id: None,
         };
         agent
             .dispatch(params)

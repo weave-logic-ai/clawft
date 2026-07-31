@@ -76,6 +76,7 @@ async fn daemon_turn(client: &mut DaemonClient, user_input: &str) -> anyhow::Res
         max_tokens: None,
         conv_id: CLI_CONV_ID.to_owned(),
         metadata: None,
+        caller_id: None,
     };
     let payload = serde_json::to_value(&params)
         .map_err(|e| anyhow::anyhow!("failed to encode agent.chat params: {e}"))?;
@@ -257,6 +258,7 @@ mod tests {
             max_tokens: None,
             conv_id: CLI_CONV_ID.to_owned(),
             metadata: None,
+            caller_id: None,
         };
         let v = serde_json::to_value(&params).unwrap();
         assert_eq!(v["conv_id"], "cli:cli-session");

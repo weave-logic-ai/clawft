@@ -18,8 +18,8 @@ pub use clawft_types::agent_chat::{
     AgentChatDeferDecideParams, AgentChatDeferDecideResult, AgentChatError, AgentChatMessage,
     AgentChatParams, AgentChatResult, AgentChatToolCall, DEFER_DECISION_ALLOW,
     DEFER_DECISION_CANCEL, DEFER_DECISION_DENY, DEFER_DEFAULT_TIMEOUT_MS, DeferPromptEvent,
-    DeferUserDecision, STREAM_PHASE_AWAITING_DEFER, SpawnedTaskSummary, chat_defer_path,
-    default_conv_id,
+    DeferUserDecision, GATE_AGENT_ID_META_KEY, STREAM_PHASE_AWAITING_DEFER, SpawnedTaskSummary,
+    caller_principal_name, chat_defer_path, default_conv_id,
 };
 
 // ── chain.append (WEFT-324) ───────────────────────────────────────

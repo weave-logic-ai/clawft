@@ -11,13 +11,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use clawft_kernel::AgentRegistry;
 use clawft_service_agent::{
     AgentChatMessage, AgentChatParams, AgentLoopHandle, AgentService, AgentServiceError,
 };
+use clawft_types::agent_chat::{GATE_AGENT_ID_META_KEY, caller_principal_name};
 use clawft_types::event::{InboundMessage, OutboundMessage};
 use tokio::sync::Notify;
 
@@ -110,6 +113,7 @@ fn params_for(conv_id: &str, content: &str) -> AgentChatParams {
         max_tokens: None,
         conv_id: conv_id.into(),
         metadata: None,
+        caller_id: None,
     }
 }
 
@@ -617,4 +621,140 @@ async fn same_conv_contention_increments_lock_contentions() {
         snap.lock_contentions
     );
     assert!(snap.last_completion_unix_ms > 0);
+}
+
+// ── WEFT-332: per-user agent_ids for multi-tenant chat ────────────────────
+
+/// Recording handle: captures every inbound message the service built.
+struct RecordingHandle {
+    seen: Mutex<Vec<InboundMessage>>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentLoopHandle for RecordingHandle {
+    async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<OutboundMessage, String> {
+        let channel = msg.channel.clone();
+        let chat_id = msg.chat_id.clone();
+        let content = msg.content.clone();
+        self.seen.lock().unwrap().push(msg);
+        // Unblock immediately so dispatch returns.
+        self.release.notify_one();
+        Ok(OutboundMessage {
+            channel,
+            chat_id,
+            content: format!("ok:{content}"),
+            reply_to: None,
+            media: Vec::new(),
+            metadata: HashMap::new(),
+        })
+    }
+}
+
+/// Two distinct callers get two distinct kernel principals; same
+/// conversation name does not collide principals; PermissionResolver
+/// keys on the per-caller sender_id.
+#[tokio::test]
+async fn multi_tenant_callers_get_isolated_principals() {
+    let registry = AgentRegistry::new();
+    let concierge = registry.register("concierge-bot".into(), [9u8; 32]);
+    let release = Arc::new(Notify::new());
+    let handle = Arc::new(RecordingHandle {
+        seen: Mutex::new(Vec::new()),
+        release: Arc::clone(&release),
+    });
+    let svc = AgentService::new(Arc::clone(&handle) as Arc<_>).with_caller_registry(
+        registry.clone(),
+        [9u8; 32],
+        Some(concierge.agent_id.clone()),
+    );
+
+    // Same conv name ("main") from two callers — principals must differ.
+    let mut alice = params_for("main", "hi alice");
+    alice.caller_id = Some("alice".into());
+    let mut bob = params_for("main", "hi bob");
+    bob.caller_id = Some("bob".into());
+
+    let r_a = svc.dispatch(alice).await.unwrap();
+    let r_b = svc.dispatch(bob).await.unwrap();
+    assert!(r_a.assistant_text.contains("alice"));
+    assert!(r_b.assistant_text.contains("bob"));
+
+    let seen = handle.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+
+    let gate_a = seen[0]
+        .metadata
+        .get(GATE_AGENT_ID_META_KEY)
+        .and_then(|v| v.as_str())
+        .expect("alice gate id");
+    let gate_b = seen[1]
+        .metadata
+        .get(GATE_AGENT_ID_META_KEY)
+        .and_then(|v| v.as_str())
+        .expect("bob gate id");
+    assert_ne!(gate_a, gate_b, "callers must not share a principal");
+    assert_ne!(gate_a, concierge.agent_id.as_str());
+    assert_ne!(gate_b, concierge.agent_id.as_str());
+
+    // sender_id drives PermissionResolver per-user policy.
+    assert_eq!(seen[0].sender_id, "alice");
+    assert_eq!(seen[1].sender_id, "bob");
+
+    // Registry holds three principals: concierge + alice + bob.
+    assert_eq!(registry.len(), 3);
+    let reg_a = registry
+        .get_by_name(&caller_principal_name("alice"))
+        .expect("alice registered");
+    let reg_b = registry
+        .get_by_name(&caller_principal_name("bob"))
+        .expect("bob registered");
+    assert_eq!(reg_a.agent_id, gate_a);
+    assert_eq!(reg_b.agent_id, gate_b);
+
+    // Same caller again reuses the principal (lazy, idempotent).
+    let mut alice2 = params_for("main", "again");
+    alice2.caller_id = Some("alice".into());
+    let _ = svc.dispatch(alice2).await.unwrap();
+    let seen = handle.seen.lock().unwrap().clone();
+    let gate_a2 = seen[2]
+        .metadata
+        .get(GATE_AGENT_ID_META_KEY)
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert_eq!(gate_a2, gate_a);
+    assert_eq!(registry.len(), 3, "no new principal on repeat caller");
+}
+
+/// Absent caller_id falls back to the boot-time concierge principal
+/// and the legacy "panel" sender id.
+#[tokio::test]
+async fn absent_caller_uses_concierge_fallback() {
+    let registry = AgentRegistry::new();
+    let concierge = registry.register("concierge-bot".into(), [1u8; 32]);
+    let release = Arc::new(Notify::new());
+    let handle = Arc::new(RecordingHandle {
+        seen: Mutex::new(Vec::new()),
+        release: Arc::clone(&release),
+    });
+    let svc = AgentService::new(Arc::clone(&handle) as Arc<_>).with_caller_registry(
+        registry,
+        [1u8; 32],
+        Some(concierge.agent_id.clone()),
+    );
+
+    let _ = svc.dispatch(params_for("c", "anon")).await.unwrap();
+    let seen = handle.seen.lock().unwrap().clone();
+    assert_eq!(seen[0].sender_id, "panel");
+    assert_eq!(
+        seen[0]
+            .metadata
+            .get(GATE_AGENT_ID_META_KEY)
+            .and_then(|v| v.as_str()),
+        Some(concierge.agent_id.as_str())
+    );
 }

@@ -556,6 +556,7 @@ fn child_params(
         max_tokens: None,
         conv_id: child_conv.to_string(),
         metadata: if metadata.is_empty() { None } else { Some(metadata) },
+        caller_id: None,
     }
 }
 

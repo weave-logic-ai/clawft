@@ -255,6 +255,7 @@ fn voice_dispatch_params(conv_id: &str, goal_text: &str) -> AgentChatParams {
         max_tokens: None,
         conv_id: conv_id.to_string(),
         metadata: Some(metadata),
+        caller_id: None,
     }
 }
 

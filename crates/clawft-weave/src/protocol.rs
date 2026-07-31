@@ -1426,6 +1426,7 @@ mod tests {
             max_tokens: None,
             conv_id: "x".into(),
             metadata: None,
+            caller_id: None,
         };
         let q: clawft_service_agent::AgentChatParams = AgentChatParams {
             messages: Vec::new(),
@@ -1433,6 +1434,7 @@ mod tests {
             max_tokens: None,
             conv_id: "y".into(),
             metadata: None,
+            caller_id: None,
         };
         _assert_same(p, q);
     }

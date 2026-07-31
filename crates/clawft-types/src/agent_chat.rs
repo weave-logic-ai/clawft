@@ -37,6 +37,24 @@ pub struct AgentChatMessage {
     pub content: String,
 }
 
+/// Metadata key stamped by `AgentService` (WEFT-332) so
+/// `AgentLoop::handle_turn` uses a per-caller principal for
+/// `EffectGate::check` instead of the boot-time concierge id.
+///
+/// Value is a JSON string (the kernel-issued agent_id UUID, or a
+/// namespaced synthetic id when no registry is wired).
+pub const GATE_AGENT_ID_META_KEY: &str = "gate_agent_id";
+
+/// Build the stable registration *name* for a multi-tenant chat
+/// principal (WEFT-332).
+///
+/// Kernel `AgentRegistry` mints a UUID as `agent_id`; this name is the
+/// human-readable / lookup key so the same caller reuses one principal
+/// across turns. Format: `agent.chat:user:<caller_id>`.
+pub fn caller_principal_name(caller_id: &str) -> String {
+    format!("agent.chat:user:{caller_id}")
+}
+
 /// Parameters for the `agent.chat` RPC.
 ///
 /// The panel sends the full conversation each turn; cross-request
@@ -80,11 +98,27 @@ pub struct AgentChatParams {
     ///   when a system prompt is present).
     /// - `provenance: object` — diagnostic (e.g.
     ///   `{"impulse_source":"agent.chat"}`) for the witness/audit trail.
+    /// - [`GATE_AGENT_ID_META_KEY`] — set by the service (not panels);
+    ///   per-caller principal for gate checks (WEFT-332).
     ///
     /// Additive and fully backward-compatible: absent on the wire when
     /// `None`, and older callers that omit it deserialize to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Caller / user identity for multi-tenant chat (WEFT-332).
+    ///
+    /// Opaque user or tenant id supplied by the panel, CLI, or voice
+    /// path. When present (non-empty after trim):
+    /// - `InboundMessage.sender_id` becomes this value so
+    ///   [`PermissionResolver`](crate) per-user policy applies;
+    /// - `AgentService` lazily registers a principal named
+    ///   [`caller_principal_name`] in the kernel `AgentRegistry` and
+    ///   stamps its `agent_id` under [`GATE_AGENT_ID_META_KEY`].
+    ///
+    /// Absent / empty keeps the legacy single-tenant path
+    /// (`sender_id = "panel"`, boot-time concierge principal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_id: Option<String>,
 }
 
 /// Default conversation id when the caller omits `conv_id`.
@@ -964,6 +998,28 @@ mod tests {
         let json = r#"{"messages":[],"conv_id":"01HQ123ABCXYZ"}"#;
         let params: AgentChatParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.conv_id, "01HQ123ABCXYZ");
+        assert!(params.caller_id.is_none());
+    }
+
+    #[test]
+    fn agent_chat_params_caller_id_round_trips() {
+        let json = r#"{"messages":[],"conv_id":"c1","caller_id":"alice"}"#;
+        let params: AgentChatParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.caller_id.as_deref(), Some("alice"));
+        let back = serde_json::to_value(&params).unwrap();
+        assert_eq!(back["caller_id"], "alice");
+    }
+
+    #[test]
+    fn caller_principal_name_namespaces_user() {
+        assert_eq!(
+            caller_principal_name("alice"),
+            "agent.chat:user:alice"
+        );
+        assert_ne!(
+            caller_principal_name("alice"),
+            caller_principal_name("bob")
+        );
     }
 
     #[test]

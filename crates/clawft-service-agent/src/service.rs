@@ -49,7 +49,10 @@ use crate::interrupt_router::{InterruptAction, InterruptCtx, InterruptOutcome};
 use crate::protocol::{AgentChatParams, AgentChatResult};
 use crate::session_tier::SessionTier;
 use crate::system_service::AgentChatMetrics;
-use clawft_types::agent_chat::{AGENT_LOOP_RESULT_META_KEY, AgentLoopResultMeta};
+use clawft_kernel::AgentRegistry;
+use clawft_types::agent_chat::{
+    AGENT_LOOP_RESULT_META_KEY, AgentLoopResultMeta, GATE_AGENT_ID_META_KEY, caller_principal_name,
+};
 
 /// Errors returned by [`AgentService::dispatch`].
 #[derive(Debug, thiserror::Error)]
@@ -155,11 +158,21 @@ where
 /// substrate paths.
 const AGENT_CHAT_CHANNEL: &str = "agent.chat";
 
-/// Sender id used when the panel doesn't supply one. The legacy
-/// spike used `"panel"`; the C2 daemon wiring will plumb the real
-/// caller identity through. Until then the constant gives the auth
-/// resolver something to key on.
+/// Sender id used when the panel doesn't supply a
+/// [`AgentChatParams::caller_id`]. Legacy spike used `"panel"`; WEFT-332
+/// plumbs real caller identity through when present. The constant
+/// keeps single-tenant / anonymous panels on a stable permission key.
 const DEFAULT_SENDER_ID: &str = "panel";
+
+/// Optional kernel registry + pubkey used to lazily register per-caller
+/// chat principals (WEFT-332). Absent → synthetic `agent.chat:user:<id>`
+/// gate ids (no kernel UUID).
+struct CallerPrincipalSource {
+    registry: AgentRegistry,
+    pubkey: [u8; 32],
+    /// Boot-time concierge agent_id used when `caller_id` is absent.
+    default_agent_id: Option<String>,
+}
 
 /// Wave 2 §W2.3: the register-early/commit-late reply submitter the interrupt
 /// executor's Refine arm uses to resubmit a steered turn. Implemented by the
@@ -211,6 +224,14 @@ pub struct AgentService<H: AgentLoopHandle> {
     /// WEFT-331: interactive defer broker. Present when the daemon wired
     /// human-in-the-loop defer; drives `agent.chat.defer_decide`.
     defer_broker: Option<Arc<crate::defer_broker::InteractiveDeferBroker>>,
+    /// WEFT-332: optional kernel registry for per-caller principals.
+    /// When set, `dispatch` lazily `get_or_register`s
+    /// `agent.chat:user:<caller_id>` and stamps the UUID into inbound
+    /// metadata under [`GATE_AGENT_ID_META_KEY`].
+    caller_principals: Option<CallerPrincipalSource>,
+    /// Cache of caller_id → kernel agent_id (avoids a registry lookup
+    /// every turn once the principal is live).
+    caller_agent_ids: DashMap<String, String>,
 }
 
 impl<H: AgentLoopHandle> AgentService<H> {
@@ -246,7 +267,57 @@ impl<H: AgentLoopHandle> AgentService<H> {
             session_tier: None,
             reply_submitter: OnceLock::new(),
             defer_broker,
+            caller_principals: None,
+            caller_agent_ids: DashMap::new(),
         }
+    }
+
+    /// Attach the kernel [`AgentRegistry`] so multi-tenant chat can
+    /// lazily register per-caller principals (WEFT-332).
+    ///
+    /// - `registry` — the daemon's kernel registry (same handle the
+    ///   boot-time concierge was registered into).
+    /// - `pubkey` — Ed25519 public key attached to each lazy principal
+    ///   (typically the daemon node's verifying key; PoP is skipped for
+    ///   in-process self-registration, matching the concierge path).
+    /// - `default_agent_id` — boot-time concierge UUID used when the
+    ///   request has no `caller_id` (single-tenant fallback).
+    pub fn with_caller_registry(
+        mut self,
+        registry: AgentRegistry,
+        pubkey: [u8; 32],
+        default_agent_id: Option<String>,
+    ) -> Self {
+        self.caller_principals = Some(CallerPrincipalSource {
+            registry,
+            pubkey,
+            default_agent_id,
+        });
+        self
+    }
+
+    /// Resolve (and cache) the gate principal for a caller id.
+    ///
+    /// Returns `None` when no registry is wired. When wired and
+    /// `caller_id` is `Some`, lazily registers
+    /// [`caller_principal_name`] and returns the kernel UUID. When
+    /// wired and `caller_id` is `None`, returns the boot-time default
+    /// (if any).
+    pub fn resolve_caller_agent_id(&self, caller_id: Option<&str>) -> Option<String> {
+        let source = self.caller_principals.as_ref()?;
+        let Some(caller) = caller_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return source.default_agent_id.clone();
+        };
+        if let Some(cached) = self.caller_agent_ids.get(caller) {
+            return Some(cached.clone());
+        }
+        let name = caller_principal_name(caller);
+        let entry = source
+            .registry
+            .get_or_register(name, source.pubkey);
+        self.caller_agent_ids
+            .insert(caller.to_string(), entry.agent_id.clone());
+        Some(entry.agent_id)
     }
 
     /// Shared metrics handle (WEFT-333) — clone into
@@ -459,7 +530,8 @@ impl<H: AgentLoopHandle> AgentService<H> {
             metrics: Arc::clone(&self.metrics),
         };
 
-        let inbound = inbound_from_params(&params, &conv_id);
+        let gate_agent_id = self.resolve_caller_agent_id(params.caller_id.as_deref());
+        let inbound = inbound_from_params(&params, &conv_id, gate_agent_id.as_deref());
 
         // Drive the loop. WEFT-323 / Phase D2: thread the per-conv
         // token into `handle_turn` so `run_tool_loop` observes it at
@@ -713,31 +785,74 @@ impl Drop for CompletionRecorder {
     }
 }
 
+/// Normalize an optional wire `caller_id` to a non-empty trimmed id.
+fn normalize_caller_id(caller_id: Option<&str>) -> Option<String> {
+    caller_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 /// Convert an [`AgentChatParams`] into an [`InboundMessage`] suitable
 /// for [`AgentLoop::handle_turn`].
 ///
 /// The last `user`-role message becomes `content`; if there is no
 /// user message the trailing message of any role wins (the spike
 /// tolerated arbitrary tail roles for assistant-driven kickoffs).
-/// Channel is the constant [`AGENT_CHAT_CHANNEL`]; sender_id falls
-/// back to [`DEFAULT_SENDER_ID`].
+/// Channel is the constant [`AGENT_CHAT_CHANNEL`]; `sender_id` is the
+/// wire [`AgentChatParams::caller_id`] when present, else
+/// [`DEFAULT_SENDER_ID`] (so [`PermissionResolver`](clawft_core)
+/// per-user policy keys correctly — WEFT-332).
+///
+/// When `gate_agent_id` is provided it is stamped under
+/// [`GATE_AGENT_ID_META_KEY`] so the agent loop uses that principal
+/// for every `EffectGate::check` (preferring it over the boot-time
+/// concierge id). When absent and a `caller_id` is present but no
+/// registry was wired, a synthetic namespaced id
+/// (`agent.chat:user:<caller>`) is stamped so two callers still
+/// never share a gate principal.
 ///
 /// `chat_id` is set to the supplied `conv_id` so the downstream
 /// `session_key()` (`"agent.chat:<conv_id>"`) is stable across calls.
-fn inbound_from_params(params: &AgentChatParams, conv_id: &str) -> InboundMessage {
+fn inbound_from_params(
+    params: &AgentChatParams,
+    conv_id: &str,
+    gate_agent_id: Option<&str>,
+) -> InboundMessage {
     let content = last_user_content(&params.messages).unwrap_or_default();
     // Thread wire metadata (skill_instructions / allowed_tools / model /
     // provenance) into the InboundMessage so the daemon loop sees the same
     // per-turn context the in-process REPL injects directly (D5). The wire
     // shape is a JSON object; `InboundMessage.metadata` is a HashMap.
-    let metadata = params
+    let mut metadata: std::collections::HashMap<String, serde_json::Value> = params
         .metadata
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
+
+    let caller = normalize_caller_id(params.caller_id.as_deref());
+    let sender_id = caller
+        .clone()
+        .unwrap_or_else(|| DEFAULT_SENDER_ID.to_string());
+
+    // Gate principal: explicit (registry UUID) > synthetic namespaced
+    // id for the caller > leave unset (loop falls back to daemon /
+    // channel:sender).
+    let resolved_gate = gate_agent_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| caller.as_ref().map(|c| caller_principal_name(c)));
+    if let Some(id) = resolved_gate {
+        metadata.insert(
+            GATE_AGENT_ID_META_KEY.to_string(),
+            serde_json::Value::String(id),
+        );
+    }
+
     InboundMessage {
         channel: AGENT_CHAT_CHANNEL.into(),
-        sender_id: DEFAULT_SENDER_ID.into(),
+        sender_id,
         chat_id: conv_id.into(),
         content,
         timestamp: chrono::Utc::now(),
@@ -836,6 +951,7 @@ mod tests {
             max_tokens: None,
             conv_id: conv_id.into(),
             metadata: None,
+            caller_id: None,
         }
     }
 
@@ -858,17 +974,19 @@ mod tests {
             max_tokens: None,
             conv_id: "c".into(),
             metadata: Some(meta),
+            caller_id: None,
         };
-        let inbound = inbound_from_params(&p, "c");
+        let inbound = inbound_from_params(&p, "c", None);
         assert_eq!(
             inbound.metadata.get("skill_instructions"),
             Some(&serde_json::Value::String("be terse".into())),
         );
+        assert_eq!(inbound.sender_id, DEFAULT_SENDER_ID);
     }
 
     #[test]
     fn inbound_from_params_absent_metadata_is_empty() {
-        let inbound = inbound_from_params(&params_for("c", "hi"), "c");
+        let inbound = inbound_from_params(&params_for("c", "hi"), "c", None);
         assert!(inbound.metadata.is_empty());
     }
 
@@ -897,8 +1015,9 @@ mod tests {
             max_tokens: None,
             conv_id: "c".into(),
             metadata: None,
+            caller_id: None,
         };
-        let inbound = inbound_from_params(&p, "c");
+        let inbound = inbound_from_params(&p, "c", None);
         assert_eq!(inbound.channel, AGENT_CHAT_CHANNEL);
         assert_eq!(inbound.chat_id, "c");
         assert_eq!(inbound.content, "actual ask");
@@ -916,9 +1035,52 @@ mod tests {
             max_tokens: None,
             conv_id: "c".into(),
             metadata: None,
+            caller_id: None,
         };
-        let inbound = inbound_from_params(&p, "c");
+        let inbound = inbound_from_params(&p, "c", None);
         assert_eq!(inbound.content, "lone");
+    }
+
+    /// WEFT-332: caller_id becomes sender_id and a namespaced gate
+    /// principal so two users never share the default "panel" id.
+    #[test]
+    fn inbound_from_params_scopes_caller_identity() {
+        let mut p = params_for("shared-conv", "hi");
+        p.caller_id = Some("alice".into());
+        let inbound = inbound_from_params(&p, "shared-conv", None);
+        assert_eq!(inbound.sender_id, "alice");
+        assert_eq!(
+            inbound
+                .metadata
+                .get(GATE_AGENT_ID_META_KEY)
+                .and_then(|v| v.as_str()),
+            Some("agent.chat:user:alice")
+        );
+
+        p.caller_id = Some("bob".into());
+        let inbound_b = inbound_from_params(&p, "shared-conv", None);
+        assert_eq!(inbound_b.sender_id, "bob");
+        assert_ne!(
+            inbound.metadata.get(GATE_AGENT_ID_META_KEY),
+            inbound_b.metadata.get(GATE_AGENT_ID_META_KEY),
+            "two callers must not share a gate principal"
+        );
+    }
+
+    /// WEFT-332: explicit registry UUID wins over the synthetic name.
+    #[test]
+    fn inbound_from_params_prefers_registry_agent_id() {
+        let mut p = params_for("c", "hi");
+        p.caller_id = Some("alice".into());
+        let inbound = inbound_from_params(&p, "c", Some("uuid-from-registry"));
+        assert_eq!(
+            inbound
+                .metadata
+                .get(GATE_AGENT_ID_META_KEY)
+                .and_then(|v| v.as_str()),
+            Some("uuid-from-registry")
+        );
+        assert_eq!(inbound.sender_id, "alice");
     }
 
     #[test]

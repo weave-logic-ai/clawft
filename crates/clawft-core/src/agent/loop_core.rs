@@ -498,12 +498,14 @@ pub struct AgentLoop<P: Platform> {
     /// Optional daemon-supplied agent_id for [`EffectGate::check`]
     /// calls (agent-core-v1 Phase D2). When set, every tool dispatch
     /// passes this id to the gate instead of the synthesized
-    /// `"{channel}:{sender_id}"` from the inbound message. The daemon
-    /// stamps a single concierge agent_id at boot from
-    /// `clawft-kernel::AgentRegistry::register`; v1 chat is
-    /// single-tenant so every `agent.chat` request shares it. Per-user
-    /// agent_ids land in a future phase. CLI / test callers leave this
-    /// as `None` to preserve the synthesis fallback.
+    /// `"{channel}:{sender_id}"` from the inbound message — unless
+    /// the inbound metadata carries
+    /// [`GATE_AGENT_ID_META_KEY`](clawft_types::agent_chat::GATE_AGENT_ID_META_KEY)
+    /// (WEFT-332 per-caller principal). The daemon stamps a boot-time
+    /// concierge agent_id as the single-tenant fallback; multi-tenant
+    /// chat injects a per-caller id via metadata each dispatch. CLI /
+    /// test callers leave this as `None` to preserve the synthesis
+    /// fallback.
     daemon_agent_id: Option<String>,
     /// Identity-aware system-prompt builder (agent-core-v1 Phase D1).
     ///
@@ -841,11 +843,45 @@ impl<P: Platform> AgentLoop<P> {
     /// chat-driven tool call.
     ///
     /// Without this attached (CLI path, tests) the loop falls back to
-    /// the pre-D2 synthesized `"{channel}:{sender_id}"` shape. v1 is
-    /// single-tenant; per-user agent ids ship in a later phase.
+    /// the pre-D2 synthesized `"{channel}:{sender_id}"` shape. When a
+    /// per-turn
+    /// [`GATE_AGENT_ID_META_KEY`](clawft_types::agent_chat::GATE_AGENT_ID_META_KEY)
+    /// is present on the inbound message (WEFT-332), that id wins over
+    /// this boot-time default.
     pub fn with_daemon_agent_id(mut self, agent_id: String) -> Self {
         self.daemon_agent_id = Some(agent_id);
         self
+    }
+
+    /// Resolve the gate principal for an inbound turn.
+    ///
+    /// Precedence (WEFT-178 / WEFT-332):
+    /// 1. Routed agent id (when [`Self::with_agent_router`] matched)
+    /// 2. Per-turn metadata [`GATE_AGENT_ID_META_KEY`]
+    ///    (multi-tenant caller principal from `AgentService`)
+    /// 3. Boot-time [`Self::with_daemon_agent_id`] concierge fallback
+    /// 4. Synthesised `"{channel}:{sender_id}"`
+    fn resolve_gate_agent_id(
+        &self,
+        msg: &InboundMessage,
+        routed_agent_id: Option<&str>,
+    ) -> String {
+        if let Some(id) = routed_agent_id {
+            return id.to_owned();
+        }
+        if let Some(id) = msg
+            .metadata
+            .get(clawft_types::agent_chat::GATE_AGENT_ID_META_KEY)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return id.to_owned();
+        }
+        if let Some(id) = self.daemon_agent_id.as_deref() {
+            return id.to_owned();
+        }
+        format!("{}:{}", msg.channel, msg.sender_id)
     }
 
     /// Attach a [`SystemPromptBuilder`] so [`Self::handle_turn`]
@@ -1425,14 +1461,10 @@ impl<P: Platform> AgentLoop<P> {
         //     chat-able for CLI/dev.
         //
         //     Agent id precedence matches the tool-loop gate path
-        //     below (routed > daemon concierge > channel:sender).
-        let gate_agent_id = if let Some(ref id) = routed_agent_id {
-            id.clone()
-        } else if let Some(id) = self.daemon_agent_id.as_deref() {
-            id.to_owned()
-        } else {
-            format!("{}:{}", msg.channel, msg.sender_id)
-        };
+        //     below (routed > per-turn metadata > daemon concierge >
+        //     channel:sender). See [`Self::resolve_gate_agent_id`].
+        let gate_agent_id =
+            self.resolve_gate_agent_id(&msg, routed_agent_id.as_deref());
         let mut identity_source: Option<String> = None;
         if let Some(ref builder) = self.system_prompt_builder {
             match builder.build_with_meta().await {
@@ -1693,22 +1725,12 @@ impl<P: Platform> AgentLoop<P> {
         };
 
         // 10. Execute pipeline + tool loop.
-        //     Phase D2 + WEFT-178: prefer the routed agent id
-        //     (when an [`AgentRouter`] is attached and matched)
-        //     over the daemon-supplied concierge id, which in turn
-        //     beats the per-message `"{channel}:{sender_id}"`
-        //     synthesis fallback. Routing has the highest precedence
-        //     because the router is the layer that knows about
-        //     per-user / per-channel agent personas; without it the
-        //     daemon's single-tenant concierge id is the right
-        //     identity.
-        let agent_id = if let Some(ref id) = routed_agent_id {
-            id.clone()
-        } else if let Some(id) = self.daemon_agent_id.as_deref() {
-            id.to_owned()
-        } else {
-            format!("{}:{}", msg.channel, msg.sender_id)
-        };
+        //     Phase D2 + WEFT-178 + WEFT-332: see
+        //     [`Self::resolve_gate_agent_id`] — routed >
+        //     per-turn metadata (multi-tenant caller principal) >
+        //     boot-time concierge > synthesised channel:sender.
+        let agent_id =
+            self.resolve_gate_agent_id(&msg, routed_agent_id.as_deref());
         // M4 D3/D5: install the ambient parent spawn context around the
         // tool loop so an `agent_spawn` call inside it populates its
         // SpawnSpec's parent_* fields and depth from the execution
@@ -6498,6 +6520,47 @@ mod tests {
         assert!(!ids.is_empty(), "gate must have been invoked");
         for id in ids {
             assert_eq!(id, "cli:local-user");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-332: per-turn `gate_agent_id` metadata beats the boot-time
+    /// daemon concierge id so multi-tenant callers isolate principals.
+    #[tokio::test]
+    async fn metadata_gate_agent_id_overrides_daemon_id() {
+        let transport = Arc::new(GateProbeTransport::new());
+        let (mut agent, dir) = make_agent_loop(transport, "meta_gate_id").await;
+        let gate = Arc::new(StubGate::defer("anything"));
+        agent = agent
+            .with_gate(gate.clone())
+            .with_daemon_agent_id("concierge-shared".into());
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            clawft_types::agent_chat::GATE_AGENT_ID_META_KEY.into(),
+            serde_json::Value::String("agent.chat:user:alice".into()),
+        );
+        let inbound = InboundMessage {
+            channel: "agent.chat".into(),
+            sender_id: "alice".into(),
+            chat_id: "shared-conv".into(),
+            content: "trigger".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata,
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
+
+        let ids = gate.agent_ids();
+        assert!(!ids.is_empty(), "gate must have been invoked");
+        for id in ids {
+            assert_eq!(
+                id, "agent.chat:user:alice",
+                "per-caller metadata must beat shared concierge id"
+            );
         }
 
         let _ = tokio::fs::remove_dir_all(&dir).await;

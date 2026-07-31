@@ -368,6 +368,7 @@ fn params(conv_id: &str, content: &str) -> AgentChatParams {
         max_tokens: None,
         conv_id: conv_id.into(),
         metadata: None,
+        caller_id: None,
     }
 }
 

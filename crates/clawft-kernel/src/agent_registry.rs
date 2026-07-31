@@ -29,9 +29,17 @@ pub struct RegisteredAgent {
 /// Agent identity registry.
 ///
 /// Cheap to clone — the inner map is wrapped in `Arc`/`DashMap`.
+///
+/// Indexed by both `agent_id` (UUID) and registration `name` so
+/// multi-tenant chat can lazily `get_or_register` a per-caller
+/// principal (WEFT-332) without minting a new UUID every turn.
 #[derive(Debug, Default, Clone)]
 pub struct AgentRegistry {
     inner: Arc<DashMap<String, RegisteredAgent>>,
+    /// Secondary index: registration name → agent_id.
+    /// First registration wins for a given name; subsequent
+    /// `get_or_register` calls reuse that principal.
+    by_name: Arc<DashMap<String, String>>,
 }
 
 impl AgentRegistry {
@@ -46,21 +54,72 @@ impl AgentRegistry {
     /// verify the proof-of-possession — the caller (daemon RPC
     /// handler) does that against `register_payload` before calling
     /// this method.
+    ///
+    /// Always mints a new UUID even if `name` was previously
+    /// registered (legacy `agent.register` RPC semantics). For
+    /// idempotent multi-tenant principals prefer
+    /// [`Self::get_or_register`].
     pub fn register(&self, name: String, pubkey: [u8; 32]) -> RegisteredAgent {
         let agent_id = uuid::Uuid::new_v4().to_string();
         let entry = RegisteredAgent {
             agent_id: agent_id.clone(),
-            name,
+            name: name.clone(),
             pubkey,
             registered_at: Utc::now(),
         };
-        self.inner.insert(agent_id, entry.clone());
+        self.inner.insert(agent_id.clone(), entry.clone());
+        // First name wins for the secondary index so a later
+        // `get_or_register` still resolves a stable principal.
+        self.by_name
+            .entry(name)
+            .or_insert_with(|| agent_id);
         entry
     }
 
     /// Look up an agent by id.
     pub fn get(&self, agent_id: &str) -> Option<RegisteredAgent> {
         self.inner.get(agent_id).map(|e| e.clone())
+    }
+
+    /// Look up the first agent registered under `name`.
+    pub fn get_by_name(&self, name: &str) -> Option<RegisteredAgent> {
+        let id = self.by_name.get(name)?;
+        self.get(id.value())
+    }
+
+    /// Return the existing principal for `name`, or register a new
+    /// one (WEFT-332 multi-tenant chat).
+    ///
+    /// Idempotent for a given name: concurrent callers that lose the
+    /// insert race re-read the winner so only one UUID is live.
+    pub fn get_or_register(&self, name: String, pubkey: [u8; 32]) -> RegisteredAgent {
+        if let Some(existing) = self.get_by_name(&name) {
+            return existing;
+        }
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let entry = RegisteredAgent {
+            agent_id: agent_id.clone(),
+            name: name.clone(),
+            pubkey,
+            registered_at: Utc::now(),
+        };
+        // Insert name → id first under entry API so concurrent
+        // get_or_register for the same name share one id.
+        let winner_id = match self.by_name.entry(name.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(o) => o.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(agent_id.clone());
+                agent_id.clone()
+            }
+        };
+        if winner_id == agent_id {
+            self.inner.insert(agent_id, entry.clone());
+            entry
+        } else {
+            // Lost the race — return the winner (must already be in
+            // inner, or will be momentarily; fall back to rebuilding).
+            self.get(&winner_id).unwrap_or(entry)
+        }
     }
 
     /// Number of registered agents.
@@ -151,6 +210,34 @@ mod tests {
         let a = reg.register("a".into(), [1u8; 32]);
         let b = reg.register("b".into(), [2u8; 32]);
         assert_ne!(a.agent_id, b.agent_id);
+    }
+
+    #[test]
+    fn get_or_register_is_idempotent_by_name() {
+        let reg = AgentRegistry::new();
+        let a = reg.get_or_register("agent.chat:user:alice".into(), [1u8; 32]);
+        let b = reg.get_or_register("agent.chat:user:alice".into(), [1u8; 32]);
+        assert_eq!(a.agent_id, b.agent_id);
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn get_or_register_isolates_callers() {
+        let reg = AgentRegistry::new();
+        let a = reg.get_or_register("agent.chat:user:alice".into(), [1u8; 32]);
+        let b = reg.get_or_register("agent.chat:user:bob".into(), [1u8; 32]);
+        assert_ne!(a.agent_id, b.agent_id);
+        assert_eq!(reg.len(), 2);
+        assert_eq!(
+            reg.get_by_name("agent.chat:user:alice")
+                .unwrap()
+                .agent_id,
+            a.agent_id
+        );
+        assert_eq!(
+            reg.get_by_name("agent.chat:user:bob").unwrap().agent_id,
+            b.agent_id
+        );
     }
 
     #[test]
