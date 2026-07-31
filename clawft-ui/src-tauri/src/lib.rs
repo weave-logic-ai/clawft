@@ -14,6 +14,14 @@
 //! Each will land as its own commit with its own Plane item; this
 //! scaffold gets the build target into the tree so the harder
 //! follow-ups can be reviewed in isolation.
+//!
+//! ## WEFT-228 — native mic capture
+//!
+//! [`mic`] exposes Tauri commands that bridge **cpal** capture (CoreAudio /
+//! ALSA / WASAPI) into the UI, replacing browser-only `getUserMedia` when
+//! running inside this shell. See `mic/mod.rs`.
+
+mod mic;
 
 use serde::Serialize;
 
@@ -27,7 +35,11 @@ struct CmdResponse<T: Serialize> {
 
 impl<T: Serialize> CmdResponse<T> {
     fn success(data: T) -> Self {
-        Self { ok: true, data: Some(data), error: None }
+        Self {
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
     }
 }
 
@@ -56,7 +68,16 @@ struct ShellInfo {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![shell_info])
+        .manage(mic::MicState::new())
+        .invoke_handler(tauri::generate_handler![
+            shell_info,
+            mic::mic_backend_info,
+            mic::mic_list_devices,
+            mic::mic_start,
+            mic::mic_stop,
+            mic::mic_poll,
+            mic::mic_test_level,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running ClawFT desktop shell");
 }

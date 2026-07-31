@@ -1,9 +1,15 @@
 /**
- * Browser-side audio utilities for voice features.
+ * Audio utilities for voice features.
  *
- * All audio capture/playback happens in the browser via Web Audio API
- * and Web Speech API. The backend only handles configuration and
- * message processing (transcribed text → agent → response text).
+ * ## Capture backends (WEFT-228)
+ *
+ * - **Tauri shell:** native **cpal** mic via Tauri commands (`mic_*`).
+ *   Prefer this when `isTauriShell()` is true — avoids browser-only
+ *   `getUserMedia` and uses CoreAudio / ALSA / WASAPI.
+ * - **Browser / Vite dev:** Web Audio + `getUserMedia` (unchanged).
+ *
+ * Playback and Web Speech remain browser-side; the axum backend still
+ * handles configuration and message processing (text → agent → text).
  */
 
 import { api } from "./api-client";
@@ -18,6 +24,130 @@ import {
 export type { WordBoundaryInfo, WordTiming };
 
 // ---------------------------------------------------------------------------
+// Tauri native bridge (WEFT-228)
+// ---------------------------------------------------------------------------
+
+type TauriInvoke = (
+  cmd: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+/** Soft-detect Tauri 2 invoke without requiring `@tauri-apps/api` at build. */
+function getTauriInvoke(): TauriInvoke | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as {
+    __TAURI_INTERNALS__?: { invoke?: TauriInvoke };
+    __TAURI__?: { core?: { invoke?: TauriInvoke } };
+  };
+  return w.__TAURI_INTERNALS__?.invoke ?? w.__TAURI__?.core?.invoke ?? null;
+}
+
+/** True when the dashboard is running inside the clawft-ui Tauri shell. */
+export function isTauriShell(): boolean {
+  return getTauriInvoke() !== null;
+}
+
+interface CmdEnvelope<T> {
+  ok: boolean;
+  data?: T | null;
+  error?: string | null;
+}
+
+async function tauriCmd<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    throw new Error("not running in Tauri shell");
+  }
+  // Tauri 2 passes a single args object; unwrap our CmdResponse envelope.
+  const raw = (await invoke(cmd, args ?? {})) as CmdEnvelope<T> | T;
+  if (
+    raw &&
+    typeof raw === "object" &&
+    "ok" in (raw as object) &&
+    typeof (raw as CmdEnvelope<T>).ok === "boolean"
+  ) {
+    const env = raw as CmdEnvelope<T>;
+    if (!env.ok) {
+      throw new Error(env.error || `${cmd} failed`);
+    }
+    return env.data as T;
+  }
+  return raw as T;
+}
+
+export interface NativeMicBackendInfo {
+  available: boolean;
+  backend: string;
+  hostBackend: string;
+  targetOs: string;
+  notes: string;
+  capturing: boolean;
+}
+
+export interface NativeMicDevice {
+  name: string;
+  isDefault: boolean;
+}
+
+export interface NativeMicSession {
+  device: string;
+  sampleRate: number;
+  channels: number;
+  backend: string;
+  targetOs: string;
+}
+
+export interface NativeMicPoll {
+  pcmI16: number[];
+  sampleRate: number;
+  peak: number;
+  capturing: boolean;
+}
+
+export interface NativeMicLevelReport {
+  level: number;
+  device: string;
+  sampleRate: number;
+  backend: string;
+  targetOs: string;
+}
+
+/** Diagnostics for the native cpal path (no-op error if not in Tauri). */
+export async function nativeMicBackendInfo(): Promise<NativeMicBackendInfo | null> {
+  if (!isTauriShell()) return null;
+  try {
+    return await tauriCmd<NativeMicBackendInfo>("mic_backend_info");
+  } catch {
+    return null;
+  }
+}
+
+/** List native input devices (Tauri only). */
+export async function nativeMicListDevices(): Promise<NativeMicDevice[]> {
+  return tauriCmd<NativeMicDevice[]>("mic_list_devices");
+}
+
+/** Start continuous native capture (Tauri only). */
+export async function nativeMicStart(device?: string): Promise<NativeMicSession> {
+  return tauriCmd<NativeMicSession>("mic_start", {
+    args: device ? { device } : {},
+  });
+}
+
+/** Stop native capture (Tauri only). */
+export async function nativeMicStop(): Promise<boolean> {
+  return tauriCmd<boolean>("mic_stop");
+}
+
+/** Poll buffered PCM + peak from the active native session (Tauri only). */
+export async function nativeMicPoll(): Promise<NativeMicPoll> {
+  return tauriCmd<NativeMicPoll>("mic_poll");
+}
+
+// ---------------------------------------------------------------------------
 // Microphone access & level metering
 // ---------------------------------------------------------------------------
 
@@ -30,8 +160,24 @@ function getAudioContext(): AudioContext {
   return _audioCtx;
 }
 
-/** Request microphone access and measure the peak level over ~1 second. */
+/**
+ * Measure peak mic level over ~1 second.
+ *
+ * Prefers native cpal via Tauri (`mic_test_level`) when available (WEFT-228);
+ * falls back to browser `getUserMedia` + Web Audio analyser.
+ */
 export async function testMicrophone(): Promise<{ level: number }> {
+  if (isTauriShell()) {
+    try {
+      const report = await tauriCmd<NativeMicLevelReport>("mic_test_level", {
+        args: { durationMs: 1000 },
+      });
+      return { level: Math.min(Math.max(report.level, 0), 1) };
+    } catch {
+      // Fall through to browser path (e.g. permission denied / no device).
+    }
+  }
+
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,

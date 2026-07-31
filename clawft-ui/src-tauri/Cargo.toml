@@ -30,6 +30,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# WEFT-228: native mic capture (CoreAudio / ALSA / WASAPI). Same line as
+# clawft-channels `voice-real-audio` and clawft-voice-aec `bridge`/`device`.
+cpal = "0.15"
+
+[dev-dependencies]
+# Unit tests for peak/downmix live in-crate; no extra deps required.
 
 [features]
 default = ["custom-protocol"]
