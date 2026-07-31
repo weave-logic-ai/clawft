@@ -249,8 +249,19 @@ impl AppManifest {
 
     /// Serialise to canonical TOML.
     pub fn to_toml_string(&self) -> Result<String, ManifestParseError> {
-        toml::to_string(self).map_err(ManifestParseError::Serialize)
+        serialize_manifest_toml(self)
     }
+}
+
+/// Shared TOML serialisation used by [`AppManifest::to_toml_string`].
+///
+/// Extracted so tests can force a `toml::ser::Error` (valid manifests
+/// are always serialisable; the failure path still matters under wasm
+/// hosts where panics become hard-to-debug aborts — WEFT-414).
+fn serialize_manifest_toml<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<String, ManifestParseError> {
+    toml::to_string(value).map_err(ManifestParseError::Serialize)
 }
 
 /// Errors from parsing or serialising an [`AppManifest`].
@@ -337,6 +348,72 @@ mod tests {
         let reparsed =
             AppManifest::from_toml_str(&serialised).expect("reparse self-serialized TOML");
         assert_eq!(m, reparsed);
+    }
+
+    /// WEFT-414: serialise maps `toml::ser::Error` into
+    /// [`ManifestParseError::Serialize`] without panicking. This is the
+    /// wasm-relevant failure path left untested after the `web-time`
+    /// SystemTime fix (audit 0.7.0 / ws13 task 5) — serialize errors must
+    /// surface as `Result::Err`, not an abort, under wasm32 hosts too.
+    ///
+    /// Valid [`AppManifest`] values always serialise (see
+    /// `manifest_roundtrips_through_toml`); force the error via the shared
+    /// helper with a type whose `Serialize` fails, mirroring what
+    /// `to_toml_string` does on the real path.
+    #[test]
+    fn to_toml_string_serialize_failure_surfaces_without_panic() {
+        use serde::ser::Error as _;
+
+        /// Stand-in for a value that cannot be represented as TOML.
+        struct Unserializable;
+        impl Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _serializer: S,
+            ) -> Result<S::Ok, S::Error> {
+                Err(S::Error::custom(
+                    "forced serialize failure (WEFT-414 wasm path)",
+                ))
+            }
+        }
+
+        let err = serialize_manifest_toml(&Unserializable)
+            .expect_err("forced Serialize failure must map to Err");
+        assert!(
+            matches!(err, ManifestParseError::Serialize(_)),
+            "expected ManifestParseError::Serialize, got {err:?}"
+        );
+        // Display / Debug must not panic (wasm hosts often format errors
+        // into JS exceptions via toString).
+        let display = err.to_string();
+        assert!(
+            display.contains("failed to serialize TOML"),
+            "display should wrap ser error: {display}"
+        );
+        assert!(
+            display.contains("forced serialize failure (WEFT-414 wasm path)"),
+            "display should include inner ser message: {display}"
+        );
+        let _debug = format!("{err:?}");
+
+        // Sanity: the public method uses the same helper (round-trip
+        // already covers Ok; this only checks the wiring is shared).
+        let ok = AppManifest {
+            id: "app://weftos.test.serialize-ok".to_string(),
+            name: "Serialize Ok".to_string(),
+            version: Version::new(0, 0, 1),
+            icon: None,
+            supported_modes: vec![Mode::Desktop],
+            supported_inputs: vec![Input::Pointer],
+            entry_points: vec![],
+            surfaces: vec![],
+            surface_states: None,
+            subscriptions: vec![],
+            influences: vec![],
+            permissions: vec![],
+            narration: None,
+        };
+        assert!(ok.to_toml_string().is_ok());
     }
 
     #[test]
