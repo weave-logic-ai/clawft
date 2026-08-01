@@ -590,6 +590,12 @@ HTTP server settings for the REST API gateway.
 | `port`                     | integer | `18790`        | Listen port.                                         |
 | `heartbeatIntervalMinutes` | integer | `0`            | Heartbeat interval in minutes (0 = disabled).        |
 | `heartbeatPrompt`          | string  | `"heartbeat"`  | Text sent as the heartbeat prompt.                   |
+| `apiPort`                  | integer | `18789`        | Port for the UI REST/WS API.                         |
+| `corsOrigins`              | array   | `["http://localhost:5173"]` | Allowed CORS origins for the UI API.   |
+| `apiEnabled`               | boolean | `false`        | Whether the REST/WS API is enabled.                  |
+| `mcpEnabled`               | boolean | `false`        | Serve MCP over HTTP at `POST /mcp` on the API listener (for remote MCP clients such as the Grok voice agent — see `docs/guides/grok-voice.md`). Requires `apiEnabled` and a bearer token. |
+| `mcpToken`                 | string  | `""`           | Static bearer token gating `/mcp`. The `WEFTOS_MCP_TOKEN` env var takes precedence; with neither set, `/mcp` stays disabled. |
+| `mcpAllowedTools`          | array   | `[]`           | Glob allowlist over namespaced tool names (e.g. `["weftos__*"]`) restricting what `/mcp` exposes. Empty = all tools the middleware permits. |
 
 ---
 

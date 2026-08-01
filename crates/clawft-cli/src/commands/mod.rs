@@ -29,6 +29,8 @@ pub mod status;
 pub mod tools_cmd;
 #[cfg(feature = "api")]
 pub mod ui_cmd;
+#[cfg(feature = "services")]
+pub mod weftos_tools;
 #[cfg(feature = "voice")]
 pub mod voice;
 pub mod workspace_cmd;

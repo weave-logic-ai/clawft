@@ -74,11 +74,14 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
 
     // ── Convert registry to ToolProvider ─────────────────────────────
     let tool_defs = build_tool_definitions(&registry);
-    let provider = build_builtin_provider(tool_defs, registry);
+    let provider = build_builtin_provider(tool_defs, Arc::new(registry));
 
     // ── Build CompositeToolProvider ──────────────────────────────────
     let mut composite = CompositeToolProvider::new();
     composite.register(Box::new(provider));
+    // Kernel-daemon bridge tools (jobs, schedules, sensors). Calls fail
+    // soft with an is_error result when no daemon is running.
+    composite.register(Box::new(super::weftos_tools::DaemonToolProvider));
 
     // ── Load skills and register SkillToolProvider ───────────────────
     let (ws_skills_dir, user_skills_dir) = discover_skill_dirs();
@@ -183,7 +186,7 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
 }
 
 /// Build [`ToolDefinition`] list from a populated [`ToolRegistry`].
-fn build_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
+pub(crate) fn build_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
     let schemas = registry.schemas();
     schemas
         .into_iter()
@@ -205,15 +208,11 @@ fn build_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
         .collect()
 }
 
-/// Build a [`BuiltinToolProvider`] backed by a [`ToolRegistry`].
-///
-/// The registry is moved into an `Arc` and shared between the provider's
-/// dispatcher closure and the outer scope.
-fn build_builtin_provider(
+/// Build a [`BuiltinToolProvider`] backed by a shared [`ToolRegistry`].
+pub(crate) fn build_builtin_provider(
     tool_defs: Vec<ToolDefinition>,
-    registry: ToolRegistry,
+    registry: Arc<ToolRegistry>,
 ) -> BuiltinToolProvider {
-    let registry = Arc::new(registry);
     let reg_clone = registry.clone();
 
     BuiltinToolProvider::new(tool_defs, move |name, args| {
@@ -232,7 +231,7 @@ fn build_builtin_provider(
 ///
 /// Translates the CLI-level `CommandPolicyConfig` and `UrlPolicyConfig`
 /// into the canonical policy types used by [`SecurityGuard`].
-fn build_security_guard(tools_config: &clawft_types::config::ToolsConfig) -> SecurityGuard {
+pub(crate) fn build_security_guard(tools_config: &clawft_types::config::ToolsConfig) -> SecurityGuard {
     use clawft_types::security::{CommandPolicy, PolicyMode, UrlPolicy};
 
     let cmd_cfg = &tools_config.command_policy;
@@ -393,7 +392,7 @@ mod tests {
         registry.register(Arc::new(EchoTool));
 
         let defs = build_tool_definitions(&registry);
-        let provider = build_builtin_provider(defs, registry);
+        let provider = build_builtin_provider(defs, Arc::new(registry));
 
         let result = provider
             .call_tool("echo", serde_json::json!({"text": "hello"}))
@@ -499,7 +498,7 @@ mod tests {
 
         let registry = ToolRegistry::new();
         let defs = build_tool_definitions(&registry);
-        let provider = build_builtin_provider(defs, registry);
+        let provider = build_builtin_provider(defs, Arc::new(registry));
 
         let result = provider
             .call_tool("nonexistent", serde_json::json!({}))

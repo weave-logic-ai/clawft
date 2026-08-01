@@ -215,7 +215,12 @@ pub async fn run_with_config(
     #[cfg(feature = "api")]
     let api_handle: Option<tokio::task::JoinHandle<()>> = if config.gateway.api_enabled {
         let broadcaster = api_broadcaster.clone().expect("broadcaster created above");
-        let api_state = build_api_state(&ctx, &config, broadcaster);
+        #[allow(unused_mut)]
+        let mut api_state = build_api_state(&ctx, &config, broadcaster);
+        #[cfg(feature = "services")]
+        {
+            api_state.mcp = build_mcp_endpoint(&ctx, &config);
+        }
         let cors_origins = config.gateway.cors_origins.clone();
         let api_host = config.gateway.host.clone();
         let port = config.gateway.api_port;
@@ -711,6 +716,78 @@ fn build_api_state(
         channels: Arc::new(channel_bridge),
         voice: Arc::new(voice_bridge),
         broadcaster,
+        // Populated by the caller when gateway.mcp_enabled is set.
+        mcp: None,
+    }
+}
+
+/// Build the `/mcp` endpoint state when `gateway.mcp_enabled` is set.
+///
+/// The tool surface mirrors `weft mcp-server` (builtin registry tools
+/// plus the `weftos` kernel-daemon bridge for jobs/schedules/sensors),
+/// with the same security middleware pipeline, gated by a static bearer
+/// token so a remote MCP client — e.g. a Grok voice agent session with
+/// a `{"type": "mcp"}` tool — can reach it over one public HTTPS URL.
+///
+/// Returns `None` (with a warning) when no token is configured: the
+/// endpoint must never come up unauthenticated.
+#[cfg(all(feature = "api", feature = "channels", feature = "services"))]
+fn build_mcp_endpoint(
+    ctx: &AppContext<NativePlatform>,
+    config: &clawft_types::config::Config,
+) -> Option<Arc<clawft_services::api::mcp_http::McpEndpoint>> {
+    use clawft_services::api::mcp_http::McpEndpoint;
+    use clawft_services::mcp::composite::CompositeToolProvider;
+    use clawft_services::mcp::middleware::{AuditLog, Middleware, PermissionFilter, ResultGuard};
+
+    if !config.gateway.mcp_enabled {
+        return None;
+    }
+
+    let token = std::env::var("WEFTOS_MCP_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| config.gateway.mcp_token.clone());
+    if token.trim().is_empty() {
+        tracing::warn!(
+            "gateway.mcp_enabled is set but no bearer token is configured \
+             (set gateway.mcp_token or WEFTOS_MCP_TOKEN); /mcp stays disabled"
+        );
+        return None;
+    }
+
+    let registry = ctx.tools_arc();
+    let tool_defs = super::mcp_server::build_tool_definitions(&registry);
+    let builtin = super::mcp_server::build_builtin_provider(tool_defs, registry);
+
+    let mut composite = CompositeToolProvider::new();
+    composite.register(Box::new(builtin));
+    composite.register(Box::new(super::weftos_tools::DaemonToolProvider));
+
+    let permission_filter = if config.gateway.mcp_allowed_tools.is_empty() {
+        PermissionFilter::new(None)
+    } else {
+        PermissionFilter::from_patterns(config.gateway.mcp_allowed_tools.clone())
+    };
+    let middlewares: Vec<Box<dyn Middleware>> = vec![
+        Box::new(super::mcp_server::build_security_guard(&config.tools)),
+        Box::new(permission_filter),
+        Box::new(ResultGuard::default()),
+        Box::new(AuditLog),
+    ];
+
+    match McpEndpoint::new(composite, middlewares, token) {
+        Ok(endpoint) => {
+            info!(
+                allowed_tools = ?config.gateway.mcp_allowed_tools,
+                "MCP-over-HTTP endpoint enabled at /mcp"
+            );
+            Some(Arc::new(endpoint))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build /mcp endpoint; disabled");
+            None
+        }
     }
 }
 

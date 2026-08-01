@@ -416,6 +416,31 @@ pub struct GatewayConfig {
     /// Whether the REST/WS API is enabled.
     #[serde(default, alias = "apiEnabled")]
     pub api_enabled: bool,
+
+    /// Whether the MCP-over-HTTP endpoint (`POST /mcp`) is enabled.
+    ///
+    /// Serves the same tool surface as `weft mcp-server` over the
+    /// gateway API listener so remote MCP clients — e.g. the xAI Grok
+    /// Voice Agent API's `{"type": "mcp"}` tool — can call WeftOS
+    /// tools. Requires `api_enabled` and a non-empty bearer token
+    /// (`mcp_token` or the `WEFTOS_MCP_TOKEN` env var); without a
+    /// token the endpoint stays off.
+    #[serde(default, alias = "mcpEnabled")]
+    pub mcp_enabled: bool,
+
+    /// Static bearer token gating `POST /mcp`.
+    ///
+    /// The `WEFTOS_MCP_TOKEN` environment variable takes precedence,
+    /// so deployments can keep the token out of config.json entirely.
+    #[serde(default, alias = "mcpToken")]
+    pub mcp_token: String,
+
+    /// Glob allowlist restricting which tools `/mcp` exposes
+    /// (matched against namespaced names like `weftos__run_task`).
+    /// Empty = expose everything the middleware pipeline permits,
+    /// mirroring `tools.allowed_tools` semantics on `weft mcp-server`.
+    #[serde(default, alias = "mcpAllowedTools")]
+    pub mcp_allowed_tools: Vec<String>,
 }
 
 fn default_gateway_host() -> String {
@@ -444,6 +469,9 @@ impl Default for GatewayConfig {
             api_port: default_api_port(),
             cors_origins: default_cors_origins(),
             api_enabled: false,
+            mcp_enabled: false,
+            mcp_token: String::new(),
+            mcp_allowed_tools: Vec::new(),
         }
     }
 }

@@ -154,6 +154,7 @@ fn make_state() -> (ApiState, Arc<TokenStore>) {
         channels: Arc::new(StubChannels),
         voice: Arc::new(StubVoice),
         broadcaster: Arc::new(TopicBroadcaster::new()),
+        mcp: None,
     };
     (state, auth)
 }
@@ -455,4 +456,223 @@ async fn csp_header_present_on_unauthorized() {
         resp.headers().get("content-security-policy").is_some(),
         "CSP header must accompany 401 responses too"
     );
+}
+
+// ─── /mcp endpoint (MCP-over-HTTP, WEFT: grok-voice integration) ────────
+
+mod mcp_endpoint {
+    use super::*;
+    use async_trait::async_trait;
+    use clawft_services::api::mcp_http::McpEndpoint;
+    use clawft_services::mcp::ToolDefinition;
+    use clawft_services::mcp::composite::CompositeToolProvider;
+    use clawft_services::mcp::provider::{CallToolResult, ToolError, ToolProvider};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+
+    struct EchoProvider;
+
+    #[async_trait]
+    impl ToolProvider for EchoProvider {
+        fn namespace(&self) -> &str {
+            "echo"
+        }
+        fn list_tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "say".into(),
+                description: "Echoes text".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } }
+                }),
+            }]
+        }
+        async fn call_tool(&self, name: &str, args: Value) -> Result<CallToolResult, ToolError> {
+            match name {
+                "say" => Ok(CallToolResult::text(
+                    args.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                )),
+                other => Err(ToolError::NotFound(other.into())),
+            }
+        }
+    }
+
+    const TOKEN: &str = "test-mcp-token";
+
+    fn mcp_state() -> ApiState {
+        let (mut state, _) = make_state();
+        let mut provider = CompositeToolProvider::new();
+        provider.register(Box::new(EchoProvider));
+        let endpoint =
+            McpEndpoint::new(provider, Vec::new(), TOKEN.into()).expect("non-empty token");
+        state.mcp = Some(Arc::new(endpoint));
+        state
+    }
+
+    fn mcp_request(auth: Option<&str>, body: Value) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn body_json(resp: axum::response::Response) -> Value {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn empty_token_is_rejected_at_construction() {
+        let result = McpEndpoint::new(CompositeToolProvider::new(), Vec::new(), "  ".into());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_endpoint_returns_404() {
+        let (state, _) = make_state(); // state.mcp == None
+        let app = build_router(state, &[], None);
+        let resp = app
+            .oneshot(mcp_request(Some(TOKEN), json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_bearer_is_401() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(None, json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn wrong_bearer_is_401() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some("wrong"),
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn initialize_answers_with_server_info() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some(TOKEN),
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": { "name": "grok", "version": "1.0" }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["id"], 1);
+        assert_eq!(body["result"]["serverInfo"]["name"], "clawft");
+    }
+
+    #[tokio::test]
+    async fn tools_list_works_without_prior_initialize() {
+        // Stateless Streamable HTTP: each POST may be a fresh connection,
+        // so tools/* must not require an initialize on the same socket.
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some(TOKEN),
+                json!({"jsonrpc":"2.0","id":7,"method":"tools/list"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let tools = body["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "echo__say");
+    }
+
+    #[tokio::test]
+    async fn tools_call_round_trips() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some(TOKEN),
+                json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": "echo__say", "arguments": { "text": "hello grok" } }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["result"]["content"][0]["text"], "hello grok");
+    }
+
+    #[tokio::test]
+    async fn notification_returns_202_no_body() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some(TOKEN),
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn batch_returns_array_of_responses() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some(TOKEN),
+                json!([
+                    {"jsonrpc":"2.0","id":1,"method":"tools/list"},
+                    {"jsonrpc":"2.0","method":"notifications/initialized"},
+                    {"jsonrpc":"2.0","id":2,"method":"tools/call",
+                     "params": {"name": "echo__say", "arguments": {"text": "b"}}}
+                ]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 2); // notification produces no response
+    }
+
+    #[tokio::test]
+    async fn get_method_is_405() {
+        let app = build_router(mcp_state(), &[], None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
 }

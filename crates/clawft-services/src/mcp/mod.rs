@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod client;
 pub mod composite;
 pub mod discovery;
+pub mod dispatch;
 pub mod ide;
 pub mod middleware;
 pub mod provider;

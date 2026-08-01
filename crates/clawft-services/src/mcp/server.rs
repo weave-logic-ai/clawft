@@ -2,27 +2,16 @@
 //! JSON streams.
 //!
 //! [`McpServerShell`] is generic over `AsyncBufRead + AsyncWrite` so it
-//! can be driven by stdio, TCP, or in-memory buffers for testing.
+//! can be driven by stdio, TCP, or in-memory buffers for testing. The
+//! protocol logic itself lives in [`super::dispatch::McpDispatcher`],
+//! shared with the gateway's HTTP `/mcp` endpoint.
 
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::ToolDefinition;
 use super::composite::CompositeToolProvider;
-use super::middleware::{Middleware, ToolCallRequest};
-use super::provider::CallToolResult;
-
-// ── Constants ───────────────────────────────────────────────────────────
-
-/// Re-use the canonical protocol version from the MCP module.
-const PROTOCOL_VERSION: &str = super::MCP_PROTOCOL_VERSION;
-const SERVER_NAME: &str = "clawft";
-const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// JSON-RPC error codes.
-const METHOD_NOT_FOUND: i32 = -32601;
-const NOT_INITIALIZED: i32 = -32002;
-const INVALID_REQUEST: i32 = -32600;
+use super::dispatch::{INVALID_REQUEST, McpDispatcher, make_error_response};
+use super::middleware::Middleware;
 
 // ── McpServerShell ─────────────────────────────────────────────────────
 
@@ -34,8 +23,7 @@ const INVALID_REQUEST: i32 = -32600;
 /// `-32601 Method not found` error. Requests sent before `initialize`
 /// receive a `-32002 Server not initialized` error.
 pub struct McpServerShell {
-    provider: CompositeToolProvider,
-    middlewares: Vec<Box<dyn Middleware>>,
+    dispatcher: McpDispatcher,
     initialized: bool,
 }
 
@@ -43,15 +31,14 @@ impl McpServerShell {
     /// Create a new server shell wrapping the given composite provider.
     pub fn new(provider: CompositeToolProvider) -> Self {
         Self {
-            provider,
-            middlewares: Vec::new(),
+            dispatcher: McpDispatcher::new(provider),
             initialized: false,
         }
     }
 
     /// Add a middleware to the processing pipeline.
     pub fn add_middleware(&mut self, middleware: Box<dyn Middleware>) {
-        self.middlewares.push(middleware);
+        self.dispatcher.add_middleware(middleware);
     }
 
     /// Run the server loop, reading lines from `reader` and writing
@@ -79,145 +66,12 @@ impl McpServerShell {
                 }
             };
 
-            let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-            let id = msg.get("id").cloned();
-            let params = msg
-                .get("params")
-                .cloned()
-                .unwrap_or_else(|| Value::Object(Default::default()));
-
-            // Notifications have no id -- never send a response.
-            let is_notification = id.is_none();
-
-            match method {
-                "initialize" => {
-                    self.initialized = true;
-                    let result = serde_json::json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": {
-                            "tools": { "listChanged": true }
-                        },
-                        "serverInfo": {
-                            "name": SERVER_NAME,
-                            "version": SERVER_VERSION
-                        }
-                    });
-                    if let Some(id) = id {
-                        let resp = make_success_response(id, result);
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                "notifications/initialized" => {
-                    // Notification acknowledgement -- no response.
-                }
-
-                _ if !self.initialized => {
-                    if !is_notification {
-                        let resp = make_error_response(
-                            id.unwrap_or(Value::Null),
-                            NOT_INITIALIZED,
-                            "Server not initialized",
-                        );
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                "tools/list" => {
-                    let mut tools = self.provider.list_tools_all();
-
-                    // Apply middleware filter_tools in order.
-                    for mw in &self.middlewares {
-                        tools = mw.filter_tools(tools).await;
-                    }
-
-                    let tools_json = serialize_tools(&tools);
-                    let result = serde_json::json!({ "tools": tools_json });
-
-                    if let Some(id) = id {
-                        let resp = make_success_response(id, result);
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                "tools/call" => {
-                    let name = params
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let args = params
-                        .get("arguments")
-                        .cloned()
-                        .unwrap_or_else(|| Value::Object(Default::default()));
-
-                    let mut request = ToolCallRequest {
-                        name: name.clone(),
-                        args,
-                    };
-
-                    // Apply middleware before_call hooks.
-                    let mut mw_error = None;
-                    for mw in &self.middlewares {
-                        match mw.before_call(request).await {
-                            Ok(r) => request = r,
-                            Err(e) => {
-                                mw_error = Some(e);
-                                // Reconstruct a minimal request for the error path.
-                                request = ToolCallRequest {
-                                    name,
-                                    args: Value::Object(Default::default()),
-                                };
-                                break;
-                            }
-                        }
-                    }
-
-                    let call_result = if let Some(err) = mw_error {
-                        Err(err)
-                    } else {
-                        self.provider
-                            .call_tool(&request.name, request.args.clone())
-                            .await
-                    };
-
-                    let result_value = match call_result {
-                        Ok(mut result) => {
-                            // Apply middleware after_call hooks.
-                            for mw in &self.middlewares {
-                                match mw.after_call(&request, result).await {
-                                    Ok(r) => result = r,
-                                    Err(e) => {
-                                        result = CallToolResult::error(e.to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                            serde_json::to_value(&result).unwrap_or(Value::Null)
-                        }
-                        Err(e) => {
-                            let err_result = CallToolResult::error(e.to_string());
-                            serde_json::to_value(&err_result).unwrap_or(Value::Null)
-                        }
-                    };
-
-                    if let Some(id) = id {
-                        let resp = make_success_response(id, result_value);
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                _ => {
-                    // Unknown method.
-                    if !is_notification {
-                        let resp = make_error_response(
-                            id.unwrap_or(Value::Null),
-                            METHOD_NOT_FOUND,
-                            &format!("Method not found: {method}"),
-                        );
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
+            if let Some(resp) = self
+                .dispatcher
+                .handle_message(&msg, &mut self.initialized)
+                .await
+            {
+                write_response(&mut writer, &resp).await?;
             }
         }
 
@@ -226,29 +80,6 @@ impl McpServerShell {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-fn make_success_response(id: Value, result: Value) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    })
-}
-
-fn make_error_response(id: Value, code: i32, message: &str) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message
-        }
-    })
-}
-
-fn serialize_tools(tools: &[ToolDefinition]) -> Value {
-    serde_json::to_value(tools).unwrap_or_else(|_| Value::Array(vec![]))
-}
 
 async fn write_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -267,8 +98,13 @@ async fn write_response<W: AsyncWrite + Unpin>(
 mod tests {
     use super::super::composite::CompositeToolProvider;
     use super::super::middleware::{Middleware, ToolCallRequest};
-    use super::super::provider::{ContentBlock, ToolError, ToolProvider};
-    use super::*;
+    use super::super::dispatch::{
+        INVALID_REQUEST, METHOD_NOT_FOUND, NOT_INITIALIZED, PROTOCOL_VERSION, SERVER_NAME,
+    };
+    use super::super::provider::{CallToolResult, ContentBlock, ToolError, ToolProvider};
+    use super::McpServerShell;
+    use super::super::ToolDefinition;
+    use serde_json::Value;
     use async_trait::async_trait;
     use serde_json::json;
     use std::io::Cursor;

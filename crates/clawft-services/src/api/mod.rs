@@ -12,6 +12,7 @@ pub mod config_api;
 pub mod cron_api;
 pub mod delegation;
 pub mod handlers;
+pub mod mcp_http;
 pub mod memory_api;
 pub mod middleware;
 pub mod monitoring;
@@ -49,6 +50,12 @@ pub struct ApiState {
     pub voice: Arc<dyn VoiceAccess>,
     /// Topic-based broadcaster for real-time WebSocket events.
     pub broadcaster: Arc<broadcaster::TopicBroadcaster>,
+    /// MCP-over-HTTP endpoint state (`None` = `/mcp` disabled).
+    ///
+    /// Populated by the gateway when `gateway.mcp_enabled` is set and a
+    /// bearer token is configured; serves the tool surface to remote
+    /// MCP clients such as the Grok voice agent.
+    pub mcp: Option<Arc<mcp_http::McpEndpoint>>,
 }
 
 /// Trait for tool registry access (decouples API from Platform generics).
@@ -326,7 +333,14 @@ pub fn build_router(state: ApiState, cors_origins: &[String], static_dir: Option
             auth::ws_auth_middleware,
         ));
 
-    let mut router = Router::new().nest("/api", api_router).merge(ws_router);
+    // `/mcp` (remote MCP clients, e.g. the Grok voice agent) enforces
+    // its own static-token auth in the handler, so it sits outside the
+    // TokenStore-backed `/api` gate but inside the shared rate-limit /
+    // trace / CORS / CSP layers.
+    let mut router = Router::new()
+        .nest("/api", api_router)
+        .merge(ws_router)
+        .merge(mcp_http::mcp_routes());
 
     // Serve built UI as SPA fallback when a static directory is provided.
     if let Some(dir) = static_dir {
