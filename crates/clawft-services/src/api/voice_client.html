@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WeftOS Voice</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --err: #f85149;
+    --user: #1f6feb22; --agent: #23863622; --tool: #a371f722;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; height: 100dvh;
+  }
+  header {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .6rem .9rem; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { font-size: 1rem; font-weight: 600; flex: 1; }
+  .badge {
+    font-size: .72rem; padding: .1rem .5rem; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--dim);
+  }
+  .badge.on  { color: var(--ok); border-color: var(--ok); }
+  .badge.err { color: var(--err); border-color: var(--err); }
+  main { flex: 1; display: flex; min-height: 0; }
+  .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .col + .col { border-left: 1px solid var(--border); }
+  .col h2 {
+    font-size: .78rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dim); padding: .5rem .9rem; border-bottom: 1px solid var(--border);
+  }
+  .scroll { flex: 1; overflow-y: auto; padding: .7rem .9rem; display: flex;
+            flex-direction: column; gap: .5rem; }
+  .msg { border-radius: 8px; padding: .5rem .7rem; max-width: 95%;
+         white-space: pre-wrap; word-break: break-word; }
+  .msg.user  { background: var(--user);  align-self: flex-end; }
+  .msg.agent { background: var(--agent); align-self: flex-start; }
+  .msg .who { font-size: .7rem; color: var(--dim); margin-bottom: .15rem; }
+  .evt { background: var(--tool); border-radius: 8px; padding: .5rem .7rem;
+         font-size: .85rem; }
+  .evt.err { background: #f8514922; }
+  .evt .tool { font-weight: 600; color: var(--accent); font-family: ui-monospace, monospace; }
+  .evt .ts { float: right; font-size: .7rem; color: var(--dim); }
+  .evt pre {
+    margin-top: .3rem; padding: .4rem .5rem; background: #0008; border-radius: 6px;
+    font: .78rem/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; max-height: 14rem; overflow-y: auto;
+  }
+  .evt img { max-width: 100%; border-radius: 6px; margin-top: .3rem; }
+  footer {
+    display: flex; gap: .6rem; align-items: center;
+    padding: .7rem .9rem calc(.7rem + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border); background: var(--panel);
+  }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 8px;
+    padding: .55rem 1.1rem; cursor: pointer; background: var(--accent); color: #04101f;
+  }
+  button.stop { background: var(--err); color: #fff; }
+  button.ghost { background: transparent; color: var(--dim);
+                 border: 1px solid var(--border); font-weight: 400; }
+  button:disabled { opacity: .45; cursor: default; }
+  #level { flex: 1; height: 6px; background: var(--border); border-radius: 3px;
+           overflow: hidden; }
+  #level > div { height: 100%; width: 0; background: var(--ok); transition: width 80ms; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.1rem; width: min(30rem, 92vw); margin: auto;
+  }
+  dialog::backdrop { background: #000a; }
+  dialog h2 { font-size: 1rem; margin-bottom: .8rem; }
+  dialog label { display: block; font-size: .8rem; color: var(--dim); margin: .6rem 0 .15rem; }
+  dialog input, dialog textarea {
+    width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: .4rem .55rem;
+  }
+  dialog textarea { min-height: 4.5rem; font-size: .85rem; }
+  dialog .row { display: flex; gap: .6rem; justify-content: flex-end; margin-top: 1rem; }
+  .hint { font-size: .72rem; color: var(--dim); margin-top: .1rem; }
+  @media (max-width: 700px) {
+    main { flex-direction: column; }
+    .col + .col { border-left: 0; border-top: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>WeftOS Voice</h1>
+  <span id="voiceBadge" class="badge">voice: off</span>
+  <span id="wsBadge" class="badge">activity: off</span>
+  <button class="ghost" id="settingsBtn">Settings</button>
+</header>
+
+<main>
+  <section class="col">
+    <h2>Conversation</h2>
+    <div class="scroll" id="chat"></div>
+  </section>
+  <section class="col">
+    <h2>Node activity</h2>
+    <div class="scroll" id="activity"></div>
+  </section>
+</main>
+
+<footer>
+  <button id="talkBtn">Start talking</button>
+  <div id="level"><div></div></div>
+</footer>
+
+<dialog id="settings">
+  <h2>Settings</h2>
+  <label>xAI model</label>
+  <input id="cfgModel" placeholder="grok-voice-latest">
+  <label>Voice</label>
+  <input id="cfgVoice" placeholder="eve">
+  <label>MCP server URL (public — the Funnel/Tunnel address xAI can reach)</label>
+  <input id="cfgMcpUrl" placeholder="https://your-node.tail1234.ts.net/mcp">
+  <div class="hint">Defaults to this page's origin + /mcp; override with your public Funnel URL.</div>
+  <label>MCP bearer token (WEFTOS_MCP_TOKEN)</label>
+  <input id="cfgMcpToken" type="password" placeholder="the gateway.mcp_token value">
+  <label>Instructions</label>
+  <textarea id="cfgInstructions"></textarea>
+  <div class="row">
+    <button class="ghost" id="cfgCancel">Cancel</button>
+    <button id="cfgSave">Save</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const SAMPLE_RATE = 24000;
+const DEFAULT_INSTRUCTIONS =
+  "You are the voice interface for a WeftOS node. Use the weftos__* tools to " +
+  "run tasks, list and manage jobs and schedules, and read sensors when the " +
+  "user asks about the system. Confirm before stopping jobs or removing " +
+  "schedules. Keep spoken replies short; details appear on the user's screen.";
+
+const $ = (id) => document.getElementById(id);
+const cfg = {
+  load() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("weftosVoiceCfg") || "{}"); } catch {}
+    return {
+      model: saved.model || "grok-voice-latest",
+      voice: saved.voice || "eve",
+      mcpUrl: saved.mcpUrl || (location.origin + "/mcp"),
+      mcpToken: saved.mcpToken || "",
+      instructions: saved.instructions || DEFAULT_INSTRUCTIONS,
+    };
+  },
+  save(c) { localStorage.setItem("weftosVoiceCfg", JSON.stringify(c)); },
+};
+
+// ── UI helpers ─────────────────────────────────────────────────────────
+function setBadge(el, text, cls) { el.textContent = text; el.className = "badge " + (cls || ""); }
+function autoscroll(el) { el.scrollTop = el.scrollHeight; }
+
+const bubbles = {}; // id -> element, for streaming transcript updates
+function upsertBubble(id, who, text) {
+  let el = bubbles[id];
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "msg " + who;
+    el.innerHTML = '<div class="who"></div><div class="body"></div>';
+    el.querySelector(".who").textContent = who === "user" ? "You" : "Grok";
+    $("chat").appendChild(el);
+    bubbles[id] = el;
+  }
+  el.querySelector(".body").textContent = text;
+  autoscroll($("chat"));
+}
+
+function addActivity({ tool, argsPreview, resultPreview, isError, ts, note }) {
+  const el = document.createElement("div");
+  el.className = "evt" + (isError ? " err" : "");
+  const when = ts ? new Date(ts).toLocaleTimeString() : new Date().toLocaleTimeString();
+  if (note) {
+    el.innerHTML = '<span class="ts"></span><span class="note"></span>';
+    el.querySelector(".note").textContent = note;
+  } else {
+    el.innerHTML = '<span class="ts"></span><span class="tool"></span>' +
+                   '<pre class="args"></pre><pre class="result"></pre>';
+    el.querySelector(".tool").textContent = tool;
+    el.querySelector(".args").textContent = pretty(argsPreview);
+    const res = el.querySelector(".result");
+    res.textContent = pretty(resultPreview);
+    renderImages(el, resultPreview);
+  }
+  el.querySelector(".ts").textContent = when;
+  $("activity").appendChild(el);
+  autoscroll($("activity"));
+}
+
+function pretty(s) {
+  if (!s) return "";
+  try { return JSON.stringify(JSON.parse(s), null, 1); } catch { return s; }
+}
+
+// Surface any image the node hands back (data URIs or image URLs in a
+// tool result) as an inline <img> instead of raw text.
+function renderImages(container, text) {
+  if (!text) return;
+  const re = /(data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+|https?:\/\/\S+\.(?:png|jpe?g|gif|webp|svg))/g;
+  for (const m of text.match(re) || []) {
+    const img = document.createElement("img");
+    img.src = m;
+    img.alt = "tool result image";
+    container.appendChild(img);
+  }
+}
+
+// ── Gateway plumbing: API token, xAI ephemeral token, activity WS ──────
+let gwToken = null;
+async function gatewayToken() {
+  if (gwToken) return gwToken;
+  const r = await fetch("/api/auth/token", { method: "POST" });
+  if (!r.ok) throw new Error("gateway token mint failed: " + r.status);
+  gwToken = (await r.json()).token;
+  return gwToken;
+}
+
+async function xaiEphemeralToken() {
+  const t = await gatewayToken();
+  const r = await fetch("/api/voice/xai-token", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + t },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || ("xAI token mint failed: " + r.status));
+  // Accept both {value} and {client_secret:{value}} response shapes.
+  const tok = body.value || (body.client_secret && body.client_secret.value);
+  if (!tok) throw new Error("xAI token mint response had no token field");
+  return tok;
+}
+
+let activityWs = null;
+async function connectActivity() {
+  const t = await gatewayToken();
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  activityWs = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(t)}`);
+  activityWs.onopen = () => {
+    setBadge($("wsBadge"), "activity: live", "on");
+    activityWs.send(JSON.stringify({ type: "subscribe", topic: "voice-activity" }));
+    activityWs.send(JSON.stringify({ type: "subscribe", topic: "canvas" }));
+  };
+  activityWs.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === "ping") { activityWs.send(JSON.stringify({ type: "pong" })); return; }
+    if (m.type !== "event") return;
+    if (m.topic === "voice-activity") addActivity(m.data || {});
+    else addActivity({ note: `[${m.topic}] ` + JSON.stringify(m.data) });
+  };
+  activityWs.onclose = () => {
+    setBadge($("wsBadge"), "activity: off");
+    setTimeout(() => { if (running) connectActivity().catch(() => {}); }, 2000);
+  };
+}
+
+// ── Audio: mic capture → PCM16 base64; PCM16 playback queue ────────────
+let audioCtx = null, micStream = null, micNode = null, micSource = null;
+let playHead = 0;
+
+function floatTo16(f32) {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+function b64FromI16(i16) {
+  const bytes = new Uint8Array(i16.buffer);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function i16FromB64(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+async function startMic(onChunk) {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  await audioCtx.resume();
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+  });
+  micSource = audioCtx.createMediaStreamSource(micStream);
+  micNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  micNode.onaudioprocess = (e) => {
+    const f32 = e.inputBuffer.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < f32.length; i++) peak = Math.max(peak, Math.abs(f32[i]));
+    $("level").firstElementChild.style.width = Math.min(100, peak * 140) + "%";
+    onChunk(b64FromI16(floatTo16(f32)));
+  };
+  micSource.connect(micNode);
+  micNode.connect(audioCtx.destination); // required by some browsers; node outputs silence
+  playHead = audioCtx.currentTime;
+}
+
+function playPcm(b64) {
+  if (!audioCtx) return;
+  const i16 = i16FromB64(b64);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 0x8000;
+  const buf = audioCtx.createBuffer(1, f32.length, SAMPLE_RATE);
+  buf.getChannelData(0).set(f32);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  playHead = Math.max(playHead, audioCtx.currentTime + 0.05);
+  src.start(playHead);
+  playHead += buf.duration;
+}
+
+function stopMic() {
+  if (micNode) { micNode.disconnect(); micNode = null; }
+  if (micSource) { micSource.disconnect(); micSource = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  $("level").firstElementChild.style.width = "0";
+}
+
+// ── xAI realtime session ───────────────────────────────────────────────
+let xaiWs = null, running = false, turn = 0;
+
+async function startSession() {
+  const c = cfg.load();
+  if (!c.mcpToken) { openSettings("Set the MCP bearer token first."); return; }
+  running = true;
+  $("talkBtn").textContent = "Connecting…";
+  $("talkBtn").disabled = true;
+  try {
+    connectActivity().catch(() => {});
+    const eph = await xaiEphemeralToken();
+    xaiWs = new WebSocket(
+      `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(c.model)}`,
+      ["xai-client-secret." + eph]
+    );
+    xaiWs.onopen = async () => {
+      xaiWs.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          voice: c.voice,
+          instructions: c.instructions,
+          turn_detection: { type: "server_vad" },
+          audio: {
+            input:  { format: { type: "audio/pcm", rate: SAMPLE_RATE } },
+            output: { format: { type: "audio/pcm", rate: SAMPLE_RATE } },
+          },
+          tools: [{
+            type: "mcp",
+            server_url: c.mcpUrl,
+            server_label: "weftos",
+            server_description: "WeftOS node: jobs, schedules, sensors, tasks",
+            authorization: "Bearer " + c.mcpToken,
+          }],
+        },
+      }));
+      await startMic((b64) => {
+        if (xaiWs && xaiWs.readyState === 1)
+          xaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64 }));
+      });
+      setBadge($("voiceBadge"), "voice: live", "on");
+      $("talkBtn").textContent = "Stop";
+      $("talkBtn").className = "stop";
+      $("talkBtn").disabled = false;
+    };
+    xaiWs.onmessage = (ev) => handleXaiEvent(ev);
+    xaiWs.onerror = () => setBadge($("voiceBadge"), "voice: error", "err");
+    xaiWs.onclose = () => { if (running) stopSession(); };
+  } catch (e) {
+    addActivity({ note: "connect failed: " + e.message, isError: true });
+    stopSession();
+  }
+}
+
+function handleXaiEvent(ev) {
+  if (typeof ev.data !== "string") return;
+  let m; try { m = JSON.parse(ev.data); } catch { return; }
+  switch (m.type) {
+    case "response.output_audio.delta":
+      if (m.audio) playPcm(m.audio);
+      break;
+    case "conversation.item.input_audio_transcription.updated":
+    case "conversation.item.input_audio_transcription.completed":
+      upsertBubble("u" + turn, "user", m.transcript || (m.item && m.item.transcript) || "");
+      break;
+    case "response.output_audio_transcript.delta":
+    case "response.output_text.delta":
+      upsertBubble("a" + turn, "agent",
+        (bubbles["a" + turn]?.querySelector(".body").textContent || "") + (m.delta || ""));
+      break;
+    case "response.done":
+      turn += 1;
+      break;
+    case "error":
+      addActivity({ note: "xAI error: " + JSON.stringify(m.error || m), isError: true });
+      break;
+  }
+}
+
+function stopSession() {
+  running = false;
+  stopMic();
+  if (xaiWs) { try { xaiWs.close(); } catch {} xaiWs = null; }
+  setBadge($("voiceBadge"), "voice: off");
+  $("talkBtn").textContent = "Start talking";
+  $("talkBtn").className = "";
+  $("talkBtn").disabled = false;
+}
+
+// ── Settings dialog ────────────────────────────────────────────────────
+function openSettings(hint) {
+  const c = cfg.load();
+  $("cfgModel").value = c.model;
+  $("cfgVoice").value = c.voice;
+  $("cfgMcpUrl").value = c.mcpUrl;
+  $("cfgMcpToken").value = c.mcpToken;
+  $("cfgInstructions").value = c.instructions;
+  if (hint) addActivity({ note: hint, isError: true });
+  $("settings").showModal();
+}
+$("settingsBtn").onclick = () => openSettings();
+$("cfgCancel").onclick = () => $("settings").close();
+$("cfgSave").onclick = () => {
+  cfg.save({
+    model: $("cfgModel").value.trim() || "grok-voice-latest",
+    voice: $("cfgVoice").value.trim() || "eve",
+    mcpUrl: $("cfgMcpUrl").value.trim(),
+    mcpToken: $("cfgMcpToken").value.trim(),
+    instructions: $("cfgInstructions").value.trim() || DEFAULT_INSTRUCTIONS,
+  });
+  $("settings").close();
+};
+$("talkBtn").onclick = () => (running ? stopSession() : startSession());
+</script>
+</body>
+</html>

@@ -37,6 +37,105 @@ pub fn voice_routes() -> Router<ApiState> {
         .route("/voice/test-speaker", post(test_speaker))
         .route("/voice/tts", post(synthesize_tts))
         .route("/voice/tts/config", get(tts_config))
+        .route("/voice/xai-token", post(mint_xai_token))
+}
+
+/// Build the public voice-client page route (mounted outside the
+/// `/api` auth gate; the page itself bootstraps an API token).
+pub fn voice_page_routes() -> Router<ApiState> {
+    Router::new().route("/voice", get(voice_client_page))
+}
+
+/// Serve the embedded Grok voice client page.
+///
+/// A self-contained HTML/JS app: captures the microphone, talks to the
+/// xAI realtime WebSocket with an ephemeral token minted by
+/// [`mint_xai_token`], plays the spoken replies, and shows a live
+/// activity pane (transcripts + `/mcp` tool calls via `/ws`).
+async fn voice_client_page() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("voice_client.html"),
+    )
+}
+
+/// Ephemeral-token TTL requested from xAI (seconds).
+const XAI_TOKEN_TTL_SECS: u32 = 300;
+
+/// `POST /api/voice/xai-token` — mint a short-lived xAI realtime token.
+///
+/// Proxies `POST {base}/realtime/client_secrets` with the node's xAI API
+/// key so browser/phone clients can open the realtime WebSocket without
+/// the long-lived key ever leaving the node. The key is read from the
+/// `XAI_API_KEY` environment variable (matching the provider registry's
+/// `api_key_env`); the optional `XAI_API_BASE` overrides the default
+/// `https://api.x.ai/v1` for proxies.
+async fn mint_xai_token(State(_state): State<ApiState>) -> Response {
+    let Ok(api_key) = std::env::var("XAI_API_KEY") else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "XAI_API_KEY is not set on the node; cannot mint an ephemeral token"
+            })),
+        )
+            .into_response();
+    };
+    if api_key.trim().is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "XAI_API_KEY is empty" })),
+        )
+            .into_response();
+    }
+
+    let base = std::env::var("XAI_API_BASE")
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| "https://api.x.ai/v1".to_string());
+    let url = format!("{}/realtime/client_secrets", base.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let result = client
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({ "expires_after": { "seconds": XAI_TOKEN_TTL_SECS } }))
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) => {
+            let status = resp.status();
+            match resp.json::<serde_json::Value>().await {
+                Ok(body) if status.is_success() => Json(body).into_response(),
+                Ok(body) => {
+                    error!(%status, "xAI client_secrets returned error");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": format!("xAI token mint failed ({status})"),
+                            "detail": body,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": format!("xAI token mint returned invalid JSON: {e}")
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "xAI client_secrets request failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("xAI token mint request failed: {e}") })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ── Handlers ───────────────────────────────────────────────────

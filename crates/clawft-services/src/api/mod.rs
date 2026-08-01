@@ -340,7 +340,10 @@ pub fn build_router(state: ApiState, cors_origins: &[String], static_dir: Option
     let mut router = Router::new()
         .nest("/api", api_router)
         .merge(ws_router)
-        .merge(mcp_http::mcp_routes());
+        .merge(mcp_http::mcp_routes())
+        // Public voice-client page; it bootstraps its own API token via
+        // the /api/auth/token public path before touching gated routes.
+        .merge(voice_api::voice_page_routes());
 
     // Serve built UI as SPA fallback when a static directory is provided.
     if let Some(dir) = static_dir {

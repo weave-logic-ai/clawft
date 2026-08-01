@@ -199,7 +199,68 @@ tens of seconds; the bridge caps it at 120 s (other calls 15 s) and
 returns a spoken-friendly error on timeout. Prefer `spawn_agent` /
 `schedule_job` for long-running work, then check back with `list_jobs`.
 
-## 4. Security
+## 4. Phone / MacBook client: the `/voice` page
+
+The gateway serves a built-in voice client at **`/voice`** (public
+route, embedded in the binary — no separate UI build). It runs on
+anything with a browser and a mic: phone, MacBook, or the PC itself.
+
+```text
+                 ┌─────────────────────────────────────────────┐
+                 │                xAI cloud                     │
+   voice WS      │  Grok Voice Agent (grok-voice-latest)       │   MCP over HTTPS
+  ┌─────────────▶│  ASR ─ reasoning ─ tool calls ─ TTS         │──────────────┐
+  │              └─────────────────────────────────────────────┘              │
+  │                                                                           ▼
+┌─┴──────────────┐                                       ┌────────────────────────────────┐
+│  Phone         │                                       │  4070 PC (always on, WSL2)     │
+│  ─ mic/speaker │        Tailscale tailnet (private)    │                                │
+│  ─ /voice page │◀─────────────────────────────────────▶│  Tailscale Funnel ── /mcp only │
+│  ─ Tailscale   │   page + tokens + /ws activity feed   │        │ 127.0.0.1:18789       │
+│    app         │                                       │        ▼                       │
+└────────────────┘                                       │  weft gateway (axum)           │
+                                                         │   /voice /ws /api /mcp         │
+                                                         │        │ UDS kernel.sock       │
+                                                         │        ▼                       │
+                                                         │  weaver daemon (kernel RPC)    │
+                                                         └────────────────────────────────┘
+```
+
+Connection sequence (all initiated by the page):
+
+1. `POST /api/auth/token` (public bootstrap path, tailnet-only) → a
+   24 h gateway API token.
+2. `POST /api/voice/xai-token` (gateway-token gated) → the gateway
+   calls `POST https://api.x.ai/v1/realtime/client_secrets` with the
+   node's `XAI_API_KEY` and returns a ~5-minute ephemeral token. The
+   long-lived key never leaves the node.
+3. The page opens `wss://api.x.ai/v1/realtime?model=…` with the
+   `xai-client-secret.<token>` subprotocol, sends the `session.update`
+   from §3 (MCP URL + bearer come from the page's Settings dialog,
+   stored in `localStorage`), and streams mic PCM16 @ 24 kHz.
+4. Grok's cloud calls `POST /mcp` through the Funnel for tool work;
+   spoken replies stream back to the page as `response.output_audio.delta`.
+
+### Seeing what the node is doing (not just hearing it)
+
+Voice alone hides the machinery, so the page has two panes:
+
+- **Conversation** — live ASR of what you said plus Grok's reply
+  transcript as it speaks.
+- **Node activity** — the page subscribes to the gateway WebSocket
+  (`/ws`, topics `voice-activity` and `canvas`). Every `tools/call`
+  that hits `/mcp` is published to `voice-activity` as
+  `{kind, tool, argsPreview, resultPreview, isError, ts}` (previews
+  truncated at 600 chars), so each voice-triggered tool call renders as
+  a card: tool name, arguments, and the JSON result. Any `data:image/…`
+  URI or image URL in a result is rendered inline as an image.
+
+Requirements: `XAI_API_KEY` exported in the gateway's environment, and
+the page reached over HTTPS or `localhost` (browsers refuse mic access
+on plain remote HTTP — Tailscale Serve gives you tailnet HTTPS for
+free).
+
+## 5. Security
 
 - `/mcp` **cannot start without a bearer token** (`WEFTOS_MCP_TOKEN` or
   `gateway.mcpToken`); requests are checked with a constant-time
@@ -220,7 +281,7 @@ returns a spoken-friendly error on timeout. Prefer `spawn_agent` /
   daemon TCP relay (`kernel.ipc_tcp`, off by default) stay
   tailnet-private.
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Likely cause |
 |---------|--------------|

@@ -137,7 +137,9 @@ async fn handle_mcp(
         Value::Array(batch) => {
             let mut responses = Vec::new();
             for item in &batch {
-                if let Some(resp) = dispatch_stateless(endpoint, item).await {
+                let resp = dispatch_stateless(endpoint, item).await;
+                publish_activity(&state, item, resp.as_ref()).await;
+                if let Some(resp) = resp {
                     responses.push(resp);
                 }
             }
@@ -147,10 +149,84 @@ async fn handle_mcp(
                 (StatusCode::OK, Json(Value::Array(responses))).into_response()
             }
         }
-        single => match dispatch_stateless(endpoint, &single).await {
-            Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
-            None => StatusCode::ACCEPTED.into_response(),
-        },
+        single => {
+            let resp = dispatch_stateless(endpoint, &single).await;
+            publish_activity(&state, &single, resp.as_ref()).await;
+            match resp {
+                Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
+                None => StatusCode::ACCEPTED.into_response(),
+            }
+        }
+    }
+}
+
+/// WebSocket topic that `/mcp` tool-call activity is published on.
+///
+/// The `/voice` client page subscribes to this over the gateway's `/ws`
+/// so the user can *see* what the voice agent is doing — which tool ran,
+/// with what arguments, and what came back — not just hear the answer.
+pub const ACTIVITY_TOPIC: &str = "voice-activity";
+
+/// Longest args/result preview forwarded to activity subscribers.
+const PREVIEW_LIMIT: usize = 600;
+
+/// Publish a `tools/call` event to [`ACTIVITY_TOPIC`]. Non-tool-call
+/// messages (initialize, tools/list, notifications) are not published.
+async fn publish_activity(state: &ApiState, msg: &Value, resp: Option<&Value>) {
+    if msg.get("method").and_then(|m| m.as_str()) != Some("tools/call") {
+        return;
+    }
+    let params = msg.get("params");
+    let tool = params
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("(unknown)");
+    let args_preview = params
+        .and_then(|p| p.get("arguments"))
+        .map(|a| truncate(&a.to_string(), PREVIEW_LIMIT))
+        .unwrap_or_default();
+
+    let result = resp.and_then(|r| r.get("result"));
+    let is_error = result
+        .and_then(|r| r.get("isError"))
+        .and_then(|e| e.as_bool())
+        .unwrap_or(false);
+    let result_preview = result
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .map(|t| truncate(&t, PREVIEW_LIMIT))
+        .unwrap_or_default();
+
+    state
+        .broadcaster
+        .publish(
+            ACTIVITY_TOPIC,
+            serde_json::json!({
+                "kind": "tool_call",
+                "tool": tool,
+                "argsPreview": args_preview,
+                "resultPreview": result_preview,
+                "isError": is_error,
+                "ts": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await;
+}
+
+/// Truncate to `limit` chars on a char boundary, appending an ellipsis.
+fn truncate(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(limit).collect();
+        format!("{cut}…")
     }
 }
 

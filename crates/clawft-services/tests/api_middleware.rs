@@ -497,9 +497,9 @@ mod mcp_endpoint {
         }
     }
 
-    const TOKEN: &str = "test-mcp-token";
+    pub(super) const TOKEN: &str = "test-mcp-token";
 
-    fn mcp_state() -> ApiState {
+    pub(super) fn mcp_state() -> ApiState {
         let (mut state, _) = make_state();
         let mut provider = CompositeToolProvider::new();
         provider.register(Box::new(EchoProvider));
@@ -509,7 +509,7 @@ mod mcp_endpoint {
         state
     }
 
-    fn mcp_request(auth: Option<&str>, body: Value) -> Request<Body> {
+    pub(super) fn mcp_request(auth: Option<&str>, body: Value) -> Request<Body> {
         let mut builder = Request::builder()
             .method(Method::POST)
             .uri("/mcp")
@@ -674,5 +674,86 @@ mod mcp_endpoint {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+}
+
+
+// ─── /voice client page + activity feed (grok-voice phone client) ───────
+
+mod voice_client {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn voice_page_is_public_html() {
+        let (state, _auth) = make_state();
+        let app = build_router(state, &[], None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/voice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
+        assert!(ct.to_str().unwrap().starts_with("text/html"));
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("WeftOS Voice"));
+        assert!(html.contains("voice-activity"));
+    }
+
+    #[tokio::test]
+    async fn xai_token_mint_requires_auth() {
+        let (state, _auth) = make_state();
+        let app = build_router(state, &[], None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/voice/xai-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tools_call_publishes_activity_event() {
+        use super::mcp_endpoint::{TOKEN, mcp_request, mcp_state};
+        let state = mcp_state();
+        // Subscribe before the call; publish drops events with no listener.
+        let mut rx = state
+            .broadcaster
+            .subscribe(clawft_services::api::mcp_http::ACTIVITY_TOPIC)
+            .await;
+        let app = build_router(state, &[], None);
+        let resp = app
+            .oneshot(mcp_request(
+                Some(TOKEN),
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": "echo__say", "arguments": {"text": "visible"}}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("no activity event within 2s")
+            .expect("broadcast channel closed");
+        let event: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(event["kind"], "tool_call");
+        assert_eq!(event["tool"], "echo__say");
+        assert_eq!(event["isError"], false);
+        assert!(event["argsPreview"].as_str().unwrap().contains("visible"));
+        assert!(event["resultPreview"].as_str().unwrap().contains("visible"));
     }
 }
