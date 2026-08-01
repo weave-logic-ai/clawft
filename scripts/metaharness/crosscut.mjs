@@ -265,24 +265,50 @@ function classify(node, hits) {
 
   // Heuristic overrides for known pathfinder cases
   if (node.id === "metaharness-hosts") {
-    mode = pathExists(".grok/rules/ruflo-grok.md") ? "WIRE" : "BUILD";
-    next =
-      "Grok overlay exists (pathfinder); package host-grok reference for upstream (S1)";
+    if (pathExists(".metaharness/hosts/grok/README.md")) {
+      mode = "SEE";
+      next =
+        "Grok host reference present — agents can SEE pathfinder; UPSTREAM host-grok package still open (S1 publish)";
+    } else if (pathExists(".grok/rules/ruflo-grok.md")) {
+      mode = "WIRE";
+      next =
+        "Grok overlay exists; add .metaharness/hosts/grok reference for agents/upstream";
+    } else {
+      mode = "BUILD";
+      next = "Missing Grok host overlay";
+    }
   }
   if (node.id === "metaharness-darwin") {
-    mode = "BUILD";
-    next = "Darwin not enabled — dry-run wrapper then --confirm (S3)";
+    if (pathExists("scripts/metaharness/darwin-loop.mjs")) {
+      mode = "SEE";
+      next =
+        "Dry loop present (darwin-loop.mjs); full @metaharness/darwin evolve is optional S3 with --confirm";
+    } else {
+      mode = "BUILD";
+      next = "Add darwin-loop.mjs dry wrapper";
+    }
   }
   if (node.id === "cognitum-gate-tilezero" && pathExists("Cargo.toml")) {
     const cargo = readFileSync(join(ROOT, "Cargo.toml"), "utf8");
     if (/cognitum-gate-tilezero/.test(cargo)) {
-      mode = "WIRE";
-      next = "Dep present — CI smoke Permit/Defer/Deny (C3)";
+      if (pathExists(".metaharness/tasks/tilezero-smoke.md")) {
+        mode = "SEE";
+        next =
+          "Dep + agent task present — C3 full cargo CI smoke still optional maturity";
+      } else {
+        mode = "WIRE";
+        next = "Dep present — add tilezero-smoke task / CI (C3)";
+      }
     }
   }
   if (node.id === "metaharness-router") {
     mode = "UPSTREAM";
     next = "Optional consume @metaharness/router + savings (S2)";
+  }
+  if (node.id === "ruvllm-sona") {
+    mode = "UPSTREAM";
+    next =
+      "Optional micro-loop (ADR-234); not required for WeftOS product — document only (no BUILD until product need)";
   }
 
   return {

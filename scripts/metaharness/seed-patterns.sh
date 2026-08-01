@@ -45,6 +45,15 @@ store "pattern-viewspec-flywheel" \
 store "pattern-data-surface-governance" \
   "ADR-097: all WeftOS data surfaces (fs, sqlite/agentdb, sensors, mesh nodes, substrate, chain, BVH, ECC, View tables) under same MH governance: inventory, ACL, receipt for policy, chain audit for state. No surface is 'shadow' ungoverned."
 
+store "pattern-see-wire-build-upstream" \
+  "Flywheel string: SEE → WIRE → BUILD → UPSTREAM. Prefer see/wire existing WeftOS+rUv assets before build. Darwin: traverse capability DAG, compare, classify, mutate harness only, measure, promote. Alignment and honest scores are compatible. Vanity ADR-041 hacks rejected."
+
+store "pattern-grok-host-pathfinder" \
+  "Grok Build = executor; Ruflo = orchestrator. No upstream @metaharness/host-grok yet. Reference: .metaharness/hosts/grok/README.md, .grok/rules/ruflo-grok.md, scripts/grok-team-bus.mjs, ADR-075 MCP client. Dual-host patterns namespace."
+
+store "pattern-weftos-brain-crosscut" \
+  "WeftOS brain (ruvbrain-like): node scripts/metaharness/weftos-brain.mjs index|search. Crosscut: crosscut.mjs. Loop: npm run metaharness:loop. Sensor synergy on code/features not single score."
+
 store "pattern-ruv-worldgraph" \
   "rUv WorldGraph ADR-139 = typed twin+provenance. OccWorld=predictive (LeWM analogue). Map WorldGraph→Graph Views; constraint fusion→live attach; MetaHarness evolves policies as churn."
 

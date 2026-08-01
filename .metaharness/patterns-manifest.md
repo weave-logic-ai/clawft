@@ -13,6 +13,9 @@
 | `pattern-viewspec-flywheel` | ViewSpec fixtures + evaluate-only promote |
 | `pattern-data-surface-governance` | ADR-097 universal surfaces |
 | `pattern-ruv-worldgraph` | WorldGraph / OccWorld crosswalk |
+| `pattern-see-wire-build-upstream` | Flywheel string SEE→WIRE→BUILD→UPSTREAM |
+| `pattern-grok-host-pathfinder` | Grok+Ruflo host reference `.metaharness/hosts/grok` |
+| `pattern-weftos-brain-crosscut` | Local brain + crosscut for Darwin traverse/compare |
 
 ## Rules
 

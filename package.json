@@ -32,7 +32,8 @@
     "metaharness:crosscut": "node scripts/metaharness/crosscut.mjs",
     "metaharness:darwin": "node scripts/metaharness/darwin-loop.mjs",
     "metaharness:darwin:confirm": "node scripts/metaharness/darwin-loop.mjs --confirm",
-    "metaharness:loop": "node scripts/metaharness/weftos-brain.mjs index && node scripts/metaharness/crosscut.mjs && node scripts/metaharness/darwin-loop.mjs --measure"
+    "metaharness:loop": "node scripts/metaharness/weftos-brain.mjs index && node scripts/metaharness/crosscut.mjs && node scripts/metaharness/darwin-loop.mjs --measure && node scripts/metaharness/goal-check.mjs",
+    "metaharness:goal": "node scripts/metaharness/goal-check.mjs"
   },
   "devDependencies": {
     "@claude-flow/cli": "3.32.38",
