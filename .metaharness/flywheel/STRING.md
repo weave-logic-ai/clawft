@@ -24,8 +24,9 @@ SEE → WIRE → BUILD → UPSTREAM
 ## Run the loop (keep going)
 
 ```bash
-npm run metaharness:loop
-# = brain index → crosscut classify → darwin dry plan + flywheel measure
+npm run metaharness:loop           # one full generation + goal-check
+npm run metaharness:loop:until    # keep going until goals met (max 20)
+npm run metaharness:loop:forever  # hygiene loop every 5 min
 ```
 
 **Yes — looping is the point.** Stop only when **goals** hold (not when bored):
