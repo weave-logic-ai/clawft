@@ -119,3 +119,12 @@ scripts/__pycache__/
 .metaharness/lineage.json
 .metaharness/variants/
 .metaharness/runs/
+.metaharness/flywheel/receipts/
+.metaharness/flywheel/smoke-replay-latest.json
+.metaharness/score-latest.json
+.metaharness/genome-latest.json
+.metaharness/weftos-score-latest.json
+.metaharness/brain/index.jsonl
+.metaharness/brain/df.json
+.metaharness/brain/meta.json
+.metaharness/brain/crosscut-latest.json

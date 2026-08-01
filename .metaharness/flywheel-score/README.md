@@ -1,10 +1,21 @@
 # MetaHarness score flywheel (WEFT-730)
 
-Dedicated harness loop to **improve WeftOS** under MetaHarness discipline,
-starting with score dimensions and real foundation assets.
+## The string
+
+```
+SEE → WIRE → BUILD → UPSTREAM
+```
+
+Capability already in tree → **see** it → **wire** it to agents → else **build**
+or push **upstream** (rUv/Cognitum). Alignment and honest scores rise together;
+vanity ADR-041 hacks without a mode are rejected.
+
+**Darwin loop:** traverse capability DAG → compare WeftOS ↔ rUv/Cognitum →
+classify each node → mutate harness/policy only → measure → promote.  
+Full doctrine: `.metaharness/flywheel/STRING.md` · strategy:
+`docs/research/ruv-ecosystem-synergy-flywheel.md`
 
 > Freeze the model. Evolve the harness / policies. Promote only what proves lift.
-
 ## Two score systems
 
 | Score | Meaning | Ceiling |
@@ -23,22 +34,23 @@ reach it.
 ## Loop
 
 ```bash
-# 1. Measure
+# 1. Measure (scorecard + genome + foundation + OS surface)
 scripts/metaharness/score.sh
 scripts/metaharness/weftos-score.sh
 
-# 2. Evaluate candidates against anchors (no champion mutation)
+# 2. Evaluate anchors + write signed measure receipt (@metaharness/flywheel)
 scripts/metaharness/flywheel-score-eval.sh
+npm run metaharness:flywheel:measure
 
-# 3. Propose improvements (human or Darwin on harness surfaces only)
-#    - more tasks / commands
-#    - richer ViewSpec fixtures
-#    - AgentDB patterns
-#    - CONTRIBUTING / MCP policy files for inventory
-#    - never auto-weaken gate or ADR-090 R1–R5
+# 3. Status / smoke engine (identity proposer — no Darwin)
+npm run metaharness:flywheel:status
+npm run metaharness:flywheel:smoke
 
-# 4. Promote only with confirm + PR / keys
+# 4. Propose improvements (human; Darwin only if approved — GAPS.md B1)
+# 5. Promote only with confirm + PR / keys (GAPS.md B3 for production keys)
 ```
+
+Gap matrix + big-change approvals: `.metaharness/flywheel/GAPS.md`
 
 ## Surfaces allowed to mutate (candidates)
 

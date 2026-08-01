@@ -75,15 +75,18 @@ When fusion data or sources churn:
 ECC authority and LeWM R1–R5 remain non-negotiable (ADR-090); Darwin/flywheel
 must not evolve “WM overrides ECC” policies into champions.
 
-### 4. Grok adoption path
+### 4. Grok adoption path (pathfinder)
 
 | Phase | Action |
 |-------|--------|
-| Now | `.grok/rules` + skills + `scripts/metaharness/*` + Ruflo MCP tools |
-| Next | Raise taskCoverage/memoryUsefulness to foundation targets |
-| Later | Optional `@metaharness/host-grok` or documented “Grok overlay” host |
+| Now | `.grok/rules` + skills + team bus + `scripts/metaharness/*` + Ruflo MCP |
+| Next | **Dual-host pattern recall** + genome/foundation readiness (not ADR-041 vanity) |
+| Later | Documented Grok overlay → candidate **`@metaharness/host-grok`** contribution |
 
 Grok remains **executor**; Ruflo/MetaHarness remain **orchestrator / evolve**.
+Upstream MH hosts today do not include Grok — WeftOS is early ground truth for
+that composition. Ecosystem strategy:
+`docs/research/ruv-ecosystem-synergy-flywheel.md`.
 
 ### 5. Explicit non-goals
 

@@ -33,3 +33,44 @@ Derived from `node_modules/metaharness/dist/repo-scorecard.js` + `analyze-repo.j
 | Reduce “MCP server” signal if we want rust-crate archetype | may raise taskCoverage surface to 7 |
 
 Prefer raising **weftosFoundationScore** components and real product quality.
+
+## Signaling (maturity, not Goodhart)
+
+High-signal files the ADR-041 inventory *does* read should describe the OS
+honestly so ranking is not stuck on “tiny MCP scaffold”:
+
+| File | Intent |
+|------|--------|
+| `package.json` | `name`, `build`/`test`/`gate` → `scripts/build.sh`, MetaHarness npm scripts |
+| `CONTRIBUTING.md` | Build path, harness layout, evaluate→promote, Rust-first genus |
+| `README.md` | Agent harness section; primary vs secondary scores; MCP as host surface |
+
+Even with perfect signaling: **taskCoverage ≤ ~79** (archetype surface max 7)
+and **memoryUsefulness ≤ ~60** (shallow fileCount). That is upstream formula
+design, not missing WeftOS assets.
+
+## The missing probe: `metaharness genome` (rUv ADR-041)
+
+RuvNet source (`metaharness` + timesfm harness provenance) treats **genome** as
+the 7-section readiness verdict, separate from the 5-dim scorecard:
+
+| Probe | Command | What it answers |
+|-------|---------|-----------------|
+| Scorecard | `metaharness score` | Fit of a *recommended scaffold* + shallow inventory |
+| **Genome** | `metaharness genome` | Repo type, topology, MCP risk, **test/publish readiness** |
+| Candidates | `metaharness score --top N` | Beam of archetypes |
+| Mint | `metaharness new …` | Writes `.harness/manifest` + witness (Darwin surface) |
+
+WeftOS often looks “mid” on **score** (MCP archetype, surface 5) while **genome**
+says **READY** (rust polyglot, test/publish 100%, low risk). ruflo even keeps a
+root `Cargo.toml` workspace so analyzers see Rust without deep walks — still not
+enough for scorecard *memory* (fileCount), but genome uses build/test/CI signals.
+
+**Do not ship on scorecard alone.** Always capture genome:
+
+```bash
+scripts/metaharness/score.sh   # → score-latest.json + genome-latest.json
+```
+
+Optional later: mint a side-car `.harness/` (not overwriting product) if Darwin
+evolve is desired; product harness remains `.metaharness/`.

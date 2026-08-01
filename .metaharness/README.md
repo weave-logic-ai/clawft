@@ -9,8 +9,9 @@ WEFT-728 universal surfaces.
 ## Commands
 
 ```bash
-scripts/metaharness/score.sh                 # upstream ADR-041 scorecard
-scripts/metaharness/weftos-score.sh          # WeftOS foundation asset score
+scripts/metaharness/score.sh                 # ADR-041 scorecard + genome → .metaharness/*-latest.json
+scripts/metaharness/weftos-score.sh          # foundation + OS crate/target surface (primary)
+scripts/metaharness/flywheel-score-eval.sh   # evaluate-only gates
 scripts/metaharness/run-task.sh gate         # scripts/build.sh gate
 scripts/metaharness/run-task.sh plane-dag    # plane-dag ready
 scripts/metaharness/run-task.sh fusion-view  # validate ViewSpecs + anchors
@@ -18,6 +19,14 @@ scripts/metaharness/validate-views.sh
 scripts/metaharness/seed-patterns.sh         # AgentDB patterns
 scripts/metaharness/flywheel-status.sh
 ```
+
+**Genome vs scorecard:** `metaharness genome` is the 7-section readiness probe
+(often READY / rust-crate). `metaharness score` alone can mis-rank this monorepo
+as `mcp-server-harness` via shallow inventory. Always run `score.sh` (both).
+
+**Flywheel:** `npm run metaharness:flywheel:measure` — signed measure receipts via
+`@metaharness/flywheel`. Gap matrix + Darwin/mint/key approvals:
+`.metaharness/flywheel/GAPS.md`.
 
 ## Layout
 

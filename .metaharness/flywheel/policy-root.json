@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kind": "weftos-flywheel-policy-root",
+  "note": "Gen-0 immutable levers for @metaharness/flywheel. Only string values. Darwin/proposer may mutate one lever per generation; never auto-touch ECC/gate/ADR-090. Canonical doctrine: STRING.md",
+  "policy": {
+    "flywheel_string": "SEE → WIRE → BUILD → UPSTREAM",
+    "darwin_loop": "traverse_compare_classify_mutate_measure_promote",
+    "primary_score": "weftosFoundation",
+    "require_genome_ready": "true",
+    "min_foundation": "80",
+    "min_workspace_members": "20",
+    "min_dist_targets": "5",
+    "min_domains_hit": "4",
+    "viewspec_eval": "strict",
+    "promote_mode": "human_confirm",
+    "darwin_surfaces": "metaharness_only",
+    "frozen_surfaces": "adr090,gate_phases,dual_sign,substrate_denylist",
+    "alignment_goal": "ruv_cognitum_grok_ruflo_synergy",
+    "require_grok_ruflo_path": "true",
+    "require_dual_host_patterns": "true",
+    "require_worldgraph_crosswalk": "true",
+    "require_ruflo_pin_doc": "true",
+    "require_cognitum_gate_dep": "true",
+    "reject_scorecard_hacking": "true",
+    "prefer_intervention": "see_wire_build_upstream",
+    "capability_graph": "weftos_brain_plus_ruvbrain",
+    "fusion_analogy": "sensor_synergy_on_code_features"
+  }
+}

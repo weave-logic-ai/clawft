@@ -13,6 +13,38 @@ fundamentally different: a distributed kernel that gives AI agents persistent
 memory, verifiable reasoning, and constitutional governance — running on
 everything from a Raspberry Pi to a browser tab to an air-gapped data center.
 
+## Agent harness (developers & coding agents)
+
+This monorepo **already** carries its agent/development harness — MetaHarness
+tasks, Graph ViewSpecs, Plane tracking, and Ruflo/claude-flow orchestration.
+You do not scaffold a blank harness onto an empty crate tree.
+
+| Layer | Role |
+|-------|------|
+| **Rust product** | `weft` / kernel / mesh / governance — ships without Node |
+| **In-repo harness** | `.metaharness/` tasks, `config/views/`, AgentDB patterns |
+| **Host orchestration** | Ruflo / claude-flow (optional MCP via `.mcp.json`) |
+| **Primary score** | `weftosFoundationScore` via `scripts/metaharness/weftos-score.sh` (harness **+** crate/target surface) |
+| **Genome readiness** | `metaharness genome` (7-section; often shows READY when scorecard alone looks mid) |
+| **Secondary canary** | ADR-041 `metaharness score` (shallow inventory; not multi-OS crate graph) |
+
+**Platform surface (summary):** 50+ workspace crates; cargo-dist across Linux
+(gnu/musl × arch), macOS, Windows; WASM/WASI; edge/Android; leaf firmware
+hardware crates; sensor / world-model / voice stacks. Full matrix:
+[CONTRIBUTING.md](CONTRIBUTING.md#platform-matrix-os-surface).
+
+```bash
+scripts/build.sh gate                         # release readiness
+scripts/metaharness/score.sh                  # scorecard + genome → .metaharness/
+scripts/metaharness/weftos-score.sh           # foundation + OS surface (load-bearing)
+scripts/metaharness/run-task.sh gate          # harness-wrapped gate
+scripts/metaharness/validate-views.sh         # fusion ViewSpecs (evaluate-only)
+```
+
+Policy evolution: **evaluate → receipt → promote** (ADR-096). Freeze the model;
+evolve harness and ViewSpecs. MCP is one host integration surface, not the
+product genus. Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## What's New in v0.2
 
 - **Lego Block Engine** -- 10 composable GUI blocks (Text, Code, Status, Table, Tree, Terminal, Button, Column, Row, Grid, Tabs) with recursive rendering, BlockRegistry, and Zustand+Tauri state management

@@ -25,6 +25,22 @@
       "check": "upstream compileConfidence == 100 when score-latest present"
     },
     {
+      "id": "workspace_members_ge_20",
+      "check": "components.workspaceMembers >= 20"
+    },
+    {
+      "id": "dist_targets_ge_5",
+      "check": "components.distTargetCount >= 5"
+    },
+    {
+      "id": "domains_hit_ge_4",
+      "check": "components.domainsHit >= 4"
+    },
+    {
+      "id": "genome_publish_ready",
+      "check": "upstreamGenome.publish_readiness >= 0.8 when genome present"
+    },
+    {
       "id": "no_silent_gate_relax",
       "check": "scripts/build.sh gate still listed as task weft-gate command"
     }
@@ -32,6 +48,7 @@
   "regressed_if": [
     "weftosFoundationScore drops vs previous weftos-score-latest.json without receipt",
     "validate-views fails",
-    "ADR-090 predicates removed"
+    "ADR-090 predicates removed",
+    "workspaceMembers or distTargetCount collapse (OS surface regression)"
   ]
 }

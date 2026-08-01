@@ -1,6 +1,42 @@
 {
+  "name": "weftos",
+  "private": true,
+  "description": "WeftOS / clawft monorepo — Rust agent operating system (kernel, mesh, governance) with optional Node tooling for Ruflo/MetaHarness orchestration",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/weave-logic-ai/weftos.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh native-debug",
+    "test": "bash scripts/build.sh test",
+    "check": "bash scripts/build.sh check",
+    "clippy": "bash scripts/build.sh clippy",
+    "gate": "bash scripts/build.sh gate",
+    "metaharness:score": "bash scripts/metaharness/score.sh",
+    "metaharness:foundation": "bash scripts/metaharness/weftos-score.sh",
+    "metaharness:eval": "bash scripts/metaharness/flywheel-score-eval.sh",
+    "metaharness:gate": "bash scripts/metaharness/run-task.sh gate",
+    "metaharness:views": "bash scripts/metaharness/validate-views.sh",
+    "metaharness:genome": "npx --yes metaharness genome . --json",
+    "metaharness:flywheel": "node scripts/metaharness/flywheel-measure.mjs",
+    "metaharness:flywheel:measure": "node scripts/metaharness/flywheel-measure.mjs measure",
+    "metaharness:flywheel:smoke": "node scripts/metaharness/flywheel-measure.mjs smoke",
+    "metaharness:flywheel:status": "node scripts/metaharness/flywheel-measure.mjs status",
+    "metaharness:brain:index": "node scripts/metaharness/weftos-brain.mjs index",
+    "metaharness:brain:search": "node scripts/metaharness/weftos-brain.mjs search",
+    "metaharness:brain:stats": "node scripts/metaharness/weftos-brain.mjs stats",
+    "metaharness:crosscut": "node scripts/metaharness/crosscut.mjs",
+    "metaharness:darwin": "node scripts/metaharness/darwin-loop.mjs",
+    "metaharness:darwin:confirm": "node scripts/metaharness/darwin-loop.mjs --confirm",
+    "metaharness:loop": "node scripts/metaharness/weftos-brain.mjs index && node scripts/metaharness/crosscut.mjs && node scripts/metaharness/darwin-loop.mjs --measure"
+  },
   "devDependencies": {
     "@claude-flow/cli": "3.32.38",
+    "@metaharness/flywheel": "^0.1.7",
     "agentic-flow": "^2.1.0",
     "ruflo": "3.32.38",
     "typescript": "^6.0.3"
@@ -15,6 +51,14 @@
   },
   "weftos": {
     "rufloPin": "3.32.38",
-    "rufloPinNote": "Schema-bearing MCP owner of .swarm/agentdb-memory.db. Bump only deliberately: back up .swarm/, read changelog, then scripts/brain-embedded-rust-ingest.sh stores. See WEFT-684 / WEFT-669."
+    "rufloPinNote": "Schema-bearing MCP owner of .swarm/agentdb-memory.db. Bump only deliberately: back up .swarm/, read changelog, then scripts/brain-embedded-rust-ingest.sh stores. See WEFT-684 / WEFT-669.",
+    "primaryLanguage": "rust",
+    "product": "agent-operating-system",
+    "harness": {
+      "foundationScore": "scripts/metaharness/weftos-score.sh",
+      "upstreamScorecard": "scripts/metaharness/score.sh",
+      "tasks": ".metaharness/tasks",
+      "policy": "ADR-096 evaluate→receipt→promote; never silent champion"
+    }
   }
 }
