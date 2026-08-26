@@ -3,7 +3,8 @@
 **Status:** reported upstream (see issue links below)  
 **Discovered:** WEFT-616 Phases 0/1 (`adc5f9bc`, 2026-07-14)  
 **Tracked:** WEFT-662  
-**Affected crate:** [`rvf-runtime`](https://crates.io/crates/rvf-runtime) **0.2.0** (still present in **0.3.0 / 0.3.2**)  
+**Affected crate:** [`rvf-runtime`](https://crates.io/crates/rvf-runtime) — discovered on **0.2.0**  
+**Updated:** 2026-08-26 — workspace moved to **0.3.2**; **Bug 1 is FIXED upstream**, Bugs 2 and 3 remain. See §"0.3.2 re-verification" below.  
 **Upstream repository:** https://github.com/ruvnet/ruvector  
 **Consumers in WeftOS:** `clawft-cow-memory`, `clawft-core` (`rvf` feature), `clawft-kernel` (`cluster` / related)
 
@@ -19,14 +20,63 @@ when fixes land.
 
 | # | Short title | Severity | Upstream issue | Local workaround |
 |---|-------------|----------|----------------|------------------|
-| 1 | macOS link failure: hard-coded `__errno_location` | **P0** (macOS binaries/tests) | [ruvnet/RuVector#746](https://github.com/ruvnet/RuVector/issues/746) | `clawft-cow-memory` `macos_errno_shim` |
+| 1 | macOS link failure: hard-coded `__errno_location` | ~~**P0**~~ **FIXED in 0.3.2** | [ruvnet/RuVector#746](https://github.com/ruvnet/RuVector/issues/746) | `clawft-cow-memory` `macos_errno_shim` — now **dead code**, safe to remove |
 | 2 | `RvfStore::open()` resets `metric` to L2 (and zeroes witness hash) | **P1** (silent correctness) | [ruvnet/RuVector#747](https://github.com/ruvnet/RuVector/issues/747) | always create/query as L2 + L2-normalize vectors |
 | 3 | `delete()` bitmap never cleared by re-ingest; `compact()` drops re-ingested data | **P1** (data loss / query holes) | [ruvnet/RuVector#748](https://github.com/ruvnet/RuVector/issues/748) | crate-level tombstones; never call `RvfStore::delete` on working tips |
 
 Related residual (not a separate Plane AC item, but called out in voice handoff):
 there is **no public vector-by-id read** on `RvfStore` in 0.2 — see
 `clawft-cow-memory/src/manifest.rs` comments. Tracked as a product gap, not
-one of the three AC bugs below.
+one of the three AC bugs below. **0.3.2 closes this** — see below.
+
+---
+
+## 0.3.2 re-verification (2026-08-26)
+
+The workspace moved `rvf-runtime` 0.2.0 → **0.3.2** (`Cargo.toml`). Note there
+is no 0.2.1: upstream published 0.2.0 (2026-02-16) then 0.3.0 (2026-06-11), so
+0.2.0 was the terminal release of that line and this bump was the only way
+forward.
+
+Verified by diffing the crates.io sources of `rvf-runtime-0.2.0` and
+`rvf-runtime-0.3.2`:
+
+| Bug | State in 0.3.2 | Evidence |
+|-----|----------------|----------|
+| **1** macOS `__errno_location` | **FIXED** | `src/locking.rs` now declares `__errno_location` under `cfg(any(target_os = "linux", target_os = "android"))` and `__error` under `cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))`, with a matching `libc_errno()` per platform. |
+| **2** `open()` resets `metric` | **STILL PRESENT** | `RvfStore::open()` still builds `RvfOptions { domain_profile, ..Default::default() }`, discarding the persisted metric. **Keep the L2-only discipline.** |
+| **3** deletion bitmap / `compact()` | **ASSUMED STILL PRESENT** | Both versions carry a single `deletion_bitmap.clear()`; no behavioural fix identified. Not re-proven by test — **keep the crate-level tombstones.** |
+
+### API compatibility
+
+The 0.2 → 0.3 jump is **source-compatible for our usage** despite the major-ish
+version change. Diffing the public `fn` surface of `RvfStore`:
+
+- **Removed: nothing.**
+- **Added:** `read_all_vectors`, `iter_vectors`, `metric`, `options`, `epoch`,
+  `index_ready`, `embed_dashboard`, `extract_dashboard`.
+- `RvfOptions` fields: **unchanged** (no additions, no removals).
+
+`cargo check --workspace` and the nextest workspace suite both pass with **zero
+source changes** to WeftOS.
+
+New upstream modules in 0.3.2: `rabitq_path.rs` (RaBitQ quantization),
+`vector_slab.rs`, `index_path.rs`, `hashing.rs`. New transitive deps:
+`rvf-index` 0.2.0, `rvf-quant` 0.2.0.
+
+### Follow-ups this unlocks
+
+1. **Delete `crates/clawft-cow-memory/src/macos_errno_shim.rs`** and its `mod`
+   declaration. The shim defines `__errno_location` via `#[no_mangle]` on macOS;
+   0.3.2 no longer references that symbol on macOS, so the shim is dead code.
+   Not done in this bump — it is a source change, kept separate from the
+   dependency move.
+2. **`read_all_vectors` / `iter_vectors` close the "no public vector-by-id read"
+   residual** noted above. `clawft-cow-memory/src/manifest.rs` works around its
+   absence; that workaround can now be revisited.
+3. **`metric()` and `options()` accessors** make Bug 2 *observable* for the first
+   time — we can now assert the metric a store came back with rather than
+   assuming L2. They do not fix the reset.
 
 ---
 

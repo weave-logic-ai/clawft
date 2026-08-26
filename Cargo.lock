@@ -7720,9 +7720,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ruvector-cluster"
-version = "2.0.6"
+version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0028cc832c6969de8f68b63ff0c19b9b213170324fa13054b40e490e1d83b14b"
+checksum = "1798ab4613e331a7e4477eda565cf682068743e5a652521030eb1ed1c61b4f9c"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -7772,12 +7772,13 @@ dependencies = [
 
 [[package]]
 name = "ruvector-diskann"
-version = "2.1.0"
+version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60dea76ee85b952e0a81d906a9a2f3702d65b6877eebabef38c49ebe8751fdae"
+checksum = "abb30a577b6d5f14007371b3bfaa03f1e7c267a7449b5b8c0d85b46058ef5ce7"
 dependencies = [
  "bincode 2.0.1",
  "bytemuck",
+ "getrandom 0.2.17",
  "memmap2",
  "parking_lot",
  "rand 0.8.7",
@@ -7789,9 +7790,9 @@ dependencies = [
 
 [[package]]
 name = "ruvector-raft"
-version = "2.0.6"
+version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c93eeacd8f4479de247539e85efa4fade7d90833b40b33cc0a747e068975e7f"
+checksum = "524d1ddcc2802902cc7c79d865294bf61641c56d0ae47f08cd9096d3875be80e"
 dependencies = [
  "bincode 2.0.1",
  "chrono",
@@ -7810,9 +7811,9 @@ dependencies = [
 
 [[package]]
 name = "ruvector-replication"
-version = "2.0.6"
+version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "827de296896f93aa7a41be6c7eed46e01ea1060010473c42f9b98354fdcd4e1f"
+checksum = "bba50aea57feea2cf1b1980f712a81e509623c5a33637e1a4e7a808c5d622c61"
 dependencies = [
  "bincode 2.0.1",
  "chrono",
@@ -7844,19 +7845,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "rvf-runtime"
+name = "rvf-index"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e465af193e27d9c5f939519fa71065a7bab22bfb31f85d614fa9c59218f73858"
+checksum = "ce36812dd23269e9daf8819344e29c0f13ef73e84f31a02b3b8a9cc0c431795e"
+
+[[package]]
+name = "rvf-quant"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a1984a13b774b4c8a28b0cc3f95b070dcf953575ce99bffc8cf2db5b52894ff"
 dependencies = [
  "rvf-types",
 ]
 
 [[package]]
-name = "rvf-types"
-version = "0.2.0"
+name = "rvf-runtime"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a497b66e9a16b7e057135e1f0e34f80abaecec0a1c537f662d526ca9a9106e79"
+checksum = "0149d87869d0cbe66766f401b65bccb4cd5bd107b2366781f0b7b1db4fd51e59"
+dependencies = [
+ "crc32fast",
+ "rvf-index",
+ "rvf-quant",
+ "rvf-types",
+]
+
+[[package]]
+name = "rvf-types"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05adcbb7dd0f7d323314ad2de13fbfebd43b6403e3a9bcc6fea94d1b873b72c3"
 
 [[package]]
 name = "ryu"

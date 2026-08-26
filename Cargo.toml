@@ -258,7 +258,7 @@ notify = "8"
 # RVF (RuVector Format) -- vector storage
 # rvf-types, rvf-runtime, rvf-wire: upstream crates.io (ruvnet)
 # weftos-rvf-crypto: our fork with ML-DSA-65 dual signing
-rvf-runtime = { version = "0.2", default-features = false, features = ["std"] }
+rvf-runtime = { version = "0.3", default-features = false, features = ["std"] }
 rvf-types = { version = "0.2", default-features = false, features = ["std"] }
 weftos-rvf-crypto = { version = "0.3", default-features = false, features = ["std", "ed25519"] }
 weftos-rvf-wire = { version = "0.2" }
