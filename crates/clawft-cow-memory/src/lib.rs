@@ -54,8 +54,6 @@ mod branchable_memory;
 mod chain_walk;
 mod error;
 mod id_gen;
-#[cfg(target_os = "macos")]
-mod macos_errno_shim;
 mod manifest;
 mod node;
 mod normalize;

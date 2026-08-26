@@ -1404,7 +1404,6 @@ dependencies = [
  "hmac",
  "instant-distance",
  "js-sys",
- "libc",
  "notify",
  "percent-encoding",
  "rand 0.8.7",
@@ -1435,7 +1434,6 @@ dependencies = [
 name = "clawft-cow-memory"
 version = "0.8.0"
 dependencies = [
- "libc",
  "rand 0.8.7",
  "rvf-runtime",
  "rvf-types",
