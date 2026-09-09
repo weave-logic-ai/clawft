@@ -5,8 +5,8 @@
  *   node scripts/metaharness/loop-runner.mjs
  *     → run until goal-check exits 0 (goals met), max 20 gens
  *
- *   node scripts/metaharness/loop-runner.mjs --forever --interval 300
- *     → keep looping forever every 300s (hygiene / maturity)
+ *   node scripts/metaharness/loop-runner.mjs --forever --interval 10
+ *     → keep looping forever every 10s (hygiene / maturity)
  *
  *   node scripts/metaharness/loop-runner.mjs --max 5
  *     → at most 5 full loops then exit
@@ -26,7 +26,7 @@ const forever = process.argv.includes("--forever");
 const maxArg = process.argv.indexOf("--max");
 const maxGens = maxArg >= 0 ? Number(process.argv[maxArg + 1]) || 20 : forever ? Infinity : 20;
 const intArg = process.argv.indexOf("--interval");
-const intervalSec = intArg >= 0 ? Number(process.argv[intArg + 1]) || 120 : forever ? 300 : 5;
+const intervalSec = intArg >= 0 ? Number(process.argv[intArg + 1]) || 120 : forever ? 10 : 5;
 
 function run(label, cmd, args) {
   console.log(`\n── ${label} ──`);

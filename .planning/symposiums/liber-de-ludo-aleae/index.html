@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Count the Circuit — Liber de Ludo Aleae symposium</title>
+  <style>
+    :root { --bg:#08080A; --panel:#16161C; --ink:#E0DEE8; --dim:#AAA8B4; --faint:#706E7A; --accent:#C4A25C; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { min-height:100vh; background:var(--bg); color:var(--ink);
+      font-family:"Iowan Old Style", Palatino, Georgia, serif; padding:6vh 7vw 8vh;
+      background-image: linear-gradient(90deg, var(--accent) 0 3px, transparent 3px); }
+    .ey { font-family:ui-monospace,Menlo,monospace; color:var(--accent); letter-spacing:.16em; font-size:.72rem; text-transform:uppercase; }
+    h1 { font-size:clamp(1.8rem, 4vw, 2.8rem); max-width:16ch; line-height:1.1; margin:.7rem 0 .5rem; }
+    .lede { color:var(--dim); max-width:52ch; line-height:1.45; font-size:1.1rem; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(15rem,1fr)); gap:.85rem; margin-top:2rem; max-width:68rem; }
+    a.card { display:block; background:var(--panel); border:1px solid rgba(255,255,255,.07); border-radius:4px;
+      padding:1rem 1.05rem; color:inherit; text-decoration:none; min-height:9.5rem; }
+    a.card:hover { border-color:var(--accent); }
+    a.card h2 { font-family:ui-monospace,Menlo,monospace; font-size:.72rem; letter-spacing:.1em; color:var(--accent); margin-bottom:.45rem; }
+    a.card p { color:var(--dim); font-size:.95rem; line-height:1.4; }
+    footer { margin-top:3rem; font-family:ui-monospace,Menlo,monospace; font-size:.68rem; color:var(--faint); }
+  </style>
+</head>
+<body>
+  <p class="ey">WeftOS · first Grok symposium · 2026-08-13</p>
+  <h1>Count the circuit before you score</h1>
+  <p class="lede">Two rooms, then one table. Nova read only the book. Vetus read only the walls. Coniunctio attached primitives to named gaps. The keynote is the weave.</p>
+  <div class="grid">
+    <a class="card" href="decks/keynote/index.html"><h2>KEYNOTE · 11 SLIDES</h2><p>Playable tables, remaining-work tree, sidecar graph. Start here for the plenary.</p></a>
+    <a class="card" href="workshops/nova/index.html"><h2>ROOM NOVA</h2><p>Book only. Circuit, aequitas, ROTM refusal, 7:1 remaining work. No WeftOS type names.</p></a>
+    <a class="card" href="workshops/vetus/index.html"><h2>ROOM VETUS</h2><p>Walls only. V1–V31 classed as rhyme, cousin, or false friend. Live MetaHarness throw.</p></a>
+    <a class="card" href="workshops/coniunctio/index.html"><h2>ROOM CONIUNCTIO</h2><p>Landings only on named gaps. Sidecar contract. LDA-001–005. No genesis smash.</p></a>
+    <a class="card" href="demos/circuit-ev.html"><h2>CIRCUIT EV TOY</h2><p>Same die, two books. Fair vs offered. Teaching toy, not a gambling product.</p></a>
+    <a class="card" href="studies/README.md"><h2>FOUR OVERNIGHT STUDIES</h2><p>LLM lab · Oracle hall · Mudflood · EQL sidecar. Same contract, live loops, 2026-08-14.</p></a>
+    <a class="card" href="deliverables/04-existing-spaces.md"><h2>INVENTORY</h2><p>The dedicated existing-spaces table. Thirty-one surfaces, three classes.</p></a>
+  </div>
+  <footer>WEFTOS · LIBER DE LUDO ALEAE · not a gambling product · circuit ≠ circuit-breaker</footer>
+</body>
+</html>

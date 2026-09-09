@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Room Vetus — What WeftOS already scores</title>
+  <style>
+    :root {
+      --bg-app: #08080A;
+      --bg-panel: #0E0E12;
+      --bg-surface: #16161C;
+      --bg-hover: #202028;
+      --bg-active: #2C2C36;
+      --text: #E0DEE8;
+      --text-sec: #AAA8B4;
+      --text-dim: #706E7A;
+      --accent: #C4A25C;
+      --ok: #6EC896;
+      --warn: #DCAF55;
+      --crit: #DC5F5F;
+      --stroke: rgba(255,255,255,0.09);
+      --r: 4px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg-app);
+      color: var(--text);
+      font: 13px/1.45 Georgia, "Iowan Old Style", Palatino, serif;
+    }
+    .deck { min-height: 100vh; display: flex; flex-direction: column; }
+    header.chrome {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 16px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--stroke);
+    }
+    header.chrome .mark { color: var(--accent); letter-spacing: 0.08em; font-size: 11px; }
+    header.chrome a { color: var(--accent); text-decoration: none; }
+    header.chrome .where { color: var(--text-sec); font-size: 11px; }
+    header.chrome kbd {
+      font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--text-dim);
+      border: 1px solid var(--stroke);
+      padding: 2px 6px; border-radius: 3px;
+    }
+    .slide {
+      display: none;
+      flex: 1;
+      padding: 28px 36px 72px;
+      max-width: 1080px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .slide.on { display: block; }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+    }
+    h1 { font-size: 18px; font-weight: 600; margin: 0 0 14px; }
+    h2 { font-size: 18px; font-weight: 600; margin: 0 0 12px; }
+    p, li { color: var(--text); }
+    .lede { color: var(--text-sec); max-width: 62ch; }
+    .muted { color: var(--text-dim); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+    footer.chrome {
+      position: sticky; bottom: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 16px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--stroke);
+    }
+    footer.chrome button {
+      background: var(--bg-surface);
+      color: var(--text);
+      border: 1px solid var(--stroke);
+      border-radius: var(--r);
+      padding: 5px 10px;
+      font: 13px/1 system-ui, sans-serif;
+      cursor: pointer;
+    }
+    footer.chrome button:hover { background: var(--bg-hover); }
+    footer.chrome button:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
+    footer.chrome button[disabled] { color: var(--text-dim); cursor: default; }
+    .dots { display: flex; gap: 6px; }
+    .dots button {
+      width: 8px; height: 8px; padding: 0; border-radius: 50%;
+      background: var(--bg-active); border: 0;
+    }
+    .dots button.on { background: var(--accent); }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    @media (max-width: 800px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .slide { padding: 20px 16px 80px; }
+    }
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--stroke);
+      border-radius: var(--r);
+      padding: 12px 14px;
+    }
+    .card h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+    .pill {
+      display: inline-block;
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 3px;
+      border: 1px solid var(--stroke);
+      color: var(--text-sec);
+      margin-right: 4px;
+    }
+    .pill.rhyme { color: var(--ok); border-color: rgba(110,200,150,0.35); }
+    .pill.cousin { color: var(--warn); border-color: rgba(220,175,85,0.35); }
+    .pill.ff { color: var(--crit); border-color: rgba(220,95,95,0.35); }
+    .mh {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin: 18px 0 8px;
+    }
+    @media (max-width: 800px) { .mh { grid-template-columns: repeat(3, 1fr); } }
+    .die {
+      background: var(--bg-surface);
+      border: 1px solid var(--stroke);
+      border-radius: var(--r);
+      padding: 10px 8px;
+      text-align: center;
+    }
+    .die .face { font-size: 22px; font-weight: 600; color: var(--accent); }
+    .die .name { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+    table.inv {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+    table.inv th {
+      text-align: left;
+      color: var(--text-dim);
+      font-weight: 500;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--stroke);
+    }
+    table.inv td {
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--stroke);
+      vertical-align: top;
+    }
+    table.inv tr.row { cursor: pointer; }
+    table.inv tr.row:hover td { background: var(--bg-hover); }
+    table.inv tr.row.open td { background: var(--bg-active); }
+    table.inv tr.detail td {
+      background: var(--bg-panel);
+      color: var(--text-sec);
+      font-size: 12px;
+      padding: 10px 12px 14px 28px;
+    }
+    table.inv tr.detail { display: none; }
+    table.inv tr.detail.open { display: table-row; }
+    .who { list-style: none; padding: 0; margin: 0; }
+    .who li { padding: 6px 0; border-bottom: 1px solid var(--stroke); }
+    .who li:last-child { border: 0; }
+    .eq {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 10px;
+      align-items: stretch;
+      margin-top: 12px;
+    }
+    .eq .vs {
+      align-self: center;
+      color: var(--crit);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+    }
+    .cast { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .cast .card { flex: 1 1 240px; }
+    ul.tight { margin: 6px 0 0; padding-left: 18px; }
+    ul.tight li { margin: 3px 0; }
+    .hand { margin: 0; padding-left: 18px; }
+    .hand li { margin: 6px 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .note { color: var(--text-sec); font-size: 12px; margin-top: 10px; }
+    .term { border-bottom: 1px dotted var(--accent); cursor: help; background: rgba(196,162,92,.08); }
+    #tip { position: fixed; z-index: 80; max-width: min(26rem, 86vw); background: #16161C; color: #E0DEE8; border: 1px solid #C4A25C; border-radius: 4px; padding: .5rem .65rem; font-size: 13px; line-height: 1.35; opacity: 0; pointer-events: none; }
+    #tip.on { opacity: 1; }
+    .so { margin-top: 10px; color: var(--text); }
+    .so::before { content: "So what. "; color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; }
+    .support { color: var(--text-dim); font-size: 12px; margin-top: 8px; }
+    .support strong { color: var(--accent); }
+    .glossbox {
+      position: fixed; top: 0; right: 0; width: min(26rem, 92vw); height: 100%;
+      background: var(--bg-panel); border-left: 1px solid var(--accent);
+      padding: 16px; overflow: auto; transform: translateX(100%); transition: transform .2s; z-index: 30;
+    }
+    body.gloss-open .glossbox { transform: none; }
+    .glossbox dt { color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: 12px; margin-top: 10px; }
+    .glossbox dd { margin: 2px 0 0; color: var(--text-sec); font-size: 12.5px; }
+  </style>
+</head>
+<body>
+  <div class="deck">
+    <header class="chrome">
+      <div class="mark"><a href="../../index.html">LOBBY</a> · ROOM VETUS</div>
+      <div class="where">Phase I · inventory only · not the keynote</div>
+      <div><kbd>←</kbd> <kbd>→</kbd> <button type="button" id="glossBtn" style="font:11px/1 ui-monospace,Menlo,monospace;color:var(--accent);background:transparent;border:1px solid var(--accent);border-radius:3px;cursor:pointer;">Glossary</button></div>
+    </header>
+    <div id="tip" role="tooltip"></div>
+    <aside class="glossbox" id="gloss">
+      <h2 style="margin:0 0 8px;font-size:16px;">Glossary</h2>
+      <dl>
+        <dt>circuit / circuitus</dt><dd>Sample space — all equally possible outcomes. Not a stop-loss breaker.</dd>
+        <dt>rhyme / cousin / false friend</dt><dd>Same question / same family / same word different job.</dd>
+        <dt>EffectVector</dt><dd>Five impact numbers: risk, fairness, privacy, novelty, security.</dd>
+        <dt>MetaHarness</dt><dd>Optional harness-readiness score (five faces + a cost tag).</dd>
+        <dt>n</dt><dd>How many independent casts you have observed.</dd>
+        <dt>genesis</dt><dd>Locked founding rules. Do not smash a sixth face into them this cycle.</dd>
+        <dt>coherence</dt><dd>Four different formulas share this name in-tree. Always say which.</dd>
+        <dt>sidecar</dt><dd>Extra fields next to a score. Not a rewrite of the locked five-die.</dd>
+        <dt>C9</dt><dd>Deferred WeftOS decision: make EffectVector N-dimensional. Not this cycle.</dd>
+        <dt>LDA-ADR</dt><dd>Local symposium decision. Not a central architecture record until graduated.</dd>
+        <dt>Coniunctio</dt><dd>The combining room, next door. Not this workshop.</dd>
+        <dt>spectral lean</dt><dd>ECC graph health: a shape that keeps tilting the same way (Fiedler / λ₂).</dd>
+        <dt>ADR-034</dt><dd>The decision record that locked the live five faces of EffectVector.</dd>
+      </dl>
+    </aside>
+
+    <!-- 1 -->
+    <section class="slide on" data-i="0">
+      <p class="eyebrow">Workshop · 8 boards</p>
+      <h1>What WeftOS already scores</h1>
+      <p class="lede">Room Vetus sat with the dice already on the table. We classified <span class="term" title="Same question Cardano asked">rhymes</span>. We did not invent Cardano. We did not write the combining contract.</p>
+      <p class="so">This workshop is the inventory. Combining happens next door in Coniunctio.</p>
+      <div class="mh" aria-label="MetaHarness live score this session">
+        <div class="die"><div class="face">75</div><div class="name">harnessFit</div></div>
+        <div class="die"><div class="face">100</div><div class="name">compileConfidence</div></div>
+        <div class="die"><div class="face">65</div><div class="name">taskCoverage</div></div>
+        <div class="die"><div class="face">90</div><div class="name">toolSafety</div></div>
+        <div class="die"><div class="face" style="color:var(--crit)">53</div><div class="name">memoryUsefulness</div></div>
+        <div class="die"><div class="face">.024</div><div class="name">estCostPerRunUsd</div></div>
+      </div>
+      <p class="note">Live <span class="term" title="Optional harness-readiness scorer">MetaHarness</span> cast, this session. Five named faces + a price tag (dollars, not a sixth die). No <span class="mono">n</span> (trial count), no interval, no favorable set. Prior throw 2026-07-31: 75 / 65 / 51 on the overlapping three.</p>
+      <p class="support"><strong>Try.</strong> Read the red memory face. <strong>See.</strong> 53 with no error bar. <strong>Why.</strong> A readiness number without a circuit is one cast.</p>
+    </section>
+
+    <!-- 2 -->
+    <section class="slide" data-i="1">
+      <p class="eyebrow">Who sat</p>
+      <h2>Four voices, one rule</h2>
+      <div class="grid-2">
+        <ul class="who">
+          <li><strong>governance-counsel</strong> — vectors, gates, the drifted briefing.</li>
+          <li><strong>ecc-analyst</strong> — graph-health lean (same tilt every time), and the four-way <em>coherence</em> homonym.</li>
+          <li><strong>defi-networker</strong> — bond, slash, economic ruin without odds.</li>
+          <li><strong>scoring architect</strong> — every numeric surface, classed not merged.</li>
+        </ul>
+        <div class="card">
+          <h3>Phase I rule</h3>
+          <p>Nova does not retrofit WeftOS. Vetus does not invent Cardano. They meet only in Coniunctio.</p>
+          <p class="muted">Honesty: none of these files cite the book. Influence is structural. Class = rhyme / cousin / false friend.</p>
+        </div>
+      </div>
+      <p class="so">These four seats exist so Coniunctio cannot claim “nobody looked at the walls.”</p>
+    </section>
+
+    <!-- 3 -->
+    <section class="slide" data-i="2">
+      <p class="eyebrow">Inventory · click a row</p>
+      <h2>Thirty-one surfaces, three classes</h2>
+      <p class="lede">Seed V1–V18 kept. V19–V31 added after reading the files. Expand any row.</p>
+      <p class="so">Classification is not a merge. A rhyme is still missing a circuit.</p>
+      <p class="support"><strong>Try.</strong> Open V1, V6, V17. <strong>See.</strong> Rhyme vs false friend vs marked deck. <strong>Why.</strong> This table is what Coniunctio is allowed to land on — nothing else.</p>
+      <div style="max-height: 52vh; overflow: auto; border: 1px solid var(--stroke); border-radius: var(--r); margin-top: 10px;">
+        <table class="inv" id="inv">
+          <thead>
+            <tr>
+              <th>#</th><th>Surface</th><th>Class</th><th>Symbol</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="slide" data-i="3">
+      <p class="eyebrow">Homonym</p>
+      <h2>Circuit vs circuit-breaker</h2>
+      <p class="lede">WeftOS already spent the word <strong>circuit</strong> on stop-loss. Cardano’s <em>circuitus</em> is sample space. Keep both words. Never collapse them.</p>
+      <div class="eq">
+        <div class="card">
+          <h3>In-tree · breaker</h3>
+          <ul class="tight">
+            <li><span class="mono">BudgetUsage.circuit_open</span> — spend / tokens / iterations (WEFT-322)</li>
+            <li><span class="mono">circuit_breaker_no_op_limit</span> — abort after N no-ops (default 3)</li>
+            <li><span class="mono">TerminationReason::CircuitBreaker</span></li>
+            <li>routing.md Level-2 “CircuitBreaker” — <strong>stub</strong>, not shipped</li>
+          </ul>
+        </div>
+        <div class="vs">≠</div>
+        <div class="card">
+          <h3>In-book · circuitus</h3>
+          <ul class="tight">
+            <li>Enumerated outcomes of a score</li>
+            <li>Favorable / total</li>
+            <li>A named sample space, or an honest “incomplete”</li>
+            <li>Not a cap. Not a trip. Not a rename of ruin-stop</li>
+          </ul>
+        </div>
+      </div>
+      <p class="so">Keep both words. A perfect stop-loss can still sit on a crooked table.</p>
+      <p class="note"><span class="pill">stake</span> is fine in both rooms. <span class="pill ff">fairness</span> is not already equality-of-conditions.</p>
+    </section>
+
+    <!-- 5 -->
+    <section class="slide" data-i="4">
+      <p class="eyebrow">Three already-honest scores</p>
+      <h2>Casts you can recount — still no circuit</h2>
+      <div class="cast">
+        <div class="card">
+          <h3>1. MetaHarness 5-die</h3>
+          <p class="mono">75 / 100 / 65 / 90 / 53</p>
+          <p>Faces named. Favorable set not. <span class="mono">memoryUsefulness 53</span> has no interval. Receipts are the nearest <span class="mono">n</span> — optional, off the <span class="mono">weft</span> path.</p>
+        </div>
+        <div class="card">
+          <h3>2. EffectVector L2</h3>
+          <p class="mono">√(r²+f²+p²+n²+s²) ≤ √5 ≈ 2.236</p>
+          <p>ADR-034 bar <span class="mono">0.7</span>. <span class="mono">agent_spawn</span> / binding-thread tests use <span class="mono">0.8</span>. Unknown tool = zero vector. <span class="mono">args</span> ignored. Unweighted.</p>
+        </div>
+        <div class="card">
+          <h3>3. FitnessScorer</h3>
+          <p class="mono">0.4 / 0.2 / 0.2 / 0.2 − 0.2 refusal</p>
+          <p>Ticket WEFT-54: <em>not</em> a safety control. English substrings. Two no-op scorers (always-constant dummies): pipeline always <strong>1.0</strong>, RVF layer always <strong>0.5</strong>.</p>
+        </div>
+      </div>
+      <p class="so">These three are the closest WeftOS has to a recountable cast. None of them name a sample space. That is the gap Coniunctio may land on.</p>
+    </section>
+
+    <!-- 6 -->
+    <section class="slide" data-i="5">
+      <p class="eyebrow">Marked deck</p>
+      <h2>Governance-counsel EffectVector drift</h2>
+      <p class="lede">Unequal conditions inside our own briefing. Coniunctio may use this; Vetus does not “fix” it here.</p>
+      <p class="so">Fix the briefing (one five-die) before we lecture anyone else about aequitas.</p>
+      <div class="eq">
+        <div class="card">
+          <h3>Agent file · old 5D</h3>
+          <p class="mono">agents/weftos/governance-counsel.md</p>
+          <p class="mono">cpu · memory · network · storage · trust_delta</p>
+          <p class="muted">CLI example still sends <span class="mono">{"cpu":0.8,"memory":0.6,"network":0.3}</span></p>
+        </div>
+        <div class="vs">≠</div>
+        <div class="card">
+          <h3>Live structs · ADR-034</h3>
+          <p class="mono">effects.rs · governance.rs</p>
+          <p class="mono">risk · fairness · privacy · novelty · security</p>
+          <p class="muted">Same type name. Different faces. A marked deck we already host.</p>
+        </div>
+      </div>
+      <p class="note">Sibling inequality: magnitude bar <span class="mono">0.7</span> (ADR / engine tests) vs <span class="mono">0.8</span> (spawn D6, binding-thread).</p>
+    </section>
+
+    <!-- 7 -->
+    <section class="slide" data-i="6">
+      <p class="eyebrow">Do not collapse</p>
+      <h2>Words already spent twice</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>coherence — four formulas</h3>
+          <ul class="tight">
+            <li>Fitness readability heuristic</li>
+            <li>ECC graph health (λ₂ / Fiedler vector — “how one-piece is the graph?”)</li>
+            <li>assess CLI: doc/code × 100</li>
+            <li>forensic: density × avg confidence</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>twins on the same table</h3>
+          <ul class="tight">
+            <li><span class="mono">GateDecision</span> ×2 (core token String / kernel bytes) plus 4-way <span class="mono">GovernanceDecision</span></li>
+            <li><span class="mono">Trajectory</span> (pipeline) vs <span class="mono">TrajectoryRecord</span> (governance FIFO)</li>
+            <li>Two breakers named circuit, plus a stub</li>
+            <li>A learned “uncertainty” head does <em>not</em> close the K2 symposium gap (no intervals on EffectVector)</li>
+          </ul>
+        </div>
+      </div>
+      <p class="so">Same English word, four jobs. Always say which formula. Do not inventory a stub as live.</p>
+      <p class="note">The planned 7-factor router scorer is a <strong>stub</strong> (<span class="mono">routing.md</span> §10). Inventorying it as shipped would be a marked card.</p>
+    </section>
+
+    <!-- 8 -->
+    <section class="slide" data-i="7">
+      <p class="eyebrow">Handoff</p>
+      <h2>What Vetus hands Coniunctio</h2>
+      <ul class="hand">
+        <li>Classed table <strong>V1–V31</strong> in <span class="mono">deliverables/04-existing-spaces.md</span>.</li>
+        <li>Circuit / circuit-breaker homonym, including the unshipped Level-2 stub.</li>
+        <li>Four-way <em>coherence</em> and the two-Noop / two-gate / two-trajectory twins.</li>
+        <li>Three live scores, this MH cast included.</li>
+        <li>Counsel 5D drift + 0.7 / 0.8 bar as marked-deck examples.</li>
+        <li><strong>Do not smash a new 5D into genesis</strong> (locked founding rules). Sidecar (extra fields beside the score) first. C9 (N-dimensional EffectVector) stays deferred.</li>
+      </ul>
+      <p class="so">Coniunctio may land only on these named gaps. Vetus wrote no contract.</p>
+      <p class="note">Explicit non-delivery: no combining contract, no local-ADR text, no Cardano arithmetic. Nova does not edit the inventory.</p>
+    </section>
+
+    <footer class="chrome">
+      <button type="button" id="prev" aria-label="Previous board">← Prev</button>
+      <div class="dots" id="dots" aria-label="Board index"></div>
+      <div class="muted"><span id="pos">1</span> / 8</div>
+      <button type="button" id="next" aria-label="Next board">Next →</button>
+    </footer>
+  </div>
+
+  <script>
+    const SURFACES = [
+      { id:"V1", name:"EffectVector", cls:"rhyme", sym:"EffectVector::magnitude",
+        body:"5D risk / fairness / privacy / novelty / security. L2, unweighted, genesis-locked. fairness is a 0–1 vibe, not equality-of-conditions. Unknown tool = zero vector. args ignored. No circuit, no interval." },
+      { id:"V2", name:"Governance gate", cls:"rhyme", sym:"GovernanceDecision + GateDecision×2",
+        body:"Four-way Permit / PermitWithWarning / EscalateToHuman / Deny. Both GateDecision enums are three-way Permit / Defer / Deny. Threshold 0.7 (ADR) vs 0.8 (spawn/binding tests). House rule, no sample space." },
+      { id:"V3", name:"SOUL minimax + EV", cls:"rhyme", sym:"docs/skills/clawft/SOUL.md",
+        body:"Commandment: maximize expected value, minimize worst-case, sample the tree when deep. No arithmetic, no bankroll, no circuit." },
+      { id:"V4", name:"Fitness / QualityScorer", cls:"cousin", sym:"FitnessScorer · BasicScorer · NoopScorer×2",
+        body:"GEPA 0.4/0.2/0.2/0.2, −0.2 English refusal (WEFT-54: not a safety control). Pipeline Noop always 1.0; RVF Noop always 0.5. Length heuristics are ROTM’s cousin." },
+      { id:"V5", name:"NodeScoring 6D", cls:"cousin", sym:"NodeScoring::blend · to_hash_bytes",
+        body:"trust / performance / difficulty / reward / reliability / velocity. EMA + Merkle 24-byte leaf. Default 0.5 is a blank die. EMA ≠ calibration to a declared p." },
+      { id:"V6", name:"Cost / no-op breakers", cls:"ff", sym:"ConversationBudget · circuit_breaker_no_op_limit",
+        body:"False friend on the word circuit. Two shipped trips (spend/tokens/iters; N no-ops) plus a routing Level-2 stub. Ruin-shaped stop-loss without P(bust)." },
+      { id:"V7", name:"MetaHarness + flywheel", cls:"rhyme", sym:"metaharness_score · ADR-096",
+        body:"This session 75/100/65/90/53 @ $0.024. Receipts ≈ n casts. No auto-promote. Snapshot, not EV. Optional; off the weft runtime path." },
+      { id:"V8", name:"Router / complexity", cls:"cousin", sym:"KeywordClassifier · TaskComplexityAnalyzer",
+        body:"Live heuristics only. ruvllm 7-factor is unimplemented (routing.md §10). Savings language, no house-edge index." },
+      { id:"V9", name:"Assessment service", cls:"cousin", sym:"ADR-023 AssessmentService",
+        body:"Walks trees, analyzers, reports. Findings are not odds. CLI coherence_score is a documentation ratio (see V23)." },
+      { id:"V10", name:"ECC spectral health", cls:"cousin", sym:"CoherencePrediction.lambda_2",
+        body:"λ₂, Fiedler, HNSW, two-tier DEMOCRITUS. Detects structure, not a declared p. Does not own the word coherence." },
+      { id:"V11", name:"DeFi bond / slash", cls:"rhyme", sym:"TrustLevel · SlashCondition",
+        body:"Unknown → Paired → Trusted → Bonded. Economic stake, not epistemic odds. No circuit on the slashing event." },
+      { id:"V12", name:"Trajectory / GEPA", cls:"cousin", sym:"TrajectoryLearner · ADR-017",
+        body:"Learn from many casts. Fitness is not EV; can reward lucky phrasing. Second ‘trajectory’ lives in governance (V29)." },
+      { id:"V13", name:"Auto-delegation", cls:"cousin", sym:"DelegationEngine::complexity_estimate",
+        body:"Pre-LLM short-circuit. 30/20/50 length/qmark/keyword. Remaining-work classifier, not a stake split. Documented FPs." },
+      { id:"V14", name:"ExoChain hash", cls:"cousin", sym:"NodeScoring::to_hash_bytes",
+        body:"Scores in the Merkle leaf. Integrity ≠ fairness." },
+      { id:"V15", name:"K2 landscape §5", cls:"rhyme", sym:"04-industry-landscape.md §5",
+        body:"Explicit gap: no uncertainty quantification on EffectVector. Opportunity list (10D, velocity, cascading) still unbuilt." },
+      { id:"V16", name:"C9 N-dim EffectVector", cls:"cousin", sym:"ADR-034 deferred",
+        body:"5D frozen pending governance.root.supersede. Do not smash a sidecar into genesis." },
+      { id:"V17", name:"governance-counsel", cls:"rhyme", sym:"agents/weftos/governance-counsel.md",
+        body:"The croupier. Briefing still ships cpu/memory/network/storage/trust_delta. Marked deck. See board 6." },
+      { id:"V18", name:"Kolbe / conative", cls:"cousin", sym:"kolbe-conative-integration.md",
+        body:"Who should play, and when. Decision style, not probability. Must not be confused with odds." },
+      { id:"V19", name:"GovernanceScorerModel", cls:"cousin", sym:"eml_kernel::GovernanceScorerModel",
+        body:"5-in / 1-out EML. Untrained path = L2 bit-identical. Learned scalar is not a circuit." },
+      { id:"V20", name:"GateEffectKind", cls:"cousin", sym:"EffectVector::for_gate",
+        body:"WEFT-506 auditable constants for auth/config/a2a/cron. Same 5D, still no sample space." },
+      { id:"V21", name:"TaskComplexityAnalyzer", cls:"cousin", sym:"complexity::TaskComplexityAnalyzer::analyze",
+        body:"Five surface heuristics (length, sentences, tech keywords, multi-step, code fence). English-only. Not difficulty of a circuit." },
+      { id:"V22", name:"KeywordClassifier", cls:"cousin", sym:"pipeline::classifier::KeywordClassifier",
+        body:"First-match task type. Complexity = hits/words clamped [0.1, 0.9]. Level-1 7-factor remains a TODO." },
+      { id:"V23", name:"Assess coherence %", cls:"ff", sym:"assess_cmd.rs coherence_score",
+        body:"doc_files / (rust + ts) × 100. False friend of ECC coherence." },
+      { id:"V24", name:"Forensic coherence", cls:"ff", sym:"forensic::coherence_score",
+        body:"density × avg edge confidence. Third formula named coherence." },
+      { id:"V25", name:"EML uncertainty head", cls:"cousin", sym:"CoherencePrediction.uncertainty",
+        body:"Interval-shaped model head. Untrained fallback λ₂ × 0.5. Does not close K2 §5." },
+      { id:"V26", name:"QualityScore vs weights", cls:"cousin", sym:"QualityScore · FitnessScorerWeights",
+        body:"Four internals thrown; three fields published. Efficiency and tool_accuracy are pocketed." },
+      { id:"V27", name:"Fitness score_coherence", cls:"ff", sym:"FitnessScorer::score_coherence",
+        body:"Readability: wall-of-text, markdown bonus, repetition. Not λ₂, not doc/code, not forensic density." },
+      { id:"V28", name:"Two GateDecision types", cls:"ff", sym:"agent::gate vs kernel::gate",
+        body:"Same three variants, different token/receipt shapes. Plus four-way GovernanceDecision. Three ‘the gate’s." },
+      { id:"V29", name:"Two Trajectory types", cls:"cousin", sym:"traits::Trajectory · TrajectoryRecord",
+        body:"Pipeline: request/routing/response/quality. Governance: action/outcome FIFO. Neither is EV over a circuit." },
+      { id:"V30", name:"Binding-thread EV", cls:"rhyme", sym:"effect_for_binding_thread",
+        body:"Mismatch → {security:1.0, risk:0.9}. Tests bar > 0.8, not ADR-034’s 0.7. Still the vibe-die." },
+      { id:"V31", name:"ruvllm 7-factor (stub)", cls:"cousin", sym:"routing.md §10 Adaptive Classifier",
+        body:"Spec only. Not in tree as a scorer. Inventorying it as live would be a marked card." }
+    ];
+
+    const tb = document.querySelector("#inv tbody");
+    SURFACES.forEach((s, i) => {
+      const tr = document.createElement("tr");
+      tr.className = "row";
+      tr.tabIndex = 0;
+      tr.dataset.k = String(i);
+      tr.innerHTML = `<td class="mono">${s.id}</td><td>${s.name}</td><td><span class="pill ${s.cls}">${s.cls === "ff" ? "false friend" : s.cls}</span></td><td class="mono muted">${s.sym}</td>`;
+      const det = document.createElement("tr");
+      det.className = "detail";
+      det.innerHTML = `<td colspan="4">${s.body}</td>`;
+      const toggle = () => {
+        const open = tr.classList.toggle("open");
+        det.classList.toggle("open", open);
+      };
+      tr.addEventListener("click", toggle);
+      tr.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+      tb.appendChild(tr);
+      tb.appendChild(det);
+    });
+
+    const slides = [...document.querySelectorAll(".slide")];
+    const dots = document.getElementById("dots");
+    const pos = document.getElementById("pos");
+    const prev = document.getElementById("prev");
+    const next = document.getElementById("next");
+    let i = 0;
+    slides.forEach((_, n) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("aria-label", "Board " + (n + 1));
+      b.addEventListener("click", () => go(n));
+      dots.appendChild(b);
+    });
+    function go(n) {
+      i = Math.max(0, Math.min(slides.length - 1, n));
+      slides.forEach((s, k) => s.classList.toggle("on", k === i));
+      [...dots.children].forEach((d, k) => d.classList.toggle("on", k === i));
+      pos.textContent = String(i + 1);
+      prev.disabled = i === 0;
+      next.disabled = i === slides.length - 1;
+    }
+    prev.addEventListener("click", () => go(i - 1));
+    next.addEventListener("click", () => go(i + 1));
+    const tip = document.getElementById("tip");
+    const showTip = (el) => {
+      const t = el.getAttribute("data-tip") || el.getAttribute("title");
+      if (!t) return;
+      el.removeAttribute("title");
+      el.setAttribute("data-tip", t);
+      tip.textContent = t;
+      tip.classList.add("on");
+      const r = el.getBoundingClientRect();
+      tip.style.left = Math.min(r.left, innerWidth - 280) + "px";
+      tip.style.top = (r.bottom + 8) + "px";
+    };
+    document.addEventListener("mouseover", (e) => { const el = e.target.closest(".term"); if (el) showTip(el); });
+    document.addEventListener("mouseout", (e) => { if (e.target.closest(".term") && !e.relatedTarget?.closest?.(".term")) tip.classList.remove("on"); });
+    document.addEventListener("click", (e) => { const el = e.target.closest(".term"); if (el) { showTip(el); return; } if (!e.target.closest("#tip")) tip.classList.remove("on"); });
+    document.getElementById("glossBtn").onclick = () => document.body.classList.toggle("gloss-open");
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight" || e.key === "PageDown") go(i + 1);
+      if (e.key === "ArrowLeft" || e.key === "PageUp") go(i - 1);
+      if (e.key === "Home") go(0);
+      if (e.key === "End") go(slides.length - 1);
+      if (e.key === "g" || e.key === "G") document.body.classList.toggle("gloss-open");
+      if (e.key === "Escape") document.body.classList.remove("gloss-open");
+    });
+    go(0);
+  </script>
+</body>
+</html>

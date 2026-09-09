@@ -26,7 +26,7 @@ SEE → WIRE → BUILD → UPSTREAM
 ```bash
 npm run metaharness:loop           # one full generation + goal-check
 npm run metaharness:loop:until    # keep going until goals met (max 20)
-npm run metaharness:loop:forever  # hygiene loop every 5 min
+npm run metaharness:loop:forever  # hygiene loop every 10s
 ```
 
 **Yes — looping is the point.** Stop only when **goals** hold (not when bored):

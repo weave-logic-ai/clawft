@@ -27,6 +27,12 @@ crates/clawft-wasm/www/pkg/
 browser-test-duration.json
 bench-results.json
 
+# process-compose runtime (yaml + compose/*.yaml stay tracked)
+.grok/compose/logs/
+.grok/compose/*.jsonl
+.grok/compose/process-compose.log
+.grok/compose/weaver-note.json
+
 # WeftOS runtime state
 weave.toml
 .weftos/

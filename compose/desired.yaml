@@ -1,0 +1,25 @@
+# Kernel is the shared WeftOS daemon other projects talk to (UDS).
+version: 1
+pc_http: 18090
+pc_mcp: 18091
+processes:
+  weft-kernel:
+    desired: up
+    adopt: true
+    kill_foreign: false
+    match: weaver kernel start --foreground
+  ruflo-daemon:
+    desired: up
+    adopt: true
+    kill_foreign: false
+    match: --workspace /Users/mathewbeane/weftos
+  weft-docs:
+    desired: down
+    port: 4000
+    adopt: true
+    kill_foreign: false
+  weft-serve:
+    desired: down
+    port: 8081
+    adopt: true
+    kill_foreign: false

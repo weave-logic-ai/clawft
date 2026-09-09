@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Room Nova — Doctrine from the book</title>
+  <style>
+    :root { --bg:#08080A; --panel:#16161C; --ink:#E0DEE8; --dim:#AAA8B4; --faint:#706E7A; --accent:#C4A25C; --ok:#6EC896; --crit:#DC5F5F; --warn:#DCAF55; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    html,body { height:100%; background:var(--bg); color:var(--ink); font-family:Georgia,serif; overflow:hidden; }
+    .slide { display:none; height:100%; padding:5vh 6vw 8vh; flex-direction:column; border-left:3px solid var(--accent); }
+    .slide.on { display:flex; }
+    .ey { font-family:ui-monospace,Menlo,monospace; color:var(--accent); letter-spacing:.14em; font-size:.72rem; text-transform:uppercase; }
+    h1 { font-size:1.85rem; max-width:22ch; margin:.55rem 0 .4rem; }
+    p { color:var(--dim); max-width:58ch; line-height:1.45; }
+    .mono { font-family:ui-monospace,Menlo,monospace; }
+    .g { display:grid; grid-template-columns:1fr 1fr; gap:.8rem; margin-top:1rem; }
+    .c { background:var(--panel); padding:.9rem; border-radius:4px; cursor:pointer; transition:transform .2s ease, box-shadow .2s ease, opacity .2s ease; }
+    .g.exploring .c:not(.open) { opacity:.4; transform:scale(.96) translateY(8px); }
+    .c.open { transform:translateY(-6px) scale(1.02); box-shadow:0 18px 40px rgba(0,0,0,.45); border:1px solid var(--accent); }
+    .c .more { max-height:0; overflow:hidden; opacity:0; transition:max-height .25s ease, opacity .2s ease, margin .2s ease; }
+    .c.open .more { max-height:8rem; opacity:1; margin-top:.55rem; }
+    .c h3 { font-family:ui-monospace,Menlo,monospace; font-size:.72rem; color:var(--accent); letter-spacing:.08em; margin-bottom:.35rem; }
+    .bar { position:fixed; bottom:1.2rem; left:6vw; right:6vw; font-family:ui-monospace,Menlo,monospace; font-size:.68rem; color:var(--faint); display:flex; }
+    .bar b { margin-left:auto; color:var(--accent); font-weight:500; }
+    .term { border-bottom:1px dotted var(--accent); cursor:help; background:rgba(196,162,92,.08); }
+    #tip { position:fixed; z-index:80; max-width:min(26rem,86vw); background:#16161C; color:#E0DEE8; border:1px solid #C4A25C; border-radius:4px; padding:.5rem .65rem; font-size:.86rem; line-height:1.35; opacity:0; pointer-events:none; }
+    #tip.on { opacity:1; }
+    .so { margin-top:.55rem; color:var(--ink); }
+    .so::before { content:"So what. "; color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:.7rem; letter-spacing:.08em; }
+    .support { margin-top:.5rem; font-size:.82rem; color:var(--faint); }
+    .support strong { color:var(--accent); }
+    label { display:block; color:var(--faint); font-size:.78rem; margin:.5rem 0 .2rem; }
+    input[type=number] { background:#0E0E12; color:var(--ink); border:1px solid rgba(255,255,255,.14); padding:.3rem .4rem; width:5rem; }
+    .glossbox { position:fixed; top:0; right:0; width:min(26rem,92vw); height:100%; background:#0E0E12; border-left:1px solid var(--accent); padding:1.1rem; overflow:auto; transform:translateX(100%); transition:transform .2s; z-index:20; }
+    body.gloss-open .glossbox { transform:none; }
+    .glossbox dt { color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:.78rem; margin-top:.7rem; }
+    .glossbox dd { color:var(--dim); font-size:.86rem; margin:0; }
+    .help { position:fixed; top:.8rem; right:1rem; font-family:ui-monospace,Menlo,monospace; font-size:.62rem; color:var(--faint); }
+  </style>
+</head>
+<body>
+  <div class="help">← → · <a href="../../index.html" style="color:var(--accent);">Lobby</a> · <button type="button" id="glossBtn" style="font:inherit;color:var(--accent);background:transparent;border:1px solid var(--accent);border-radius:3px;cursor:pointer;">Glossary</button> · hover/click dotted words</div>
+  <div id="tip" role="tooltip"></div>
+  <aside class="glossbox">
+    <h2>Glossary</h2>
+    <dl>
+      <dt>circuitus</dt><dd>Sample space — every equally possible outcome.</dd>
+      <dt>aequitas</dt><dd>Equal conditions of die, table, light, stakes, knowledge.</dd>
+      <dt>r : s</dt><dd>Favorable ways to unfavorable ways. Fair price matches this.</dd>
+      <dt>EV</dt><dd>Expected value. Fair game ⇒ 0.</dd>
+      <dt>ROTM</dt><dd>Reasoning On The Mean: treating n×p as a probability.</dd>
+      <dt>Prince</dt><dd>Cardano’s leftover name for luck as a person. We fire it; we keep the lean detector.</dd>
+      <dt>scientia / fortuna</dt><dd>Knowledge (a method, over many casts) vs luck (one favorable throw).</dd>
+      <dt>fraud catalog</dt><dd>Cardano’s list of cheats — used here only as a detector, never as a method.</dd>
+      <dt>7:1</dt><dd>Pascal’s split of a race-to-6 stopped at 5–3: B wins only as BBB (1/8).</dd>
+    </dl>
+  </aside>
+
+  <section class="slide on"><div class="ey">Nova · 1 · book only</div>
+    <h1>Doctrine from the book</h1>
+    <p>This room does not visit WeftOS. We extract a usable kit from Cardano and leave his arithmetic crimes on the table.</p>
+    <p class="so">If a word is not in the glossary (G), it is not yet a primitive.</p>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 2</div>
+    <h1>Equal conditions first</h1>
+    <p><abbr class="term" title="Equal conditions">Aequitas</abbr> is the principle: opponent, bystanders, money, situation, box, die. Probability is how you <em>check</em> that the table is even — not a carnival trick.</p>
+    <p class="so">A bake-off that hands one model the answers is a marked deck, whatever the score says.</p>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 3 · chapter 14</div>
+    <h1>Count the whole circuit</h1>
+    <p>The <abbr class="term" title="Sample space">circuit</abbr> is every face. Favorable ways are <span class="mono">r</span>. The rest are <span class="mono">s</span>. Lay the wager in that proportion.</p>
+    <div class="c" style="margin-top:1rem;max-width:28rem;">
+      <h3>Tiny r : s calculator</h3>
+      <label>Favorable r <input id="r" type="number" min="0" value="27"/></label>
+      <label>Unfavorable s <input id="s" type="number" min="0" value="25"/></label>
+      <p id="out" class="support"></p>
+      <p class="support"><strong>Try.</strong> Default is 27:25 (sums 10 vs 9 on three dice). <strong>See.</strong> p, fair odds, even-money EV, and p². <strong>Why.</strong> p² is how you repeat a trial. You do not square the odds.</p>
+    </div>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 4</div>
+    <h1>Refuse ROTM</h1>
+    <p><abbr class="term" title="Reasoning On The Mean">ROTM</abbr> says 3 × 1/6 = ½. The circuit says 1 − (5/6)³ ≈ 0.421. Four throws to cross a half.</p>
+    <div class="g">
+      <div class="c"><h3>False claim</h3><p>Add one-sixth per try until you hit certainty.</p><div class="more">That is ROTM. At n=6 it claims certainty. A six can still fail forever.</div></div>
+      <div class="c"><h3>Circuit</h3><p>Independence: chance of missing every time is (5/6)^n. Subtract from 1.</p><div class="more">At n=3 that is 1 − 125/216 ≈ 0.421. Four throws to cross a half.</div></div>
+    </div>
+    <p class="so">Never treat the count you expect (n×p) as the chance it happens (P).</p>
+    <p style="margin-top:.7rem;"><button type="button" id="n4roll" style="font:inherit;background:#0E0E12;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:.3rem .6rem;cursor:pointer;">Play 8 hands of 3</button> <span class="mono" id="n4out"></span></p>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 5</div>
+    <h1>Lean is not luck</h1>
+    <p>If outcomes systematically lean one way, there is a reason — bias, fraud, or a misspecified circuit. Keep that detector. Fire the <abbr class="term" title="Luck imagined as a person who prefers you">Prince</abbr>.</p>
+    <p class="so">A score that always “just equals what it should be” is as suspicious as one that always leans.</p>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 6</div>
+    <h1>Pay remaining work</h1>
+    <p>Race to 6, stopped at 5–3. B still needs three wins in a row. The eight equally likely last-three sequences: only BBB gives B the match (1/8). The other seven give A. Pot <strong>7:1</strong>.</p>
+    <p class="so">An interrupted job should not credit tokens already burned.</p>
+    <p style="margin-top:.6rem;display:flex;flex-wrap:wrap;gap:.3rem;" id="n6paths"></p>
+    <p><button type="button" id="n6play" style="font:inherit;background:#0E0E12;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:.3rem .6rem;cursor:pointer;">Draw a leftover path</button> <span class="mono" id="n6out">A : B = 0 : 0</span></p>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 7</div>
+    <h1>Small stakes, named ruin</h1>
+    <p>Equal money at risk is not equal chance of going broke. A rich purse and a thin purse on the same stake are not an even table. <abbr class="term" title="Chance the purse empties">Ruin</abbr> is vice when the bet is the treasury.</p>
+    <p class="so">A stop-loss (leave the table) is not a sample space (count the faces).</p>
+  </section>
+
+  <section class="slide"><div class="ey">Nova · 8 · handoff</div>
+    <h1>What Coniunctio may use</h1>
+    <div class="g">
+      <div class="c"><h3>May leave</h3><p>The frozen kit Coniunctio may land.</p><div class="more">circuitus · aequitas · odds r:s · scientia/fortuna · lean · pⁿ · np · fraud catalog · remaining work · small stakes</div></div>
+      <div class="c"><h3>May not leave</h3><p>Contaminants and crate types stay here.</p><div class="more">Prince · ROTM · multiply-odds · triangular 6:1 · cheating-as-method · any WeftOS type name</div></div>
+    </div>
+    <p class="so">Combining is the next door’s job (Room Coniunctio). Paper: panels/P1-nova.md</p>
+  </section>
+
+  <div class="bar">ROOM NOVA · BOOK ONLY · FIRST GROK SYMPOSIUM<b id="n">1 / 8</b></div>
+  <script>
+    const tip=document.getElementById('tip');
+    const showTip=el=>{ const t=el.getAttribute('data-tip')||el.getAttribute('title'); if(!t) return; el.removeAttribute('title'); el.setAttribute('data-tip',t); tip.textContent=t; tip.classList.add('on'); const r=el.getBoundingClientRect(); tip.style.left=Math.min(r.left,innerWidth-280)+'px'; tip.style.top=(r.bottom+8)+'px'; };
+    document.addEventListener('mouseover',e=>{ const el=e.target.closest('.term'); if(el) showTip(el); });
+    document.addEventListener('mouseout',e=>{ if(e.target.closest('.term')&&!e.relatedTarget?.closest?.('.term')) tip.classList.remove('on'); });
+    document.addEventListener('click',e=>{ const el=e.target.closest('.term'); if(el){ showTip(el); return;} if(!e.target.closest('#tip')) tip.classList.remove('on'); });
+    document.getElementById('glossBtn').onclick=()=>document.body.classList.toggle('gloss-open');
+    document.querySelectorAll('.c').forEach(card=>{
+      card.addEventListener('click',e=>{
+        if(e.target.closest('.term,a,input')) return;
+        const g=card.closest('.g'); if(!g) return;
+        const open=!card.classList.contains('open');
+        g.querySelectorAll('.c').forEach(c=>c.classList.remove('open'));
+        card.classList.toggle('open',open);
+        g.classList.toggle('exploring',open);
+      });
+    });
+    const s=[...document.querySelectorAll('.slide')]; let i=0;
+    const show=n=>{ i=(n+s.length)%s.length; s.forEach((x,k)=>x.classList.toggle('on',k===i)); document.getElementById('n').textContent=(i+1)+' / '+s.length; };
+    document.addEventListener('keydown',e=>{
+      if(e.key===' ' && e.target.closest('button,input')) return;
+      if(['ArrowRight',' '].includes(e.key)) {e.preventDefault(); show(i+1);}
+      if(e.key==='ArrowLeft') show(i-1);
+      if(e.key==='g'||e.key==='G') document.body.classList.toggle('gloss-open');
+      if(e.key==='Escape') document.body.classList.remove('gloss-open');
+    });
+    function calc(){
+      const r=+document.getElementById('r').value, s=+document.getElementById('s').value, t=r+s;
+      const el=document.getElementById('out');
+      if(!t){ el.textContent='No circuit — refuse.'; return; }
+      const p=r/t, ev=p-(1-p);
+      el.innerHTML='p = r/(r+s) = '+p.toFixed(3)+'. Fair odds r:s. Even-money EV = '+ev.toFixed(3)+'. Repeat once: p² = '+(p*p).toFixed(3)+' (do not square the odds).';
+    }
+    document.getElementById('r').oninput=document.getElementById('s').oninput=calc; calc();
+    document.getElementById('n4roll').onclick=()=>{
+      let hits=0; const faces=[];
+      for(let h=0;h<8;h++){ const t=[1,1,1].map(()=>1+Math.floor(Math.random()*6)); if(t.includes(6)) hits++; faces.push(t.join('')); }
+      document.getElementById('n4out').textContent='hits '+hits+'/8 · ROTM booked 4 · circuit ~3.4 · '+faces.join(' ');
+    };
+    const P=['AAA','AAB','ABA','ABB','BAA','BAB','BBA','BBB'];
+    const box=document.getElementById('n6paths');
+    P.forEach(p=>{ const s=document.createElement('span'); s.className='mono'; s.style.cssText='border:1px solid rgba(255,255,255,.14);padding:.15rem .35rem;border-radius:3px;'; s.textContent=p; s.dataset.p=p; box.appendChild(s); });
+    const rec={A:0,B:0};
+    document.getElementById('n6play').onclick=()=>{
+      const path=P[Math.floor(Math.random()*8)];
+      if(path==='BBB') rec.B++; else rec.A++;
+      [...box.children].forEach(el=>{ el.style.borderColor=el.dataset.p===path?(path==='BBB'?'#DC5F5F':'#6EC896'):'rgba(255,255,255,.14)'; });
+      document.getElementById('n6out').textContent='drew '+path+' · A : B = '+rec.A+' : '+rec.B+' · walking toward 7:1';
+    };
+  </script>
+</body>
+</html>

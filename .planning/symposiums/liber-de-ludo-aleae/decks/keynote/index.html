@@ -1,0 +1,1758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Count the Circuit Before You Score — WeftOS · Liber de Ludo Aleae</title>
+  <style>
+    :root {
+      --bg: #08080A; --panel: #16161C; --sidebar: #2A2A30; --hover: #202028;
+      --ink: #E0DEE8; --dim: #AAA8B4; --faint: #706E7A;
+      --accent: #C4A25C; --ok: #6EC896; --warn: #DCAF55; --crit: #DC5F5F;
+      --hair: rgba(255,255,255,.055);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: var(--bg); color: var(--ink);
+      font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif; overflow: hidden; }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    .deck { height: 100%; }
+    .slide {
+      display: none; flex-direction: column; height: 100%;
+      padding: 4.2vh 5vw 8vh; position: relative;
+      background:
+        linear-gradient(90deg, var(--accent) 0 3px, transparent 3px),
+        var(--bg);
+    }
+    .slide.active { display: flex; }
+    .slide.hero, .slide.rooms { background-color: var(--bg); }
+    .slide.hero::after, .slide.rooms::after {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      background: var(--accent); z-index: 2; pointer-events: none;
+    }
+    .slide.hero::before, .slide.rooms::before {
+      content: ""; position: absolute; inset: -6%;
+      background: center/cover no-repeat;
+      transform: translate3d(var(--gx, 0), var(--gy, 0), 0) scale(1.08);
+      z-index: 0; pointer-events: none;
+    }
+    .slide.hero::before {
+      background-image:
+        linear-gradient(180deg, rgba(8,8,10,.35), rgba(8,8,10,.88)),
+        url("assets/hero-counting-house.jpg");
+    }
+    .slide.rooms::before {
+      background-image:
+        linear-gradient(180deg, rgba(8,8,10,.45), rgba(8,8,10,.9)),
+        url("assets/hero-two-rooms.jpg");
+    }
+    .slide.hero > *, .slide.rooms > * { position: relative; z-index: 1; }
+    .eyebrow { font-family: ui-monospace, Menlo, monospace; font-size: .72rem;
+      letter-spacing: .16em; color: var(--accent); text-transform: uppercase; margin-bottom: .7rem; }
+    h1 { font-size: clamp(1.7rem, 3.4vw, 2.7rem); font-weight: 650; line-height: 1.12; max-width: 18ch; }
+    h1.wide { max-width: 28ch; }
+    .lede { color: var(--dim); font-size: clamp(1rem, 1.45vw, 1.2rem); max-width: 54ch; line-height: 1.45; margin-top: .7rem; }
+    .grid { display: grid; gap: .85rem; margin-top: 1.3rem; flex: 1; align-content: start; perspective: 900px; }
+    .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+    .grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+    .card {
+      background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
+      padding: .9rem 1rem; cursor: default;
+      transform-style: preserve-3d;
+      transition: border-color .18s, transform .22s ease, opacity .22s ease, box-shadow .22s ease, filter .22s ease;
+    }
+    .card[tabindex], .card.reveal { cursor: pointer; }
+    .card:hover, .card:focus { border-color: var(--accent); outline: none; }
+    .grid.exploring .reveal:not(.open), .archive.exploring .reveal:not(.open) {
+      opacity: .38; filter: saturate(.7);
+      transform: scale(.94) translateY(10px) translateZ(-40px);
+    }
+    .reveal { cursor: pointer; }
+    .card.open {
+      border-color: var(--accent);
+      box-shadow: 0 22px 48px rgba(0,0,0,.5), 0 0 0 1px rgba(196,162,92,.25);
+      transform: translateY(-8px) scale(1.03) translateZ(24px);
+      z-index: 4;
+    }
+    .card .more, .reveal .more {
+      max-height: 0; opacity: 0; overflow: hidden;
+      margin-top: 0; padding-top: 0;
+      color: var(--ink); font-size: .88rem; line-height: 1.4;
+      transform: translate3d(var(--px, 0), var(--py, 0), 16px);
+      transition: max-height .28s ease, opacity .22s ease, margin .22s ease, padding .22s ease;
+    }
+    .card.open .more, .reveal.open .more {
+      max-height: 14rem; opacity: 1; overflow: auto;
+      margin-top: .7rem; padding-top: .6rem;
+      border-top: 1px solid rgba(196,162,92,.35);
+    }
+    .card.reveal h3::after {
+      content: " · explore"; font-weight: 400; letter-spacing: 0; color: var(--faint); font-size: .62rem;
+    }
+    .card.open h3::after { content: " · deeper"; color: var(--accent); }
+    .card h3 { font-family: ui-monospace, Menlo, monospace; font-size: .72rem; letter-spacing: .1em;
+      color: var(--accent); margin-bottom: .4rem; }
+    .card p, .card li { color: var(--dim); font-size: .92rem; line-height: 1.4; }
+    .card ul { padding-left: 1.05rem; }
+    .stat { font-family: ui-monospace, Menlo, monospace; font-size: 1.55rem; font-variant-numeric: tabular-nums; }
+    .ok { color: var(--ok); } .crit { color: var(--crit); } .warn { color: var(--warn); }
+    .muted { color: var(--faint); }
+    .bar { display: flex; gap: .5rem; position: absolute; left: 5vw; right: 5vw; bottom: 2.1vh;
+      align-items: center; font-family: ui-monospace, Menlo, monospace; font-size: .68rem; color: var(--faint); }
+    .bar .brand { color: var(--accent); margin-left: auto; }
+    .progress { display: flex; gap: .32rem; position: fixed; bottom: 2.3vh; left: 50%; transform: translateX(-50%); z-index: 12; }
+    .progress button { width: 9px; height: 9px; border-radius: 50%; border: 1px solid #3a3a42; background: transparent; cursor: pointer; }
+    .progress button.on { background: var(--accent); border-color: var(--accent); }
+    .navbtn {
+      position: fixed; top: 50%; transform: translateY(-50%); z-index: 12;
+      width: 36px; height: 64px; border: 1px solid rgba(255,255,255,.14);
+      background: rgba(14,14,18,.7); color: var(--accent); cursor: pointer;
+      font: 1.2rem/1 ui-monospace, Menlo, monospace; border-radius: 4px;
+    }
+    .navbtn.prev { left: .6rem; }
+    .navbtn.next { right: .6rem; }
+    #jserr {
+      display: none; position: fixed; top: 2.2rem; left: 5vw; right: 5vw; z-index: 30;
+      background: #2a1212; color: #E0DEE8; border: 1px solid var(--crit);
+      padding: .45rem .7rem; font: .75rem/1.35 ui-monospace, Menlo, monospace;
+    }
+    .notes { display: none; margin-top: .8rem; padding: .65rem .85rem; border-left: 3px solid var(--accent);
+      color: var(--faint); font-size: .82rem; max-width: 72ch; }
+    body.show-notes .notes { display: block; }
+    .help { position: fixed; top: .8rem; right: 1rem; font-family: ui-monospace, Menlo, monospace;
+      font-size: .62rem; color: var(--faint); z-index: 10; }
+    button.face, button.chip, button.tab {
+      font-family: ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer;
+      border: 1px solid rgba(255,255,255,.14); background: #0E0E12; color: var(--ink);
+    }
+    button.face { width: 40px; height: 40px; font-weight: 650; }
+    button.face.on { border-color: var(--accent); background: rgba(196,162,92,.18); color: var(--accent); }
+    button.chip { padding: .35rem .55rem; font-size: .68rem; letter-spacing: .04em; }
+    button.chip.on { border-color: var(--accent); color: var(--accent); }
+    button.tab { padding: .4rem .7rem; font-size: .75rem; }
+    button.tab.on { border-color: var(--accent); color: var(--accent); }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    .faces { display: flex; gap: .35rem; flex-wrap: wrap; }
+    .chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+    .detail { min-height: 5.5rem; color: var(--dim); font-size: .92rem; line-height: 1.4; }
+    img.diagram { width: 100%; max-height: 28vh; object-fit: contain; background: #0E0E12; border-radius: 4px; }
+    .radar { display: flex; gap: .55rem; align-items: end; height: 16vh; }
+    .radar .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: .3rem; }
+    .radar .barfill { width: 100%; background: var(--accent); border-radius: 2px 2px 0 0; }
+    .radar span { font-family: ui-monospace, Menlo, monospace; font-size: .62rem; color: var(--faint); text-align: center; }
+    .term {
+      border-bottom: 1px dotted var(--accent); cursor: help; color: var(--ink);
+      background: rgba(196,162,92,.08);
+    }
+    #tip {
+      position: fixed; z-index: 80; max-width: min(28rem, 86vw);
+      background: #16161C; color: #E0DEE8; border: 1px solid #C4A25C;
+      border-radius: 4px; padding: .55rem .7rem; font-size: .86rem; line-height: 1.35;
+      box-shadow: 0 12px 32px rgba(0,0,0,.45); pointer-events: none;
+      opacity: 0; transform: translateY(4px); transition: opacity .08s, transform .08s;
+    }
+    #tip.on { opacity: 1; transform: none; }
+    .help button {
+      font: inherit; color: var(--accent); background: transparent;
+      border: 1px solid var(--accent); border-radius: 3px; padding: 1px 6px; cursor: pointer;
+    }
+    .so { margin-top: .65rem; color: var(--ink); font-size: .95rem; max-width: 58ch; }
+    .so::before { content: "So what. "; color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: .72rem; letter-spacing: .08em; }
+    .support { margin-top: .55rem; font-size: .82rem; color: var(--faint); line-height: 1.4; max-width: 56ch; }
+    .support strong { color: var(--accent); font-weight: 600; font-family: ui-monospace, Menlo, monospace; font-size: .7rem; letter-spacing: .06em; }
+    .slide.play { padding-bottom: 6.6vh; }
+    .slide.play h1 { font-size: clamp(1.35rem, 2.6vw, 2.05rem); }
+    .slide.play .lede { margin-top: .4rem; font-size: clamp(.92rem, 1.2vw, 1.05rem); }
+    .table {
+      display: grid; grid-template-columns: .88fr 1.12fr; gap: .75rem;
+      margin-top: .75rem; flex: 1; min-height: 0; align-items: stretch;
+    }
+    .felt, .side {
+      background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
+      padding: .7rem .75rem; min-height: 0;
+    }
+    .felt {
+      display: flex; flex-direction: column; align-items: center; gap: .5rem;
+      background:
+        radial-gradient(120% 80% at 50% 0%, rgba(196,162,92,.08), transparent 55%),
+        #0E0E12;
+    }
+    .dice-row { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: center; min-height: 58px; align-items: center; }
+    .die {
+      width: 54px; height: 54px; background: #E0DEE8; border-radius: 7px;
+      display: grid; grid-template: repeat(3, 1fr) / repeat(3, 1fr); padding: 7px;
+      box-shadow: 0 10px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.35);
+      transform: rotate(-2deg);
+    }
+    .die.sm { width: 34px; height: 34px; padding: 4px; border-radius: 5px; }
+    .die .pip {
+      width: 7px; height: 7px; border-radius: 50%; background: #16161C;
+      justify-self: center; align-self: center; opacity: 0;
+    }
+    .die.sm .pip { width: 4px; height: 4px; }
+    .die[data-n="1"] .pip:nth-child(5),
+    .die[data-n="2"] .pip:nth-child(1), .die[data-n="2"] .pip:nth-child(9),
+    .die[data-n="3"] .pip:nth-child(1), .die[data-n="3"] .pip:nth-child(5), .die[data-n="3"] .pip:nth-child(9),
+    .die[data-n="4"] .pip:nth-child(1), .die[data-n="4"] .pip:nth-child(3),
+    .die[data-n="4"] .pip:nth-child(7), .die[data-n="4"] .pip:nth-child(9),
+    .die[data-n="5"] .pip:nth-child(1), .die[data-n="5"] .pip:nth-child(3), .die[data-n="5"] .pip:nth-child(5),
+    .die[data-n="5"] .pip:nth-child(7), .die[data-n="5"] .pip:nth-child(9),
+    .die[data-n="6"] .pip:nth-child(1), .die[data-n="6"] .pip:nth-child(3), .die[data-n="6"] .pip:nth-child(4),
+    .die[data-n="6"] .pip:nth-child(6), .die[data-n="6"] .pip:nth-child(7), .die[data-n="6"] .pip:nth-child(9) { opacity: 1; }
+    .die.spin { animation: tumble .5s ease; }
+    .die.win { box-shadow: 0 0 0 2px var(--ok), 0 10px 18px rgba(0,0,0,.45); }
+    .die.lose { box-shadow: 0 0 0 2px var(--crit), 0 10px 18px rgba(0,0,0,.45); }
+    .die.score {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: .1rem; color: #16161C; padding: .25rem;
+    }
+    .die.score em { font-style: normal; font-family: ui-monospace, Menlo, monospace; font-size: .52rem; letter-spacing: .06em; }
+    .die.score b { font-size: 1.05rem; font-family: ui-monospace, Menlo, monospace; }
+    @keyframes tumble {
+      0% { transform: rotate(-24deg) scale(.86); }
+      35% { transform: rotate(16deg) scale(1.12); }
+      62% { transform: rotate(-10deg) scale(1.04); }
+      100% { transform: rotate(-2deg) scale(1); }
+    }
+    .playbar { display: flex; flex-wrap: wrap; gap: .35rem; justify-content: center; }
+    button.go {
+      background: rgba(196,162,92,.2); border-color: var(--accent); color: var(--accent);
+      padding: .4rem .75rem; font-weight: 650; letter-spacing: .04em;
+    }
+    button.go:disabled, button.chip:disabled { opacity: .45; cursor: wait; }
+    .purses { display: grid; gap: .35rem; }
+    .purse {
+      display: grid; grid-template-columns: 7.2rem 2.2rem 1fr; gap: .35rem; align-items: center;
+      font-family: ui-monospace, Menlo, monospace; font-size: .68rem; color: var(--dim);
+    }
+    .purse b { color: var(--ink); font-variant-numeric: tabular-nums; }
+    .purse i { display: block; height: 7px; border-radius: 2px; background: var(--ok); width: 100%; transform-origin: left center; }
+    .purse.house i { background: var(--crit); }
+    .purse.warn i { background: var(--warn); }
+    .ledger {
+      list-style: none; margin-top: .45rem; max-height: 16vh; overflow: auto;
+      font-family: ui-monospace, Menlo, monospace; font-size: .66rem; color: var(--dim);
+    }
+    .ledger li {
+      display: grid; grid-template-columns: 1.5rem 1.6rem 2.6rem 1fr; gap: .3rem;
+      padding: .16rem 0; border-bottom: 1px solid var(--hair);
+    }
+    .why {
+      margin-top: .5rem; color: var(--ink); font-size: .84rem; line-height: 1.35;
+      border-left: 3px solid var(--accent); padding: .3rem .55rem;
+    }
+    .lamp { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--crit); margin-right: .35rem; }
+    .lamp.mix { background: var(--warn); }
+    .lamp.on { background: var(--ok); }
+    .paths { display: grid; grid-template-columns: repeat(4, 1fr); gap: .3rem; margin-top: .4rem; }
+    .path {
+      font-family: ui-monospace, Menlo, monospace; font-size: .68rem; text-align: center;
+      border: 1px solid var(--hair); border-radius: 3px; padding: .28rem .1rem; color: var(--dim);
+    }
+    .path.alive { border-color: var(--accent); color: var(--ink); }
+    .path.dead { opacity: .28; }
+    .path.hit { background: rgba(110,200,150,.12); border-color: var(--ok); color: var(--ok); }
+    .path.bust { background: rgba(220,95,95,.12); border-color: var(--crit); color: var(--crit); }
+    .scoreboard { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: .4rem; margin-bottom: .45rem; }
+    .scoreboard .card { padding: .45rem .5rem; }
+    .scoreboard .stat { font-size: 1.15rem; }
+    .archive { display: grid; grid-template-columns: repeat(4, 1fr); gap: .55rem; margin-top: .85rem; }
+    .portrait { background: #0E0E12; border: 1px solid var(--hair); border-radius: 4px; overflow: hidden; }
+    .portrait img { width: 100%; aspect-ratio: 3/4; object-fit: cover; display: block; filter: contrast(1.05); }
+    .portrait figcaption { padding: .4rem .5rem .5rem; font-size: .72rem; color: var(--dim); }
+    .portrait figcaption strong { display: block; color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: .66rem; letter-spacing: .08em; font-weight: 500; }
+    .crabs { display: grid; grid-template-columns: 1fr 1fr; gap: .55rem; margin-top: .55rem; }
+    .crabs figure { background: #0E0E12; border: 1px solid var(--hair); border-radius: 4px; overflow: hidden; }
+    .crabs img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+    .crabs figcaption { padding: .35rem .5rem .5rem; font-size: .72rem; color: var(--dim); }
+    .slide.rooms { overflow: hidden; }
+    .slide.rooms h1 { font-size: clamp(1.35rem, 2.5vw, 2.05rem); }
+    .slide.rooms .lede { margin-top: .4rem; font-size: clamp(.9rem, 1.15vw, 1.05rem); }
+    .k2tabs { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .65rem; flex-shrink: 0; }
+    .k2body { flex: 1; min-height: 0; margin-top: .55rem; position: relative; }
+    .k2pane { display: none; height: 100%; min-height: 0; flex-direction: column; }
+    .k2pane.on { display: flex; }
+    .k2pane .archive { margin-top: 0; flex: 1; min-height: 0; align-items: stretch; }
+    .k2pane .portrait { min-height: 0; display: flex; flex-direction: column; }
+    .k2pane .portrait img { aspect-ratio: auto; flex: 1; min-height: 0; height: auto; max-height: 46vh; }
+    .k2pane .crabs { margin-top: 0; flex: 1; min-height: 0; }
+    .k2pane .crabs img { max-height: 42vh; aspect-ratio: 1; }
+    .scene {
+      width: 100%; height: 100%; object-fit: cover; border-radius: 4px;
+      border: 1px solid var(--hair); min-height: 0;
+    }
+    .k2cap { position: absolute; left: .7rem; bottom: .6rem; max-width: 46ch;
+      background: rgba(8,8,10,.72); padding: .4rem .55rem; border-radius: 3px;
+      font-size: .78rem; color: var(--dim); }
+    .sci {
+      display: grid; grid-template-columns: 5.6rem 1fr auto; gap: .4rem; align-items: center;
+      font-family: ui-monospace, Menlo, monospace; font-size: .66rem; color: var(--dim); width: 100%;
+    }
+    .sci i { display: block; height: 6px; border-radius: 2px; background: #2A2A30; position: relative; overflow: hidden; }
+    .sci i b { position: absolute; inset: 0 auto 0 0; width: 8%; background: var(--crit); }
+    .sci.mix i b { width: 45%; background: var(--warn); }
+    .sci.on i b { width: 100%; background: var(--ok); }
+    .detect { margin-top: .45rem; padding: .4rem .5rem; border: 1px dashed rgba(196,162,92,.35); border-radius: 3px; font-size: .78rem; color: var(--dim); }
+    .detect strong { color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: .66rem; letter-spacing: .06em; }
+    .steps { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .55rem; }
+    .steps button { padding: .3rem .55rem; }
+    .mathpane { font-family: ui-monospace, Menlo, monospace; font-size: .72rem; line-height: 1.45; color: var(--dim); }
+    .mathpane .row { display: grid; grid-template-columns: 6.2rem 1fr 2.4rem; gap: .35rem; align-items: center; margin: .25rem 0; }
+    .mathpane .fill { height: 8px; background: #2A2A30; border-radius: 2px; overflow: hidden; }
+    .mathpane .fill b { display: block; height: 100%; background: var(--accent); }
+    .mathpane .fill b.crit { background: var(--crit); }
+    .mathpane .fill b.warn { background: var(--warn); }
+    .eq { display: grid; gap: .3rem; margin-top: .45rem; }
+    .eq label { display: grid; grid-template-columns: 1.2rem 1fr; gap: .4rem; align-items: start; font-size: .82rem; color: var(--dim); }
+    .tree { width: 100%; height: 22vh; }
+    .tree text { fill: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: 10px; }
+    .topo { width: 100%; min-height: 28vh; }
+    .topo text { fill: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+    .jsonbox { background: #0E0E12; border: 1px solid var(--hair); border-radius: 4px; padding: .55rem .65rem;
+      font-family: ui-monospace, Menlo, monospace; font-size: .68rem; color: var(--dim); white-space: pre-wrap; max-height: 22vh; overflow: auto; }
+    .paygrid { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; width: 100%; }
+    .paygrid .card { padding: .5rem .55rem; }
+    .paygrid .stat { font-size: 1.1rem; }
+    .glossbox {
+      position: fixed; top: 0; right: 0; width: min(28rem, 92vw); height: 100%;
+      background: #0E0E12; border-left: 1px solid var(--accent); padding: 1.2rem 1.1rem 2rem;
+      overflow: auto; transform: translateX(100%); transition: transform .2s; z-index: 20;
+    }
+    body.gloss-open .glossbox { transform: none; }
+    .glossbox h2 { font-size: 1.05rem; margin-bottom: .7rem; }
+    .glossbox dt { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-size: .78rem; margin-top: .7rem; }
+    .glossbox dd { color: var(--dim); font-size: .86rem; margin-left: 0; line-height: 1.4; }
+    @media (max-width: 800px) {
+      .grid.cols-2, .grid.cols-3, .grid.cols-4, .table, .scoreboard, .archive, .crabs, .paygrid { grid-template-columns: 1fr 1fr; }
+      h1 { max-width: 22ch; }
+    }
+    @media print {
+      html, body { overflow: visible; height: auto; }
+      .slide { display: flex !important; page-break-after: always; height: 100vh; }
+      .help, .progress { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="help mono">← → space · N notes · F full · <button type="button" id="glossBtn">Glossary</button> · <a href="../../index.html" style="color:var(--accent);">Lobby</a> · dotted words + tiles click</div>
+  <div id="tip" role="tooltip"></div>
+  <aside class="glossbox" id="gloss" aria-label="Glossary">
+    <h2>Glossary</h2>
+    <dl>
+      <dt>circuit / circuitus</dt><dd>The full set of equally possible outcomes (sample space). Not a stop-loss “circuit-breaker.”</dd>
+      <dt>Liber de Ludo Aleae</dt><dd>Cardano’s <em>Book on Games of Chance</em>, written ~1564, printed 1663.</dd>
+      <dt>aequitas</dt><dd>Equal conditions: same information, tools, stakes, and light. Fairness as a contract, not a 0–1 mood.</dd>
+      <dt>odds r : s</dt><dd>Favorable ways to unfavorable ways. Fair price matches this ratio.</dd>
+      <dt>EV</dt><dd>Expected value: probability-weighted average payoff. Fair game ⇒ EV = 0.</dd>
+      <dt>house edge</dt><dd>Expected loss per unit stake (−EV / stake) when the payout is worse than fair. At 4:1 on a fair six this is 16.7%, not the 20% payout-shortfall.</dd>
+      <dt>ROTM</dt><dd>Reasoning On The Mean — the error of treating n × p as a probability (3×1/6 is not ½).</dd>
+      <dt>n</dt><dd>How many independent casts (trials) you have actually observed.</dd>
+      <dt>scientia / fortuna</dt><dd>Knowledge vs luck. A method vs a single favorable throw.</dd>
+      <dt>sidecar</dt><dd>Extra fields published next to an existing score. Does not rewrite the locked core struct.</dd>
+      <dt>genesis</dt><dd>WeftOS’s locked founding governance rules. Changing EffectVector’s five faces is a breaking change.</dd>
+      <dt>EffectVector</dt><dd>Five impact numbers on a privileged action: risk, fairness, privacy, novelty, security.</dd>
+      <dt>MetaHarness (MH)</dt><dd>Optional harness-readiness scorer (fit, compile, coverage, safety, memory). Not required to run <span class="mono">weft</span>.</dd>
+      <dt>promote</dt><dd>Make a candidate the official champion. Forbidden without receipts and confirm.</dd>
+      <dt>LDA-ADR</dt><dd>Local symposium decision record. Not a WeftOS central ADR until someone graduates it.</dd>
+      <dt>Nova / Vetus / Coniunctio</dt><dd>New-doctrine room / existing-scores room / the combining table.</dd>
+      <dt>rhyme / cousin / false friend</dt><dd>Same question / same family different primitive / same English word, different job.</dd>
+      <dt>Prince</dt><dd>Cardano’s leftover name for luck as a person. Detector stays; the ghost goes.</dd>
+      <dt>WEFT-322</dt><dd>Cost / token stop-loss ticket. Not a sample space.</dd>
+      <dt>ADR-090 / ADR-096</dt><dd>090: world-model must not override ECC. 096: MetaHarness is optional; no silent promote.</dd>
+    </dl>
+    <p class="muted" style="margin-top:1rem;">Press G to close.</p>
+  </aside>
+  <div class="deck" id="deck">
+
+    <section class="slide hero active" data-id="K01" data-primary-goal="State the thesis in one glance" data-secondary-goals="Cardano chairs; first Grok symposium">
+      <div class="eyebrow">K01 · Plenary · First Grok symposium</div>
+      <h1 class="wide">Count the circuit before you score</h1>
+      <p class="lede">Gerolamo Cardano chairs. A score that does not name its <abbr class="term" title="Full set of equally possible outcomes — the sample space">circuit</abbr> is a wager dressed as measurement.</p>
+      <p class="so">WeftOS already publishes numbers (gates, quality, harness). If those numbers hide the sample space, they are bets, not measurements.</p>
+      <div class="grid cols-3">
+        <article class="card reveal" tabindex="0"><h3>1564</h3><p>Cardano writes the book — a gambler’s manual that <em>anticipates</em> classical probability.</p>
+          <div class="more"><em>Liber de Ludo Aleae</em> = <em>The Book on Games of Chance</em>. Thirty-two short chapters. Printed too late (1663) to found the later school of Pascal and Fermat.</div></article>
+        <article class="card reveal" tabindex="0"><h3>1663</h3><p>Printed in his collected works after his death.</p>
+          <div class="more"><em>Opera Omnia</em> (Lyon). Too late to cross-examine him. This symposium is that cross-examination.</div></article>
+        <article class="card reveal" tabindex="0"><h3>2026</h3><p>WeftOS already scores constantly. Silence about the sample space is a hidden die.</p>
+          <div class="more">Gates, quality scores, harness faces, node scores — all publish numbers. Almost none name the circuit those numbers came from.</div></article>
+      </div>
+      <div class="notes">Speaker: I am Cardano. Name the circuit, refuse luck-as-skill, refuse undisclosed edge, price the decision as EV over an enumerated or honestly incomplete space.</div>
+      <div class="bar"><span>WEFTOS · LIBER DE LUDO ALEAE</span><span class="brand">01 / 12</span></div>
+    </section>
+
+    <section class="slide rooms" data-id="K02" data-primary-goal="Two rooms then one table, without overflow" data-secondary-goals="Tabs: Nova, Vetus, Coniunctio">
+      <div class="eyebrow">K02 · Method · three teams</div>
+      <h1 class="wide">Two rooms, then one table</h1>
+      <p class="lede"><abbr class="term" title="New-doctrine room — book only">Nova</abbr> read only the dead. <abbr class="term" title="Existing-scores room — WeftOS only">Vetus</abbr> read only the walls. <abbr class="term" title="The combining table after both rooms have written">Coniunctio</abbr> is where they finally sit together.</p>
+      <div class="k2tabs" id="k2tabs">
+        <button type="button" class="chip on" data-pane="nova">Nova · the docket</button>
+        <button type="button" class="chip" data-pane="vetus">Vetus · the walls</button>
+        <button type="button" class="chip" data-pane="con">Coniunctio · one table</button>
+      </div>
+      <div class="k2body">
+        <div class="k2pane on" data-pane="nova">
+          <div class="archive">
+            <figure class="portrait reveal" tabindex="0">
+              <img src="assets/archive/cardano.jpg" alt="Archive plate of Gerolamo Cardano"/>
+              <figcaption><strong>CARDANO</strong> 1501–1576 · circuit, aequitas, and his own ROTM.
+                <div class="more">Chair. Chapter 14 is the general rule. His arithmetic crimes stay on the table.</div></figcaption>
+            </figure>
+            <figure class="portrait reveal" tabindex="0">
+              <img src="assets/archive/pacioli.jpg" alt="Archive plate of Luca Pacioli"/>
+              <figcaption><strong>PACIOLI</strong> 1445–1517 · sunk 5:3. The wrong split.
+                <div class="more">Summa (1494). Interrupted swarms that credit burned tokens are this error.</div></figcaption>
+            </figure>
+            <figure class="portrait reveal" tabindex="0">
+              <img src="assets/archive/pascal.jpg" alt="Archive plate of Blaise Pascal"/>
+              <figcaption><strong>PASCAL</strong> 1623–1662 · remaining paths. 7:1.
+                <div class="more">Eight leftover sequences. Only BBB is B. Keep the question, not Cardano’s triangle.</div></figcaption>
+            </figure>
+            <figure class="portrait reveal" tabindex="0">
+              <img src="assets/archive/fermat.jpg" alt="Archive plate of Pierre de Fermat"/>
+              <figcaption><strong>FERMAT</strong> 1607–1665 · the 1654 letters.
+                <div class="more">Continuation value. The combining table cites both parents.</div></figcaption>
+            </figure>
+          </div>
+        </div>
+        <div class="k2pane" data-pane="vetus">
+          <div class="crabs">
+            <figure>
+              <img src="assets/archive/crab-1.jpg" alt="Carrara marble crab, Room Vetus"/>
+              <figcaption><strong class="mono" style="color:var(--accent);letter-spacing:.08em;font-size:.66rem;">VETUS · WALLS</strong> Scores already in the masonry. They do not cite Cardano.</figcaption>
+            </figure>
+            <figure>
+              <img src="assets/archive/crab-2.jpg" alt="Carrara marble crab holding a die"/>
+              <figcaption><strong class="mono" style="color:var(--accent);letter-spacing:.08em;font-size:.66rem;">VETUS · HOLD</strong> Clasping a die the walls never named. Classification, not a merge.</figcaption>
+            </figure>
+          </div>
+        </div>
+        <div class="k2pane" data-pane="con" style="position:relative;">
+          <img class="scene" src="assets/archive/coniunctio-table.jpg" alt="Nova scholars and two marble crabs at a table of equation-covered papers"/>
+          <p class="k2cap">Coniunctio: both rooms at last, equal light, paperwork still arguing. Mixing earlier would have been a cheat.</p>
+        </div>
+      </div>
+      <div class="notes">If the book-room glances at EffectVector it will “discover” chapter 14 always meant it. If the wall-room glances at Cardano it will “discover” a cost circuit-breaker was a sample space. Both are cheats.</div>
+      <div class="bar"><span>NOVA · VETUS · CONIUNCTIO</span><span class="brand">02 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K03" data-primary-goal="Show chapter 14 as a multi-turn fair table" data-secondary-goals="Same die, two contracts; limited stake">
+      <div class="eyebrow">K03 · Chapter 14 · play the circuit</div>
+      <h1>The general rule</h1>
+      <p class="lede">Count the circuit. Name the favorable faces (<span class="mono">r</span>). The rest is <span class="mono">s</span>. A fair table pays <span class="mono">s:r</span> so <abbr class="term" title="Expected value — probability-weighted average payoff">EV</abbr> = 0. The house table, same honest die, pays 4:1 anyway.</p>
+      <p class="so">Fair is justice, not generosity. Play eight turns. The leak is the contract, not the bone.</p>
+      <div class="table">
+        <div class="felt">
+          <div class="faces" id="k3faces"></div>
+          <p class="muted mono" id="k3odds">r : s</p>
+          <div class="dice-row"><div class="die" id="k3die" data-n="6"></div></div>
+          <div class="playbar">
+            <button type="button" class="chip go" id="k3roll">Roll</button>
+            <button type="button" class="chip" id="k3eight">Play 8</button>
+            <button type="button" class="chip" id="k3reset">Reset purses</button>
+          </div>
+        </div>
+        <div class="side">
+          <div class="purses">
+            <div class="purse" id="k3fairP"><span>Fair table</span><b id="k3fair">8</b><i id="k3fairB"></i></div>
+            <div class="purse house" id="k3houseP"><span>House 4:1</span><b id="k3house">8</b><i id="k3houseB"></i></div>
+          </div>
+          <div class="sci" id="k3sci"><span>scientia</span><i><b></b></i><span id="k3sciL">n=0 · fortuna</span></div>
+          <div class="detect" id="k3det"><strong>Crooked check.</strong> <span id="k3detv">Same die, two books. After n≥6 the leak (or the lean) becomes visible.</span></div>
+          <ol class="ledger" id="k3led"></ol>
+          <p class="why" id="k3why">Stake 1 of 8 — limited risk, recreation not treasury. Pick faces, then roll. Same luck will hit both purses; only the payout differs.</p>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Leave 6 on, hit Play 8. Then turn on 1–3 and play again. <strong>See.</strong> Fair hovers; house leaks on every win (or, if you named three faces, the 4:1 table overpays — that is a marked price too). <strong>Why.</strong> A router that bills the hard-model rate for an easy task is the house column.</p>
+      <div class="notes">Two dice are 36, not the partitions. Three dice are 216. EV of zero is justice, not generosity. If the circuit cannot be enumerated, publish incomplete and why.</div>
+      <div class="bar"><span>CIRCUITUS · SAME DIE · TWO CONTRACTS</span><span class="brand">03 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K04" data-primary-goal="Refuse ROTM by playing hands" data-secondary-goals="np is a count, not a chance">
+      <div class="eyebrow">K04 · Contaminants · play the false half</div>
+      <h1 class="wide">What you will not inherit</h1>
+      <p class="lede">A hand is <span class="mono">n</span> throws. Success = at least one six. <abbr class="term" title="Reasoning On The Mean — treating n×p as a probability">ROTM</abbr> books this as <span class="mono">n/6</span>. The circuit is <span class="mono">1−(5/6)<sup>n</sup></span>.</p>
+      <p class="so">A scorer that adds “one-sixth per try” is this book. Play eight hands and watch it overclaim.</p>
+      <div class="table">
+        <div class="felt">
+          <label class="muted mono" for="throws">Throws per hand n = <span id="nLabel">3</span></label>
+          <input id="throws" type="range" min="1" max="8" value="3"/>
+          <div class="dice-row" id="k4dice"></div>
+          <p>ROTM books <span class="stat warn" id="rotm">0.50</span> · circuit is <span class="stat ok" id="real">0.421</span></p>
+          <p class="muted" id="cross">Four throws to cross ½.</p>
+          <div class="playbar">
+            <button type="button" class="chip go" id="k4roll">Play a hand</button>
+            <button type="button" class="chip" id="k4eight">Play 8 hands</button>
+            <button type="button" class="chip" id="k4reset">Reset</button>
+          </div>
+        </div>
+        <div class="side">
+          <div class="purses">
+            <div class="purse warn"><span>ROTM expected</span><b id="k4expR">0</b><i id="k4expRB"></i></div>
+            <div class="purse"><span>Circuit expected</span><b id="k4expC">0</b><i id="k4expCB"></i></div>
+            <div class="purse house"><span>Hands you hit</span><b id="k4hit">0</b><i id="k4hitB"></i></div>
+          </div>
+          <div class="sci" id="k4sci"><span>scientia</span><i><b></b></i><span id="k4sciL">n=0 · fortuna</span></div>
+          <div class="detect" id="k4det"><strong>Bias check.</strong> <span id="k4detv">ROTM is the crooked book: it overclaims before a single hand.</span></div>
+          <ol class="ledger" id="k4led"></ol>
+          <p class="why" id="k4why">No money on this table — limited risk is the point. ROTM is a pricing error, not a purse. At n=3 it claims half; the bone owes you about 42%.</p>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Play 8 at n=3, then drag to 4 and play 8 more. <strong>See.</strong> Hits cluster near the green number, not the amber half. <strong>Why.</strong> Length-based quality scores are this family: they add marginals and read the sum as a chance of success.</p>
+      <div class="notes">I multiplied odds, stole a cubic, cheated at tables. The catalog is a detector. Anyone who implements it as a method has misunderstood the chair. Six kinds of 9 vs 10 is not six ways — 25 vs 27 in 216.</div>
+      <div class="bar"><span>REFUSALS · ROTM · DO NOT ADD ONE-SIXTH PER TRY</span><span class="brand">04 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K05" data-primary-goal="Show existing WeftOS rhymes with live calcs" data-secondary-goals="Charts for L2, breaker, MH, ROTM-cousin">
+      <div class="eyebrow">K05 · Room Vetus · how each calc works</div>
+      <h1 class="wide">What was already in the walls</h1>
+      <p class="lede">None of these files cite Cardano. Click a surface. The right pane unpacks the actual arithmetic — not a slogan.</p>
+      <p class="so">We name what already rhymes, and what only shares a word.</p>
+      <div class="table">
+        <div class="felt" style="align-items:stretch;">
+          <div class="chips" id="vchips"></div>
+          <p class="muted" id="vdetail" style="margin-top:.5rem;">Select a surface.</p>
+        </div>
+        <div class="side">
+          <div id="vcalc" class="mathpane"></div>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> V1, then V6, then V7, then V4. <strong>See.</strong> L2 distance, stop-loss trip, five unlabeled faces, length-as-chance. <strong>Why.</strong> Classification without the formula is just a mood.</p>
+      <div class="notes">Honor the naming. Do not pretend EffectVector.fairness is already aequitas. Do not pretend a cost breaker is a sample space.</div>
+      <div class="bar"><span>V1–V31 · LIVE CALC · RHYME / COUSIN / FALSE FRIEND</span><span class="brand">05 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K06" data-primary-goal="Walk the homonym in five steps" data-secondary-goals="circuitus vs WEFT-322 with numbers">
+      <div class="eyebrow">K06 · Homonym · walk it</div>
+      <h1>Circuit is not a circuit-breaker</h1>
+      <p class="lede">WeftOS spent the English word <em>circuit</em> on a <abbr class="term" title="Stop-loss: abort when spend or no-ops exceed a cap (WEFT-322)">stop-loss</abbr> (WEFT-322). Cardano spent <em>circuitus</em> on the sample space. Same letters. Different jobs.</p>
+      <p class="so">A perfect breaker can still leave you on a 4:1 house table.</p>
+      <div class="steps" id="k6steps"></div>
+      <div class="table">
+        <div class="felt" style="align-items:stretch;">
+          <p class="why" id="k6why"></p>
+          <img class="diagram" id="k6img" src="assets/diagrams/homonym.svg" alt="Circuitus versus circuit-breaker"/>
+        </div>
+        <div class="side">
+          <div class="mathpane" id="k6math"></div>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Step 1 → 5. <strong>See.</strong> Enumeration on the left, trip-wire on the right; they never become one number. <strong>Why.</strong> Renaming the breaker “circuitus” would hide a crooked book behind a stop-loss.</p>
+      <div class="notes">BudgetUsage.circuit_open and PlanningConfig.circuit_breaker_no_op_limit are ruin bounds. They do not enumerate outcomes.</div>
+      <div class="bar"><span>FALSE FRIEND · KEEP BOTH WORDS</span><span class="brand">06 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K07" data-primary-goal="Walk MH then apply aequitas to harness fit" data-secondary-goals="Decompress 75/100/65/90/53; equality check">
+      <div class="eyebrow">K07 · Instrument + aequitas · six steps</div>
+      <h1 class="wide">Read the throw, then check the table</h1>
+      <p class="lede"><abbr class="term" title="Optional harness-readiness scorer — not required to run weft">MetaHarness</abbr> published five faces this session. <abbr class="term" title="Equal conditions of info, tools, stakes, light">Aequitas</abbr> asks whether the table itself is even — including whether <em>harness fit</em> was measured under equal conditions.</p>
+      <p class="so">Do not promote on one cast. Do not rename EffectVector.fairness. Run the equality check beside both.</p>
+      <div class="steps" id="k7steps"></div>
+      <div class="table">
+        <div class="felt">
+          <div class="dice-row" id="k7dice"></div>
+          <div class="playbar">
+            <button type="button" class="chip go" id="k7cast">Replay this throw</button>
+            <span class="muted mono" id="k7n">n still = 1</span>
+          </div>
+          <div class="radar" id="radar" style="width:100%;height:10vh;"></div>
+          <p class="why" id="k7why"></p>
+        </div>
+        <div class="side">
+          <div class="mathpane" id="k7math"></div>
+          <div class="eq" id="k7eq"></div>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Walk steps 1–6, then Replay. <strong>See.</strong> The math pane names each face; the checklist fails equal_eval (n=1) and equal_tools (briefing 5D ≠ live 5D). <strong>Why.</strong> Aequitas on harness fit is the application — refuse promote or disclose the holes.</p>
+      <div class="notes">Publish {circuit: MH-score-v1, n:1, claim_type: fortuna, interval: unknown, aequitas: {equal_eval:false, equal_tools:false}}. LDA-002 sits beside the dim; it does not smash genesis.</div>
+      <div class="bar"><span>75 / 100 / 65 / 90 / 53 · AEQUITAS ON FIT</span><span class="brand">07 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K08" data-primary-goal="Explain fair payoff vs offered payout" data-secondary-goals="Crooked detector; scientia; 16.7%">
+      <div class="eyebrow">K08 · LDA-003 · payoff vs offer</div>
+      <h1>Two tickets on the same bone</h1>
+      <p class="lede">You stake 1 on a six. The <em>fair payoff</em> is what justice pays: +5 (because r:s = 1:5). The <em>offered payout</em> is what this table actually writes on the ticket. <abbr class="term" title="Expected loss per unit stake: −EV / stake. At 4:1 this is 16.7%, not 20%.">House edge</abbr> is −EV / stake.</p>
+      <p class="so">If the tickets differ, the die can be honest and the book still crooked. The system sees that as a leak between two purses that shared every roll.</p>
+      <div class="table">
+        <div class="felt">
+          <div class="paygrid">
+            <article class="card"><h3>Win ticket</h3><p class="stat ok" id="k9winT">fair +5 · offer +4</p><p class="muted">You named 1 face. Fair profit = s/r = 5. Offer is the slider.</p></article>
+            <article class="card"><h3>Lose ticket</h3><p class="stat crit">both −1</p><p class="muted">The leak only prints on a win. Losses look identical.</p></article>
+          </div>
+          <label class="muted mono" for="pay">Offered payout <span id="payL">4</span> : 1</label>
+          <input id="pay" type="range" min="1" max="8" value="4"/>
+          <p class="mathpane">EV_fair = (1/6)(+5)+(5/6)(−1) = <span class="ok">0</span> · EV_off = (1/6)(+<span id="k9po">4</span>)+(5/6)(−1) = <span class="stat" id="ev9">−0.167</span> · edge <span class="stat" id="ed9">16.7%</span></p>
+          <p id="ver9">House table — refuse or disclose</p>
+          <div class="dice-row"><div class="die" id="k9die" data-n="6"></div></div>
+          <div class="playbar">
+            <button type="button" class="chip go" id="k9roll">Roll</button>
+            <button type="button" class="chip" id="k9eight">Play 8</button>
+            <button type="button" class="chip" id="k9reset">Reset</button>
+          </div>
+        </div>
+        <div class="side">
+          <div class="sci" id="k9sci"><span>scientia</span><i><b></b></i><span id="k9sciL">n=0 · fortuna</span></div>
+          <div class="purses">
+            <div class="purse" id="k9fairP"><span>Fair 5:1</span><b id="k9fair">12</b><i id="k9fairB"></i></div>
+            <div class="purse house" id="k9offP"><span>Offered</span><b id="k9off">12</b><i id="k9offB"></i></div>
+          </div>
+          <div class="detect" id="k9det"><strong>Crooked check.</strong> <span id="k9detv">Same rolls. After n≥6, if offered trails fair, the contract is the cheat.</span></div>
+          <p class="muted mono" id="k9brk">Breaker trips at 3 — stop-loss, not a sample space.</p>
+          <ol class="ledger" id="k9led"></ol>
+          <p class="why" id="k9why">Stake 1 of 12. Drag the offer. The win ticket is the only place the take can hide.</p>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Leave 4, Play 8. Then 5, reset, Play 8. <strong>See.</strong> Identical luck; only the offered purse leaks. Scientia stays fortuna until n≥5. <strong>Why.</strong> A router that bills the hard-model rate for an easy task is this slider left of 5.</p>
+      <div class="notes">A house that wants a living must declare the edge. Hidden take-rate is the fraud catalog, not a pricing strategy.</div>
+      <div class="bar"><span>FAIR PAYOFF · OFFERED PAYOUT · DECLARE THE TAKE</span><span class="brand">08 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K09" data-primary-goal="n casts before a method claim" data-secondary-goals="Streaks, lean, no silent promote">
+      <div class="eyebrow">K09 · Scientia vs fortuna · throw for a six</div>
+      <h1>Luck is not a method</h1>
+      <p class="lede">Each roll is one independent trial. The <abbr class="term" title="scientia = knowledge/method; fortuna = luck">claim type</abbr> moves at 5 and 30 — this house’s working rule, not Bernoulli. Flywheel receipts already know this. No purse: you cannot confuse a streak with profit.</p>
+      <p class="so"><abbr class="term" title="Make a candidate the official champion">Promote</abbr> only after enough casts, and never silently.</p>
+      <div class="table">
+        <div class="felt">
+          <div class="dice-row"><div class="die" id="k10die" data-n="1"></div></div>
+          <div class="playbar">
+            <button type="button" class="chip go" id="k10roll">Throw</button>
+            <button type="button" class="chip" id="k10eight">Throw 8</button>
+            <button type="button" class="chip" id="k10thirty">Throw 30</button>
+            <button type="button" class="chip" id="k10reset">Reset</button>
+          </div>
+          <p class="muted mono">sixes / n = <span id="k10frac">0 / 0</span> · rate <span id="k10rate">—</span> · expected 1/6 ≈ 0.167</p>
+        </div>
+        <div class="side">
+          <p class="stat" id="claim"><span class="lamp" id="k10lamp"></span>fortuna — show, do not promote</p>
+          <p class="lede" id="claimd">Publish the throw. Do not coronate a harness, a model, or a view spec.</p>
+          <ol class="ledger" id="k10led"></ol>
+          <p class="why" id="k10why">A first six looks like a method. It is one cast. Keep throwing. If the rate leans hard away from 1/6 and stays there, that is Cardano’s detector — a basis, not a Prince.</p>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Throw until you hit a six, then Throw 30. <strong>See.</strong> The lamp stays red through the streak; amber after 5; green after 30 — and the rate walks toward 1/6. <strong>Why.</strong> One lucky path is not a release.</p>
+      <div class="notes">Frequency, even in my last chapter, only says the count does not lie far from np when n is large. That is not Bernoulli. It is enough to refuse a coronation after one throw. ADR-096: no auto-promote.</div>
+      <div class="bar"><span>RECEIPTS OVER n · NO SILENT PROMOTE</span><span class="brand">09 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K10" data-primary-goal="Walk remaining-work as a tree" data-secondary-goals="5–3 match; 7:1; step by step">
+      <div class="eyebrow">K10 · Problem of points · five steps</div>
+      <h1>Pay what remains</h1>
+      <p class="lede">Race to 6. Stopped 5–3. Walk the tree: scoreboard → work left → eight branches → count BBB → 7:1. 1–3 is A, 4–6 is B.</p>
+      <p class="so">Split leftover swarm budget by who is likelier to finish — not by tokens already burned.</p>
+      <div class="steps" id="k11steps"></div>
+      <div class="table">
+        <div class="felt">
+          <svg class="tree" id="k11tree" viewBox="0 0 360 140" aria-label="Remaining-path tree"></svg>
+          <div class="scoreboard">
+            <article class="card"><h3>Sunk</h3><p class="stat warn">5 : 3</p></article>
+            <article class="card"><h3>Cardano Δ</h3><p class="stat">6 : 1</p></article>
+            <article class="card"><h3>Pascal</h3><p class="stat ok">7 : 1</p></article>
+          </div>
+          <div class="dice-row"><div class="die" id="k11die" data-n="2"></div></div>
+          <p class="muted mono" id="k11score">This match · A needs 1 · B needs 3 · path —</p>
+          <div class="playbar">
+            <button type="button" class="chip go" id="k11roll">Play a game</button>
+            <button type="button" class="chip" id="k11match">Finish this match</button>
+            <button type="button" class="chip" id="k11eight">Replay 8 matches</button>
+            <button type="button" class="chip" id="k11reset">Reset</button>
+          </div>
+        </div>
+        <div class="side">
+          <div class="sci" id="k11sci"><span>scientia</span><i><b></b></i><span id="k11sciL">n=0 · fortuna</span></div>
+          <p class="why" id="k11stepwhy"></p>
+          <p class="muted mono">Observed A : B after replays = <span id="k11obs">0 : 0</span></p>
+          <div class="paths" id="k11paths"></div>
+          <ol class="ledger" id="k11led"></ol>
+          <p class="why" id="k11why">Pot is already posted. Only BBB gives B the match.</p>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Walk steps 1–5, then Finish this match. <strong>See.</strong> The tree prunes; seven leaves stay A. <strong>Why.</strong> Continuation value, not sunk tokens. LDA-005.</p>
+      <div class="notes">Interrupted swarms split leftover budget by remaining work × P(finish). Pacioli 5:3 and Cardano 6:1 are both wrong.</div>
+      <div class="bar"><span>TREE · CONTINUATION VALUE · 7 : 1</span><span class="brand">10 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K11" data-primary-goal="Explore sidecar topology and ontology" data-secondary-goals="Hash node; JSON; guardrails; no genesis smash">
+      <div class="eyebrow">K11 · Sidecar topology · ontology</div>
+      <h1>Beside the hash, not inside it</h1>
+      <p class="lede">A <abbr class="term" title="Extra fields next to an existing score — not a rewrite of the locked struct">sidecar</abbr> hangs off the scored node. The node keeps its Merkle hash and genesis-locked faces. The sidecar names circuit, odds, stake, ruin, calibration, aequitas. A hole is still a published field.</p>
+      <p class="so">Ship the contract next to scores. Do not smash a sixth face into the kernel. Exploratory work that graduates itself is a silent promote.</p>
+      <div class="table">
+        <div class="felt" style="align-items:stretch;">
+          <svg class="topo" id="k13g" viewBox="0 0 420 220" role="img" aria-label="Sidecar topology"></svg>
+        </div>
+        <div class="side">
+          <p class="muted mono" id="k13lab">Click a node.</p>
+          <pre class="jsonbox" id="k13json"></pre>
+          <div class="chips" id="k13chips" style="margin-top:.5rem;"></div>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Click HASH, then SIDECAR, then LOCKED. <strong>See.</strong> Payload stays 5D; sidecar JSON appears; genesis lists what we will not smash. <strong>Why.</strong> Ontology: score = measurement; sidecar = honesty about the circuit; lock = no silent promote.</p>
+      <div class="notes">LDA-001 circuit · 002 aequitas · 003 edge · 004 ruin · 005 remaining-work. Local namespace. MetaHarness stays optional. ADR-090 untouched.</div>
+      <div class="bar"><span>SIDECAR · HASH NODE · NO GENESIS SMASH</span><span class="brand">11 / 12</span></div>
+    </section>
+
+    <section class="slide play" data-id="K12" data-primary-goal="Show four overnight implementations" data-secondary-goals="Same contract, four hosts; no false promote">
+      <div class="eyebrow">K12 · Overnight field · 2026-08-13 → 14</div>
+      <h1 class="wide">Four tables, one contract</h1>
+      <p class="lede">Same night, four hosts. MetaHarness as the loop. Liber de Ludo Aleae as the sidecar. Each report is in <span class="mono">studies/</span>. None graduated an LDA-ADR. None promoted a champion.</p>
+      <p class="so">The method is what transferred. The domains stayed on their own circuits.</p>
+      <div class="k2tabs" id="k12tabs">
+        <button type="button" class="chip on" data-pane="all">All four</button>
+        <button type="button" class="chip" data-pane="s1">S1 · LLM lab</button>
+        <button type="button" class="chip" data-pane="s2">S2 · Oracle hall</button>
+        <button type="button" class="chip" data-pane="mf">Mudflood</button>
+        <button type="button" class="chip" data-pane="eql">EQL sidecar</button>
+      </div>
+      <div class="k2body">
+        <div class="k2pane on" data-pane="all">
+          <div class="grid cols-4" style="margin-top:0;flex:1;">
+            <article class="card reveal" tabindex="0"><h3>S1 · llm/</h3><p class="stat ok">0.08 → 0.81</p><p>intel/hour. Noise floor measured for the first time.</p>
+              <div class="more">60 GPU-hours had never measured run-to-run variance. Four replicates: treatment ±2.6, control ±25.0. Formal verdict stayed indistinguishable. That is the gate working.</div></article>
+            <article class="card reveal" tabindex="0"><h3>S2 · scifi-vector-oracle</h3><p class="stat">Darwin +0.000</p><p>Floors moved. Winner did not. Two circuits, two verdicts.</p>
+              <div class="more">Probe 0.962→1.000. Cert 0.395→0.965. 6/9 Darwin children worse than baseline 0.985. Mixing them into “+12% scoring” would be ROTM’s cousin.</div></article>
+            <article class="card reveal" tabindex="0"><h3>Mudflood</h3><p class="stat">70 / 75 / 79 / 100 / 38</p><p>Readiness faces did not move. The work circuit climbed.</p>
+              <div class="more">Buildings 870→953, media 178→241, stories 53→133. Claiming “the score improved overnight” would sell fortuna as scientia.</div></article>
+            <article class="card reveal" tabindex="0"><h3>EQL sidecar</h3><p class="stat ok">p̂ 0.404 ≈ seed 0.405</p><p>104 casts. Zero promotes. Fair table. Circuit grew 47→68.</p>
+              <div class="more">Turn 8: planned 3.3 hits, observed 0. Logged as lean −3.33, not “the model collapsed.” Mapping item 2 — sidecar the next throw — done once.</div></article>
+          </div>
+        </div>
+        <div class="k2pane" data-pane="s1">
+          <div class="table" style="margin-top:0;flex:1;">
+            <div class="felt" style="align-items:stretch;">
+              <h3>What ran</h3>
+              <p>Local model-eval lab (<span class="mono">~/llm</span>). Two-tier metaharness: one hypothesis, one field change, k independent replicates. Cardano primitives as executable gates: circuitus on every score, ICC-stated independence, claim ladder, ruin on hours.</p>
+              <div class="mathpane" style="margin-top:.5rem;">
+                <div class="row"><span>intel/h before</span><span class="fill"><b class="crit" style="width:10%"></b></span><span>0.08</span></div>
+                <div class="row"><span>intel/h after</span><span class="fill"><b style="width:100%"></b></span><span>0.81</span></div>
+                <div class="row"><span>detect bad cfg</span><span class="fill"><b class="warn" style="width:8%"></b></span><span>11d → 30s</span></div>
+                <div class="row"><span>566 tests → n</span><span class="fill"><b class="crit" style="width:12%"></b></span><span>≈ 8 casts</span></div>
+              </div>
+            </div>
+            <div class="side">
+              <p class="why">ICC 0.94–0.97. Treating 566 outcomes as 566 casts is ROTM. Fan of 4 wheels sharing model/config/seed bought 1.12×, not 4×. Discrimination is symmetric: a test everyone fails is as blind as one everyone passes.</p>
+              <p class="detect"><strong>Transfer.</strong> Measure the noise floor before believing a delta. Audit the artifact, not the launch command. A falsified prediction is a win. Refuse the wager the circuit cannot pay. Still amber — n≥30 not reached on the expensive instrument.</p>
+            </div>
+          </div>
+        </div>
+        <div class="k2pane" data-pane="s2">
+          <div class="table" style="margin-top:0;flex:1;">
+            <div class="felt" style="align-items:stretch;">
+              <h3>What ran</h3>
+              <p>Sacred-corpus hall (<span class="mono">~/dev/scifi-vector-oracle</span>). Darwin mutates one harness surface at a time. Live fitness is a second named circuit (probe recall, certification). Floors ratchet <span class="mono">measured − 0.03</span>, never down.</p>
+              <div class="mathpane" style="margin-top:.5rem;">
+                <div class="row"><span>Darwin winner</span><span class="fill"><b style="width:98%"></b></span><span>0.985</span></div>
+                <div class="row"><span>Δ vs baseline</span><span class="fill"><b class="crit" style="width:2%"></b></span><span>+0.000</span></div>
+                <div class="row"><span>probe measured</span><span class="fill"><b style="width:100%"></b></span><span>1.000</span></div>
+                <div class="row"><span>cert measured</span><span class="fill"><b style="width:97%"></b></span><span>0.965</span></div>
+              </div>
+            </div>
+            <div class="side">
+              <p class="why">n=10 Darwin variants. 0 children beat baseline + 0.05. 6/9 scored worse. Mock <span class="mono">verify: PASS</span> in 70 ms is not a circuitus — that is why Circuit B exists. API wheel hit monthly ruin; interpretive work moved to named subagents.</p>
+              <p class="detect"><strong>Transfer.</strong> Freeze the model, mutate the harness, publish weights. Give Darwin a live test that can fail. Report each circuit separately. A night that refuses 0.545 and lifts cert 0.395→0.965 is a good night.</p>
+            </div>
+          </div>
+        </div>
+        <div class="k2pane" data-pane="mf">
+          <div class="table" style="margin-top:0;flex:1;">
+            <div class="felt" style="align-items:stretch;">
+              <h3>What ran</h3>
+              <p>Historic Milwaukee atlas (<span class="mono">~/dev/mudflood</span>). Readiness circuit = MetaHarness 5-die. Work circuit = fold definition (mine → stage → lead fold; NOW items must build). Continue every 45 min is remaining-work split, not autopilot.</p>
+              <div class="mathpane" style="margin-top:.5rem;">
+                <div class="row"><span>buildings</span><span class="fill"><b style="width:91%"></b></span><span>870→953</span></div>
+                <div class="row"><span>media</span><span class="fill"><b style="width:74%"></b></span><span>178→241</span></div>
+                <div class="row"><span>stories</span><span class="fill"><b style="width:55%"></b></span><span>53→133</span></div>
+                <div class="row"><span>MH memory</span><span class="fill"><b class="crit" style="width:38%"></b></span><span>38 still</span></div>
+              </div>
+            </div>
+            <div class="side">
+              <p class="why">Faces 70 / 75 / 79 / 100 / 38 at dusk and dawn. Second language API retired (unequal seat). Router used as topology hint, lanes named from the work. Photo spokes that staged 0 are counted zeros — a method that cannot refuse will report luck as coverage.</p>
+              <p class="detect"><strong>Transfer.</strong> Write what counts as a turn. Score the host; do not use faces as the night’s KPI. Stage / fold / gate. Continue on remaining work. Publish both circuits, including zeros.</p>
+            </div>
+          </div>
+        </div>
+        <div class="k2pane" data-pane="eql">
+          <div class="table" style="margin-top:0;flex:1;">
+            <div class="felt" style="align-items:stretch;">
+              <h3>What ran</h3>
+              <p>EQ Legends build-guides (<span class="mono">~/dev/eql</span>, <span class="mono">synergy/cardano.py</span>). Recurring 45-min turn: harvest → recompute live pool → draft 8 → sealed score → sidecar {p, np, lean, claim_type}. Favorable = substance ≥ 70.</p>
+              <div class="mathpane" id="k12eql" style="margin-top:.5rem;"></div>
+            </div>
+            <div class="side">
+              <p class="why">Overnight p̂ = 42/104 = 0.4038 vs seed 17/42 = 0.4048. Lean −0.1 hits. Hyphen parser silently shorted the circuit (labeled 53→69). Turn 8’s zero was P(0)≈0.013 under the prior — a missing “already on the board” term, not a collapse. Late 14/24 = 0.58 is still weak_scientia: n=24, circuit moved, repeats are not i.i.d.</p>
+              <p class="detect"><strong>Transfer.</strong> p is a rate, np is a count. Census the eligible set every receipt. Do not promote unless claim_type is method <em>and</em> the circuit is the one you named at the start of the stake. Mapping item 2 is done once. Item 3 stays closed.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="support"><strong>Try.</strong> Open each tab. <strong>See.</strong> Four hosts, four named circuits, zero silent promotes. <strong>Why.</strong> Implementation is the sidecar on a live loop, not a slide about a sidecar.</p>
+      <div class="notes">Sources: studies/S1, S2, 2026-08-14-metaharness-overnight-calibration.md, 2026-08-14-overnight-metaharness-sidecar.md. Hosts: ~/llm, ~/dev/scifi-vector-oracle, ~/dev/mudflood, ~/dev/eql.</div>
+      <div class="bar"><span>FOUR OVERNIGHT TABLES · SAME CONTRACT</span><span class="brand">12 / 12</span></div>
+    </section>
+
+
+  </div>
+  <div class="progress" id="progress" aria-label="Slide progress"></div>
+  <button type="button" class="navbtn prev" id="prevBtn" aria-label="Previous slide">‹</button>
+  <button type="button" class="navbtn next" id="nextBtn" aria-label="Next slide">›</button>
+  <div id="jserr"></div>
+  <script>
+    const tip = document.getElementById('tip');
+    function hideTip() { tip.classList.remove('on'); }
+    function showTip(el) {
+      const text = el.getAttribute('data-tip') || el.getAttribute('title');
+      if (!text) return;
+      el.removeAttribute('title');
+      if (!el.getAttribute('data-tip')) el.setAttribute('data-tip', text);
+      tip.textContent = text;
+      tip.classList.add('on');
+      const r = el.getBoundingClientRect();
+      const tw = Math.min(tip.offsetWidth || 280, window.innerWidth - 16);
+      let left = r.left;
+      if (left + tw > window.innerWidth - 8) left = window.innerWidth - tw - 8;
+      let top = r.bottom + 8;
+      if (top + 80 > window.innerHeight) top = Math.max(8, r.top - 8 - (tip.offsetHeight || 48));
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+    document.addEventListener('mouseover', (e) => {
+      const el = e.target.closest('.term');
+      if (el) showTip(el);
+    });
+    document.addEventListener('mouseout', (e) => {
+      const el = e.target.closest('.term');
+      if (el && !e.relatedTarget?.closest?.('.term')) hideTip();
+    });
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest('.term');
+      if (el) { e.preventDefault(); showTip(el); return; }
+      if (!e.target.closest('#tip')) hideTip();
+    });
+    document.getElementById('glossBtn').addEventListener('click', () => {
+      document.body.classList.toggle('gloss-open');
+    });
+
+    document.querySelectorAll('.reveal').forEach((card) => {
+      const toggle = (e) => {
+        if (e.target.closest('.term, a, button, input, label')) return;
+        e.preventDefault();
+        const group = card.closest('.grid') || card.parentElement;
+        const opening = !card.classList.contains('open');
+        group.querySelectorAll('.reveal').forEach((c) => c.classList.remove('open'));
+        card.classList.toggle('open', opening);
+        group.classList.toggle('exploring', opening);
+      };
+      card.addEventListener('click', toggle);
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); toggle(e); }
+      });
+    });
+    document.addEventListener('mousemove', (e) => {
+      const slide = document.querySelector('.slide.active');
+      if (!slide) return;
+      const r = slide.getBoundingClientRect();
+      const nx = (e.clientX - r.left) / r.width - 0.5;
+      const ny = (e.clientY - r.top) / r.height - 0.5;
+      slide.style.setProperty('--gx', (-nx * 18) + 'px');
+      slide.style.setProperty('--gy', (-ny * 12) + 'px');
+      const open = slide.querySelector('.reveal.open .more');
+      if (open) {
+        open.style.setProperty('--px', (nx * 10) + 'px');
+        open.style.setProperty('--py', (ny * 8) + 'px');
+      }
+    });
+
+    const slides = [...document.querySelectorAll('.slide')];
+    let i = 0;
+    const progress = document.getElementById('progress');
+    function show(n) {
+      i = (n + slides.length) % slides.length;
+      document.querySelectorAll('.reveal.open').forEach((c) => c.classList.remove('open'));
+      document.querySelectorAll('.grid.exploring').forEach((g) => g.classList.remove('exploring'));
+      slides.forEach((s, idx) => s.classList.toggle('active', idx === i));
+      [...progress.children].forEach((b, idx) => b.classList.toggle('on', idx === i));
+      history.replaceState(null, '', '#' + (slides[i].dataset.id || ('K' + String(i+1).padStart(2,'0'))));
+    }
+    slides.forEach((_, idx) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('aria-label', 'Go to slide ' + (idx + 1));
+      b.addEventListener('click', () => show(idx));
+      progress.appendChild(b);
+    });
+    document.getElementById('prevBtn').onclick = () => show(i - 1);
+    document.getElementById('nextBtn').onclick = () => show(i + 1);
+    const bootHash = location.hash.replace('#','');
+    if (bootHash) {
+      const bootIdx = slides.findIndex(s => s.dataset.id === bootHash);
+      if (bootIdx >= 0) i = bootIdx;
+    }
+    show(i);
+    window.addEventListener('error', (e) => {
+      const box = document.getElementById('jserr');
+      if (!box) return;
+      box.style.display = 'block';
+      box.textContent = (e.message || 'script error') + ' @ ' + (e.lineno || '?');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === ' ' && e.target.closest('.reveal, input, button, textarea, .table, .felt, .playbar')) return;
+      if (['ArrowRight',' ','PageDown'].includes(e.key)) { e.preventDefault(); show(i+1); }
+      else if (['ArrowLeft','PageUp'].includes(e.key)) { e.preventDefault(); show(i-1); }
+      else if (e.key === 'Home') show(0);
+      else if (e.key === 'End') show(slides.length-1);
+      else if (e.key === 'n' || e.key === 'N') document.body.classList.toggle('show-notes');
+      else if (e.key === 'g' || e.key === 'G') document.body.classList.toggle('gloss-open');
+      else if (e.key === 'Escape') document.body.classList.remove('gloss-open');
+      else if (e.key === 'f' || e.key === 'F') {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+        else document.exitFullscreen?.();
+      }
+    });
+
+    function hydrateDie(el) {
+      if (!el || el.dataset.ready) return el;
+      for (let i = 0; i < 9; i++) {
+        const s = document.createElement('span');
+        s.className = 'pip';
+        el.appendChild(s);
+      }
+      if (!el.dataset.n) el.dataset.n = '6';
+      el.dataset.ready = '1';
+      return el;
+    }
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+    function rollDie(el, ms) {
+      hydrateDie(el);
+      el.classList.remove('win', 'lose');
+      el.classList.add('spin');
+      const hold = ms == null ? 480 : ms;
+      return new Promise((resolve) => {
+        const t0 = performance.now();
+        const tick = (t) => {
+          el.dataset.n = String(1 + Math.floor(Math.random() * 6));
+          if (t - t0 < hold) requestAnimationFrame(tick);
+          else {
+            const n = 1 + Math.floor(Math.random() * 6);
+            el.dataset.n = String(n);
+            el.classList.remove('spin');
+            resolve(n);
+          }
+        };
+        requestAnimationFrame(tick);
+      });
+    }
+    function barW(el, value, max) {
+      if (!el) return;
+      const p = Math.max(0, Math.min(1, value / max));
+      el.style.transform = 'scaleX(' + p + ')';
+    }
+    function prepend(list, html) {
+      const li = document.createElement('li');
+      li.innerHTML = html;
+      list.insertBefore(li, list.firstChild);
+      while (list.children.length > 12) list.removeChild(list.lastChild);
+    }
+    function lock(ids, on) {
+      ids.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = on; });
+    }
+    function bindTabs(rootId) {
+      const root = document.getElementById(rootId);
+      if (!root) return;
+      const slide = root.closest('.slide');
+      root.querySelectorAll('.chip').forEach((b) => {
+        b.addEventListener('click', () => {
+          root.querySelectorAll('.chip').forEach((c) => c.classList.remove('on'));
+          b.classList.add('on');
+          slide.querySelectorAll('.k2pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === b.dataset.pane));
+        });
+      });
+    }
+    bindTabs('k2tabs');
+    bindTabs('k12tabs');
+    const eqlTurns = [
+      [2, 3.24, 2], [3, 2.00, 4], [4, 3.00, 2], [5, 2.67, 5], [6, 3.25, 3],
+      [7, 3.20, 4], [8, 3.33, 0], [9, 2.86, 2], [10, 2.75, 4], [11, 2.89, 2],
+      [12, 2.80, 5], [13, 3.00, 5], [14, 3.17, 4]
+    ];
+    const eqlBox = document.getElementById('k12eql');
+    if (eqlBox) {
+      eqlBox.innerHTML = eqlTurns.map(([t, np, obs]) => {
+        const lean = obs - np;
+        const kind = t === 8 ? 'crit' : lean < -1 ? 'warn' : '';
+        return '<div class="row"><span>t' + String(t).padStart(2, '0') + '</span><span class="fill"><b class="' + kind + '" style="width:' + (obs / 8 * 100) + '%"></b></span><span>obs ' + obs + ' / np ' + np.toFixed(1) + '</span></div>';
+      }).join('') + '<p>obs 42 · planned ~42.1 · lean −0.1 · n=104</p>';
+    }
+    function paintSci(rootId, labelId, n) {
+      const root = document.getElementById(rootId);
+      const lab = document.getElementById(labelId);
+      if (!root || !lab) return;
+      root.classList.remove('mix', 'on');
+      let name = 'fortuna';
+      if (n >= 30) { name = 'scientia'; root.classList.add('on'); }
+      else if (n >= 5) { name = 'mixed'; root.classList.add('mix'); }
+      lab.textContent = 'n=' + n + ' · ' + name;
+    }
+
+    /* K03 fair vs house */
+    const on = new Set([6]);
+    const box = document.getElementById('k3faces');
+    const odds = document.getElementById('k3odds');
+    const k3 = { fair: 8, house: 8, n: 0, wins: 0, start: 8 };
+    function k3rs() { return { r: on.size, s: 6 - on.size, p: on.size / 6 }; }
+    function paintOdds() {
+      const { r, s } = k3rs();
+      odds.textContent = r === 0 ? 'no favorable face — refuse the table'
+        : 'r : s = ' + r + ' : ' + s + '   p = ' + r + '/6   fair pays ' + (s / r).toFixed(2) + ':1   house pays 4:1';
+    }
+    function paintK3purses() {
+      document.getElementById('k3fair').textContent = k3.fair.toFixed(1);
+      document.getElementById('k3house').textContent = k3.house.toFixed(1);
+      barW(document.getElementById('k3fairB'), k3.fair, 16);
+      barW(document.getElementById('k3houseB'), k3.house, 16);
+    }
+    function k3why() {
+      const { r, p } = k3rs();
+      paintSci('k3sci', 'k3sciL', k3.n);
+      const det = document.getElementById('k3detv');
+      if (k3.n < 6) det.textContent = 'Same die, two books. After n≥6 the leak (or the lean) becomes visible.';
+      else if (k3.house + 0.8 < k3.fair) det.textContent = 'Crooked contract. Offered trails fair after ' + k3.n + ' shared rolls. The bone was honest.';
+      else if (k3.n >= 6 && Math.abs(k3.wins / k3.n - p) > 0.28) det.textContent = 'Lean on the die. Observed rate ' + (k3.wins/k3.n).toFixed(2) + ' vs p=' + p.toFixed(2) + '. Name a basis.';
+      else det.textContent = 'No contract leak yet. Keep the two purses — that is how the system sees a crooked table.';
+      const el = document.getElementById('k3why');
+      if (r === 0) { el.textContent = 'No favorable face. Refuse. A score with an empty circuit is this.'; return; }
+      if (k3.n === 0) {
+        el.textContent = 'Stake 1 of 8 — limited risk, recreation not treasury. Same luck hits both purses; only the payout differs.';
+        return;
+      }
+      const rate = k3.wins / k3.n;
+      const lean = k3.n >= 6 && Math.abs(rate - p) > 0.28;
+      if (k3.fair <= 0 || k3.house <= 0) {
+        el.textContent = 'Ruin on a teaching purse of 8. That is why stakes stay small: one unlucky run is tuition, not the treasury.';
+        return;
+      }
+      if (lean) {
+        el.textContent = 'Lean. After ' + k3.n + ' throws the observed rate is ' + rate.toFixed(2) + ' against p = ' + p.toFixed(2) + '. If this kept up, Cardano would say there is a basis — not chance.';
+        return;
+      }
+      if (k3.house > k3.fair + 2) {
+        el.textContent = 'House is ahead — by luck, on the same die. Edge is a slope. Play 8 more.';
+        return;
+      }
+      if (r === 1 && k3.house < k3.fair - 0.4) {
+        el.textContent = 'Same bone. Fair hovers; house leaks the missing unit on every win. 16.7% expected take. The die was honest.';
+        return;
+      }
+      if (r >= 3) {
+        el.textContent = 'You named ' + r + ' faces (p = ' + p.toFixed(2) + ') but the house still pays 4:1. That is a mispriced table — player edge. Declare it, same as a hidden take.';
+        return;
+      }
+      el.textContent = k3.n + ' turns. Observed wins ' + k3.wins + '/' + k3.n + '. Fair EV is 0 so the purse jitters. House EV is the undeclared take.';
+    }
+    for (let n = 1; n <= 6; n++) {
+      const b = document.createElement('button');
+      b.className = 'face' + (on.has(n) ? ' on' : '');
+      b.type = 'button';
+      b.textContent = n;
+      b.onclick = () => { on.has(n) ? on.delete(n) : on.add(n); b.classList.toggle('on'); paintOdds(); k3why(); };
+      box.appendChild(b);
+    }
+    paintOdds();
+    paintK3purses();
+    hydrateDie(document.getElementById('k3die'));
+    async function k3once(ms) {
+      const { r, s, p } = k3rs();
+      if (r === 0) { k3why(); return; }
+      if (k3.fair <= 0 && k3.house <= 0) return;
+      const face = await rollDie(document.getElementById('k3die'), ms);
+      const win = on.has(face);
+      const fairPay = s / r;
+      const dFair = k3.fair > 0 ? (win ? fairPay : -1) : 0;
+      const dHouse = k3.house > 0 ? (win ? 4 : -1) : 0;
+      k3.fair = Math.max(0, k3.fair + dFair);
+      k3.house = Math.max(0, k3.house + dHouse);
+      k3.n += 1;
+      if (win) k3.wins += 1;
+      const die = document.getElementById('k3die');
+      die.classList.toggle('win', win);
+      die.classList.toggle('lose', !win);
+      prepend(document.getElementById('k3led'),
+        '<span>' + k3.n + '</span><span>' + face + '</span><span class="' + (win ? 'ok' : 'crit') + '">' + (win ? 'win' : 'lose') + '</span><span>fair ' + (dFair >= 0 ? '+' : '') + dFair.toFixed(1) + ' · house ' + (dHouse >= 0 ? '+' : '') + dHouse.toFixed(1) + '</span>');
+      paintK3purses();
+      k3why();
+    }
+    document.getElementById('k3roll').onclick = async () => {
+      lock(['k3roll','k3eight'], true);
+      await k3once();
+      lock(['k3roll','k3eight'], false);
+    };
+    document.getElementById('k3eight').onclick = async () => {
+      lock(['k3roll','k3eight'], true);
+      for (let t = 0; t < 8; t++) { await k3once(280); await sleep(70); }
+      lock(['k3roll','k3eight'], false);
+    };
+    document.getElementById('k3reset').onclick = () => {
+      k3.fair = 8; k3.house = 8; k3.n = 0; k3.wins = 0;
+      document.getElementById('k3led').innerHTML = '';
+      paintK3purses(); k3why();
+    };
+
+    /* K04 ROTM hands */
+    const thr = document.getElementById('throws');
+    const k4 = { hands: 0, hits: 0 };
+    function rotmMath() {
+      const n = +thr.value;
+      document.getElementById('nLabel').textContent = n;
+      const claim = Math.min(1, n / 6);
+      const real = 1 - Math.pow(5 / 6, n);
+      document.getElementById('rotm').textContent = claim.toFixed(2);
+      document.getElementById('real').textContent = real.toFixed(3);
+      document.getElementById('cross').textContent = real >= 0.5
+        ? 'Circuit has already crossed ½.'
+        : 'Still below ½ — ROTM already claimed it.';
+      return { n, claim, real };
+    }
+    function paintK4dice() {
+      const n = +thr.value;
+      const row = document.getElementById('k4dice');
+      row.innerHTML = '';
+      for (let i = 0; i < n; i++) {
+        const d = document.createElement('div');
+        d.className = 'die' + (n > 4 ? ' sm' : '');
+        d.dataset.n = '6';
+        row.appendChild(d);
+        hydrateDie(d);
+      }
+    }
+    function paintK4bars() {
+      const { claim, real } = rotmMath();
+      const expR = k4.hands * claim;
+      const expC = k4.hands * real;
+      document.getElementById('k4expR').textContent = expR.toFixed(1);
+      document.getElementById('k4expC').textContent = expC.toFixed(1);
+      document.getElementById('k4hit').textContent = String(k4.hits);
+      const max = Math.max(4, k4.hands);
+      barW(document.getElementById('k4expRB'), expR, max);
+      barW(document.getElementById('k4expCB'), expC, max);
+      barW(document.getElementById('k4hitB'), k4.hits, max);
+    }
+    function k4why() {
+      const { n, claim, real } = rotmMath();
+      paintSci('k4sci', 'k4sciL', k4.hands);
+      const det = document.getElementById('k4detv');
+      if (k4.hands === 0) det.textContent = 'ROTM is the crooked book: it overclaims before a single hand.';
+      else det.textContent = 'ROTM booked ' + (k4.hands * claim).toFixed(1) + ' hits. Circuit booked ' + (k4.hands * real).toFixed(1) + '. Observed ' + k4.hits + '. The bias is the formula, not the bone.';
+      const el = document.getElementById('k4why');
+      if (k4.hands === 0) {
+        el.textContent = 'No money on this table — limited risk is the point. ROTM is a pricing error. At n=' + n + ' it claims ' + (claim * 100).toFixed(0) + '%; the bone owes about ' + (real * 100).toFixed(1) + '%.';
+        return;
+      }
+      const obs = k4.hits / k4.hands;
+      if (k4.hands >= 6 && Math.abs(obs - claim) < Math.abs(obs - real)) {
+        el.textContent = 'You landed near the false half by luck (' + k4.hits + '/' + k4.hands + '). Replay. The circuit is still ' + real.toFixed(3) + '.';
+        return;
+      }
+      el.textContent = k4.hands + ' hands, ' + k4.hits + ' hits (rate ' + obs.toFixed(2) + '). ROTM booked ' + claim.toFixed(2) + '; circuit ' + real.toFixed(3) + '. A length-based quality score that adds one-sixth per try is this book.';
+    }
+    thr.oninput = () => {
+      k4.hands = 0; k4.hits = 0;
+      document.getElementById('k4led').innerHTML = '';
+      paintK4dice(); paintK4bars(); k4why();
+    };
+    paintK4dice(); paintK4bars(); k4why();
+    async function k4once(spin) {
+      const { n, claim, real } = rotmMath();
+      spin = spin == null ? 420 : spin;
+      const dice = [...document.getElementById('k4dice').children];
+      const faces = await Promise.all(dice.map((d, i) => rollDie(d, spin + i * 30)));
+      const hit = faces.some((f) => f === 6);
+      k4.hands += 1;
+      if (hit) k4.hits += 1;
+      dice.forEach((d, i) => {
+        d.classList.toggle('win', faces[i] === 6);
+        d.classList.toggle('lose', faces[i] !== 6 && hit === false);
+      });
+      prepend(document.getElementById('k4led'),
+        '<span>' + k4.hands + '</span><span>' + faces.join('') + '</span><span class="' + (hit ? 'ok' : 'crit') + '">' + (hit ? 'hit' : 'miss') + '</span><span>ROTM ' + claim.toFixed(2) + ' · circuit ' + real.toFixed(3) + '</span>');
+      paintK4bars();
+      k4why();
+    }
+    document.getElementById('k4roll').onclick = async () => {
+      lock(['k4roll','k4eight'], true);
+      await k4once();
+      lock(['k4roll','k4eight'], false);
+    };
+    document.getElementById('k4eight').onclick = async () => {
+      lock(['k4roll','k4eight'], true);
+      for (let t = 0; t < 8; t++) { await k4once(260); await sleep(60); }
+      lock(['k4roll','k4eight'], false);
+    };
+    document.getElementById('k4reset').onclick = () => {
+      k4.hands = 0; k4.hits = 0;
+      document.getElementById('k4led').innerHTML = '';
+      paintK4dice(); paintK4bars(); k4why();
+    };
+
+    /* K05 inventory + live calcs */
+    function rows(items) {
+      return items.map(([lab, v, max, kind]) => {
+        const pct = Math.max(0, Math.min(100, (v / max) * 100));
+        const cls = kind || (v < 60 && max === 100 ? 'crit' : v < 80 && max === 100 ? 'warn' : '');
+        return '<div class="row"><span>' + lab + '</span><span class="fill"><b class="' + cls + '" style="width:' + pct + '%"></b></span><span>' + v + '</span></div>';
+      }).join('');
+    }
+    const walls = [
+      ['V1 EffectVector', 'rhyme', 'l2', '5D risk/fairness/privacy/novelty/security. L2. No circuit. Fairness is a vibe, not aequitas. ADR-034.'],
+      ['V2 Governance gate', 'rhyme', 'gate', 'Four-way GovernanceDecision vs three-way GateDecision. Threshold without a sample space.'],
+      ['V3 SOUL EV', 'rhyme', 'soul', 'Minimax + expected value as duty. A commandment, not a scorer.'],
+      ['V4 FitnessScorer', 'cousin', 'rotm', 'GEPA fitness + English refusal penalty. ROTM’s cousin.'],
+      ['V5 NodeScoring', 'cousin', 'node', '6D EMA, Merkle-hashed. Neutral 0.5 is a blank die.'],
+      ['V6 Circuit-breaker', 'false friend', 'brk', 'WEFT-322 spend cap + no-op limit. Stop-loss, not circuitus.'],
+      ['V7 MetaHarness', 'rhyme', 'mh', '5 faces + receipts + no silent promote. This session 75/100/65/90/53, n=1.'],
+      ['V8 Router', 'cousin', 'rte', 'Live KeywordClassifier. No house-edge index.'],
+      ['V10 ECC coherence', 'cousin', 'ecc', 'Four in-tree coherence formulas. Lean-detector family.'],
+      ['V11 DeFi bond', 'rhyme', 'bond', 'Stake and slash. Economic, not epistemic.'],
+      ['V13 Delegation', 'cousin', 'del', 'WEFT-201 remaining-work classifier. Not yet a stake split.'],
+      ['V15 K2 UQ gap', 'rhyme', 'uq', 'Industry landscape already wrote: no uncertainty quantification.'],
+      ['V17 Counsel drift', 'rhyme', 'drift', 'Marked deck: agent briefing 5D ≠ live ADR-034 5D.']
+    ];
+    const calcs = {
+      l2: () => {
+        const dims = [['risk', .4], ['fair', .3], ['priv', .2], ['nov', .5], ['sec', .1]];
+        const mag = Math.sqrt(dims.reduce((s, [, v]) => s + v * v, 0));
+        return '<h3>L2 magnitude</h3><p>√(r²+f²+p²+n²+s²)</p>' +
+          rows(dims.map(([n, v]) => [n, v, 1, ''])) +
+          '<p class="stat" style="margin-top:.5rem;">|v| = ' + mag.toFixed(3) + '</p>' +
+          '<p>Refuse-bar ADR-034 = 0.7. Spawn tests = 0.8. This example ' + (mag > 0.7 ? 'trips 0.7' : 'clears 0.7') + '. No circuit named. Fairness here is a dim, not aequitas.</p>';
+      },
+      gate: () => '<h3>Governance gate</h3><p>Permit / challenge / deny / escalate — a threshold on a silent sample space.</p>' +
+        rows([['Permit', 1, 1, ''], ['Challenge', 0, 1, 'warn'], ['Deny', 0, 1, 'crit']]) +
+        '<p>The bar is a number. The circuit of what would have been allowed is unpublished.</p>',
+      soul: () => '<h3>SOUL EV</h3><p>Duty: maximise expected value, minimise worst case. No arithmetic, no bankroll.</p><p class="stat">commandment, not a scorer</p>',
+      rotm: () => '<h3>FitnessScorer · ROTM cousin</h3><p>Length / keyword density added as if they were chances.</p>' +
+        '<p>3 tokens × “1/6 quality” → claims 0.50. Circuit of “at least one real hit” is 1−(5/6)³ ≈ 0.421.</p>' +
+        rows([['ROTM claim', 50, 100, 'warn'], ['circuit', 42, 100, '']]),
+      node: () => '<h3>NodeScoring</h3><p>6D EMA, Merkle-hashed. Neutral 0.5 is a blank die.</p>' +
+        rows([['rel', .5, 1], ['coh', .5, 1], ['nov', .5, 1], ['cred', .5, 1], ['rec', .5, 1], ['div', .5, 1]]) +
+        '<p>Hash seals the payload. It does not name p.</p>',
+      brk: () => '<h3>WEFT-322 breaker</h3><p>Bankroll 200k tokens. Stake per step 8k. Trip at remaining ≤ 24k.</p>' +
+        rows([['spent', 176, 200, 'warn'], ['trip', 24, 200, 'crit']]) +
+        '<p>The trip is a stop-loss. It does not count faces. Perfect breaker, crooked table — both can be true.</p>',
+      mh: () => '<h3>MetaHarness this session</h3>' +
+        rows([['fit', 75, 100, 'warn'], ['compile', 100, 100, ''], ['cover', 65, 100, 'warn'], ['safety', 90, 100, ''], ['memory', 53, 100, 'crit']]) +
+        '<p>n = 1. Cost tag $0.024 is a price, not a sixth face. No favorable set.</p>',
+      rte: () => '<h3>Router</h3><p>KeywordClassifier first-match. No offered-vs-fair payout index.</p>' +
+        rows([['tier-1 tasks billed tier-3', 1, 1, 'crit']]),
+      ecc: () => '<h3>ECC coherence</h3><p>Four in-tree formulas. Lean-detector family — Cardano’s “basis”, not a declared p.</p>',
+      bond: () => '<h3>DeFi bond</h3><p>Stake and slash. Economic ruin, not epistemic calibration.</p>',
+      del: () => '<h3>Delegation</h3><p>Remaining-work classifier exists. It does not yet split leftover budget 7:1-style.</p>',
+      uq: () => '<h3>K2 UQ gap</h3><p>The landscape already wrote: no uncertainty quantification. The hole is the finding.</p>',
+      drift: () => '<h3>Counsel drift</h3><p>Briefing faces: cpu / memory / network / storage / trust.</p><p>Live ADR-034: risk / fairness / privacy / novelty / security.</p><p class="crit">Two dice, one name. Unequal conditions in-house.</p>'
+    };
+    const vchips = document.getElementById('vchips');
+    const vdetail = document.getElementById('vdetail');
+    const vcalc = document.getElementById('vcalc');
+    walls.forEach(([name, cls, key, text]) => {
+      const b = document.createElement('button');
+      b.className = 'chip';
+      b.textContent = name + ' · ' + cls;
+      b.onclick = () => {
+        [...vchips.children].forEach(c => c.classList.remove('on'));
+        b.classList.add('on');
+        vdetail.innerHTML = '<strong class="mono">' + name + '</strong> · ' + cls + ' — ' + text;
+        vcalc.innerHTML = (calcs[key] || calcs.l2)();
+      };
+      vchips.appendChild(b);
+    });
+    if (vchips.firstChild) vchips.firstChild.click();
+
+    /* K06 homonym walk */
+    const k6 = [
+      { t: '1 · Two words', w: 'English spent “circuit” on a stop-loss (WEFT-322). Cardano spent circuitus on the sample space. Keep both.', m: '<h3>Homonym</h3><p>circuitus = enumerate faces.</p><p>circuit-breaker = trip when spend or no-ops hit a cap.</p><p>Collapsing them hides a crooked book behind a stop-loss.</p>' },
+      { t: '2 · Count a circuit', w: 'A fair six: faces {1,2,3,4,5,6}. Favorable {6}. r:s = 1:5. That is the circuit. Nothing has been spent yet.', m: '<h3>circuitus</h3>' + rows([['favorable r', 1, 6], ['rest s', 5, 6]]) + '<p>p = 1/6. Fair payoff +5. EV = 0.</p>' },
+      { t: '3 · Arm a breaker', w: 'Bankroll 12. Stake 1. Trip when the purse hits 3. This is BudgetUsage.circuit_open — a ruin bound, not a sample space.', m: '<h3>breaker</h3>' + rows([['bankroll', 12, 12], ['trip at', 3, 12, 'crit']]) + '<p>The trip does not name faces. It only says “leave the table.”</p>' },
+      { t: '4 · Play a house book', w: 'Same die, offered 4:1. EV = −1/6. Edge = 16.7%. The breaker is still armed at 3.', m: '<h3>both at once</h3><p>EV_off = (1/6)(+4)+(5/6)(−1) = −0.167</p><p>edge = −EV/stake = 16.7%</p><p>The breaker has not fired. The table is already crooked.</p>' },
+      { t: '5 · Trip ≠ count', w: 'Purse hits 3. Breaker opens. You are saved from ruin and you still never counted the circuit. Perfect breaker, crooked book.', m: '<h3>verdict</h3><p class="ok">breaker: did its job</p><p class="crit">circuitus: still unnamed</p><p>Renaming the trip “circuitus” would launder this. Keep both words.</p>' }
+    ];
+    const k6box = document.getElementById('k6steps');
+    function showK6(i) {
+      [...k6box.children].forEach((c, n) => c.classList.toggle('on', n === i));
+      document.getElementById('k6why').textContent = k6[i].w;
+      document.getElementById('k6math').innerHTML = k6[i].m;
+    }
+    k6.forEach((s, i) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (i === 0 ? ' on' : '');
+      b.type = 'button';
+      b.textContent = s.t;
+      b.onclick = () => showK6(i);
+      k6box.appendChild(b);
+    });
+    showK6(0);
+
+    /* K07 radar + replay-the-snapshot */
+    const faces = [
+      ['fit', 75], ['compile', 100], ['cover', 65], ['safety', 90], ['memory', 53]
+    ];
+    const radar = document.getElementById('radar');
+    const faceWhy = {
+      fit: 'How well the agent harness matches this repo.',
+      compile: 'Does the tree still compile? 100 = yes this throw.',
+      cover: 'How much of the stated task surface is actually exercised.',
+      safety: 'Tool-surface safety score. High is not a circuit.',
+      memory: 'How useful stored memory is. 53 is the weak face this throw.'
+    };
+    const k7row = document.getElementById('k7dice');
+    faces.forEach(([n, v]) => {
+      const col = document.createElement('div');
+      col.className = 'col term';
+      col.setAttribute('data-tip', n + ' = ' + v + '. ' + faceWhy[n]);
+      col.style.cursor = 'help';
+      const bar = document.createElement('div');
+      bar.className = 'barfill';
+      bar.style.height = (v * 0.11) + 'vh';
+      if (v < 60) bar.style.background = 'var(--crit)';
+      else if (v < 80) bar.style.background = 'var(--warn)';
+      const lab = document.createElement('span');
+      lab.textContent = n + ' ' + v;
+      col.appendChild(bar); col.appendChild(lab); radar.appendChild(col);
+      const die = document.createElement('div');
+      die.className = 'die score';
+      die.innerHTML = '<em>' + n + '</em><b>' + v + '</b>';
+      if (v < 60) die.style.boxShadow = '0 0 0 2px var(--crit), 0 10px 18px rgba(0,0,0,.45)';
+      else if (v < 80) die.style.boxShadow = '0 0 0 2px var(--warn), 0 10px 18px rgba(0,0,0,.45)';
+      k7row.appendChild(die);
+    });
+    function k7math() {
+      document.getElementById('k7math').innerHTML = '<h3>This throw, decompressed</h3>' +
+        rows([['fit', 75, 100, 'warn'], ['compile', 100, 100, ''], ['cover', 65, 100, 'warn'], ['safety', 90, 100, ''], ['memory', 53, 100, 'crit']]) +
+        '<p>n = 1 · claim = fortuna · interval = unknown · $0.024 is a price tag</p>';
+    }
+    function k7eq() {
+      const items = [
+        ['✗', 'equal_info', 'No circuit published. Nobody said which scores would count as a win.'],
+        ['✗', 'equal_tools', 'Briefing 5D (cpu/mem/net/store/trust) ≠ live ADR-034 5D. Marked deck.'],
+        ['✗', 'equal_eval', 'n = 1. Replay of this slide does not add a trial.'],
+        ['✓', 'equal_stake', 'Cost tagged $0.024. The price is named.']
+      ];
+      document.getElementById('k7eq').innerHTML = items.map(([m, k, t]) =>
+        '<label><span>' + m + '</span><span><strong class="mono">' + k + '</strong> — ' + t + '</span></label>').join('');
+    }
+    const k7walk = [
+      { t: '1 · Name faces', w: 'Five named dice: fit, compile, cover, safety, memory. Not anonymous. Still unlabeled as a circuit — no favorable set.' },
+      { t: '2 · Read the throw', w: '75 / 100 / 65 / 90 / 53. Memory is the weak face (red). Compile is a yes. This is one snapshot, 2026-08-13.' },
+      { t: '3 · What is a win?', w: 'Nobody said. Without favorable faces you cannot form r:s. The number is a cast, not a measurement of readiness-as-chance.' },
+      { t: '4 · Other die: L2', w: 'EffectVector is a different five-die (risk/fair/priv/nov/sec). Its magnitude is √(sum of squares). Do not mix the two circuits.' },
+      { t: '5 · Aequitas on fit', w: 'Apply equal conditions to harness fit itself. Equal info, tools, eval, stake. The checklist is on the right.' },
+      { t: '6 · Verdict', w: 'Refuse promote. Disclose the holes. Replay does not increment n. LDA-002 sits beside the dim — it does not rename fairness.' }
+    ];
+    const k7sb = document.getElementById('k7steps');
+    k7walk.forEach((s, i) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (i === 0 ? ' on' : '');
+      b.type = 'button';
+      b.textContent = s.t;
+      b.onclick = () => {
+        [...k7sb.children].forEach((c, n) => c.classList.toggle('on', n === i));
+        document.getElementById('k7why').textContent = s.w;
+      };
+      k7sb.appendChild(b);
+    });
+    document.getElementById('k7why').textContent = k7walk[0].w;
+    k7math(); k7eq();
+    let k7plays = 0;
+    document.getElementById('k7cast').onclick = async () => {
+      const cubes = [...k7row.children];
+      cubes.forEach((d) => d.classList.add('spin'));
+      await sleep(520);
+      cubes.forEach((d, i) => {
+        d.classList.remove('spin');
+        d.querySelector('b').textContent = String(faces[i][1]);
+      });
+      k7plays += 1;
+      document.getElementById('k7n').textContent = 'n still = 1';
+      document.getElementById('k7why').textContent = 'Replay #' + k7plays + ' landed on the same snapshot. You did not collect a second trial. Theatre is not an eval. Sidecar the hole: circuit, n, interval.';
+    };
+
+    /* K09 same rolls, two books */
+    const pay = document.getElementById('pay');
+    const k9 = { fair: 12, off: 12, n: 0, wins: 0, broke: false, start: 12 };
+    function edge() {
+      const payout = +pay.value;
+      document.getElementById('payL').textContent = payout;
+      const po = document.getElementById('k9po'); if (po) po.textContent = payout;
+      const wt = document.getElementById('k9winT'); if (wt) wt.textContent = 'fair +5 · offer +' + payout;
+      const p = 1/6, ev = p*payout + (5/6)*(-1), ed = ev < 0 ? -ev : 0;
+      const evEl = document.getElementById('ev9');
+      evEl.textContent = ev.toFixed(3);
+      evEl.className = 'stat ' + (Math.abs(ev)<1e-9 ? 'ok' : ev<0 ? 'crit' : 'ok');
+      const edEl = document.getElementById('ed9');
+      edEl.className = 'stat ' + (Math.abs(ed)<1e-9 ? 'ok' : ed>0 ? 'crit' : 'ok');
+      edEl.textContent = (ed*100).toFixed(1) + '%';
+      document.getElementById('ver9').textContent = Math.abs(ed)<1e-9 ? 'Equal conditions' : ed>0 ? 'House table — refuse or disclose' : 'Player edge — the table is the mark';
+      return { payout, ev, ed };
+    }
+    function paintK9() {
+      document.getElementById('k9fair').textContent = k9.fair.toFixed(1);
+      document.getElementById('k9off').textContent = k9.off.toFixed(1);
+      barW(document.getElementById('k9fairB'), k9.fair, 24);
+      barW(document.getElementById('k9offB'), k9.off, 24);
+      document.getElementById('k9offP').classList.toggle('warn', k9.off <= 5 && k9.off > 3);
+    }
+    function k9why() {
+      const { payout, ev, ed } = edge();
+      paintSci('k9sci', 'k9sciL', k9.n);
+      const det = document.getElementById('k9detv');
+      if (k9.n < 6) det.textContent = 'Same rolls. After n≥6, if offered trails fair, the contract is the cheat.';
+      else if (k9.off + 0.5 < k9.fair) det.textContent = 'Crooked table visible. Offered ' + k9.off.toFixed(1) + ' vs fair ' + k9.fair.toFixed(1) + ' on identical luck.';
+      else det.textContent = 'No leak yet — or the offer is fair. Keep both purses; that is the detector.';
+      const el = document.getElementById('k9why');
+      if (k9.broke) {
+        el.textContent = 'Breaker tripped at 3. The stop-loss saved the offered purse. The table was still ' + (ed*100).toFixed(1) + '% house. Perfect breaker, crooked book — both can be true.';
+        return;
+      }
+      if (k9.n === 0) {
+        el.textContent = 'Stake 1 of 12. At 4:1 the house expects 16.7% of every unit — even when the first two rolls are sixes. Drag to 5 and the leak closes.';
+        return;
+      }
+      if (payout === 4 && k9.n >= 6 && k9.off < k9.fair) {
+        el.textContent = 'Same luck. Fair jitters around 12. Offered leaked. That 16.7% is −EV/stake, not the 20% payout-shortfall people quote.';
+        return;
+      }
+      if (k9.wins >= 2 && k9.n <= 3) {
+        el.textContent = 'Two early sixes. The house looks generous. Edge is a slope, not a throw. Keep playing.';
+        return;
+      }
+      el.textContent = k9.n + ' turns, ' + k9.wins + ' sixes. Fair EV = 0. Offered EV = ' + ev.toFixed(3) + ' per unit. Router / vendor / winner-only eval is this slider left of 5.';
+    }
+    pay.oninput = () => { edge(); k9why(); };
+    edge(); paintK9();
+    hydrateDie(document.getElementById('k9die'));
+    async function k9once(ms) {
+      if (k9.broke) { k9why(); return; }
+      const { payout } = edge();
+      const face = await rollDie(document.getElementById('k9die'), ms);
+      const win = face === 6;
+      const dFair = k9.fair > 0 ? (win ? 5 : -1) : 0;
+      const dOff = k9.off > 0 ? (win ? payout : -1) : 0;
+      k9.fair = Math.max(0, k9.fair + dFair);
+      k9.off = Math.max(0, k9.off + dOff);
+      k9.n += 1;
+      if (win) k9.wins += 1;
+      const die = document.getElementById('k9die');
+      die.classList.toggle('win', win);
+      die.classList.toggle('lose', !win);
+      if (k9.off <= 3) k9.broke = true;
+      prepend(document.getElementById('k9led'),
+        '<span>' + k9.n + '</span><span>' + face + '</span><span class="' + (win ? 'ok' : 'crit') + '">' + (win ? 'six' : 'miss') + '</span><span>fair ' + (dFair>=0?'+':'') + dFair + ' · offered ' + (dOff>=0?'+':'') + dOff + (k9.broke ? ' · BREAKER' : '') + '</span>');
+      document.getElementById('k9brk').textContent = k9.broke
+        ? 'Breaker open — play stopped on the offered book. Fair table would still be open.'
+        : 'Breaker trips at 3 — stop-loss, not a sample space.';
+      paintK9();
+      k9why();
+    }
+    document.getElementById('k9roll').onclick = async () => {
+      lock(['k9roll','k9eight'], true);
+      await k9once();
+      lock(['k9roll','k9eight'], false);
+    };
+    document.getElementById('k9eight').onclick = async () => {
+      lock(['k9roll','k9eight'], true);
+      for (let t = 0; t < 8 && !k9.broke; t++) { await k9once(280); await sleep(70); }
+      lock(['k9roll','k9eight'], false);
+    };
+    document.getElementById('k9reset').onclick = () => {
+      k9.fair = 12; k9.off = 12; k9.n = 0; k9.wins = 0; k9.broke = false;
+      document.getElementById('k9led').innerHTML = '';
+      document.getElementById('k9brk').textContent = 'Breaker trips at 3 — stop-loss, not a sample space.';
+      paintK9(); k9why();
+    };
+
+    /* K10 throw for a six */
+    const k10 = { n: 0, sixes: 0, streak: 0 };
+    function claimAt(n) {
+      const el = document.getElementById('claim');
+      const d = document.getElementById('claimd');
+      const lamp = document.getElementById('k10lamp');
+      if (n < 5) {
+        el.innerHTML = '<span class="lamp" id="k10lamp"></span>fortuna — show, do not promote';
+        el.className = 'stat crit';
+        d.textContent = 'One lucky path is not a method.';
+      } else if (n < 30) {
+        el.innerHTML = '<span class="lamp mix" id="k10lamp"></span>mixed — weak scientia';
+        el.className = 'stat warn';
+        d.textContent = 'Publish an interval. Do not freeze a champion.';
+      } else {
+        el.innerHTML = '<span class="lamp on" id="k10lamp"></span>scientia — a method, still named';
+        el.className = 'stat ok';
+        d.textContent = 'Still name the circuit. Still no silent promote.';
+      }
+    }
+    function k10paint() {
+      document.getElementById('k10frac').textContent = k10.sixes + ' / ' + k10.n;
+      document.getElementById('k10rate').textContent = k10.n ? (k10.sixes / k10.n).toFixed(3) : '—';
+      claimAt(k10.n);
+    }
+    function k10why() {
+      const el = document.getElementById('k10why');
+      if (k10.n === 0) {
+        el.textContent = 'A first six looks like a method. It is one cast. Keep throwing. If the rate leans hard away from 1/6 and stays there, that is Cardano’s detector — a basis, not a Prince.';
+        return;
+      }
+      const rate = k10.sixes / k10.n;
+      if (k10.n < 5 && k10.sixes > 0) {
+        el.textContent = 'A six in the first ' + k10.n + ' throw' + (k10.n>1?'s':'') + '. The promote lamp is still red. Luck is not a release.';
+        return;
+      }
+      if (k10.streak >= 3) {
+        el.textContent = k10.streak + ' sixes in a row. A streak is not a method. The lamp does not care.';
+        return;
+      }
+      if (k10.n >= 12 && Math.abs(rate - 1/6) > 0.18) {
+        el.textContent = 'Lean. Observed rate ' + rate.toFixed(2) + ' against 0.17. If this held, Cardano would say there is a basis. Do not promote a lean either — name it.';
+        return;
+      }
+      if (k10.n >= 30) {
+        el.textContent = 'n = ' + k10.n + ', rate ' + rate.toFixed(3) + ' walking toward 1/6. This is as close as this house calls a method — still named, still no silent promote.';
+        return;
+      }
+      el.textContent = k10.n + ' casts, ' + k10.sixes + ' sixes (rate ' + rate.toFixed(2) + '). Expected ≈ ' + (k10.n/6).toFixed(1) + '. Cutovers at 5 and 30 are this house’s rule, not Bernoulli.';
+    }
+    hydrateDie(document.getElementById('k10die'));
+    k10paint();
+    async function k10once(ms) {
+      const face = await rollDie(document.getElementById('k10die'), ms == null ? 360 : ms);
+      const six = face === 6;
+      k10.n += 1;
+      if (six) { k10.sixes += 1; k10.streak += 1; } else k10.streak = 0;
+      const die = document.getElementById('k10die');
+      die.classList.toggle('win', six);
+      die.classList.toggle('lose', !six);
+      prepend(document.getElementById('k10led'),
+        '<span>' + k10.n + '</span><span>' + face + '</span><span class="' + (six ? 'ok' : 'crit') + '">' + (six ? 'six' : '—') + '</span><span>rate ' + (k10.sixes/k10.n).toFixed(3) + '</span>');
+      k10paint();
+      k10why();
+    }
+    document.getElementById('k10roll').onclick = async () => {
+      lock(['k10roll','k10eight','k10thirty'], true);
+      await k10once();
+      lock(['k10roll','k10eight','k10thirty'], false);
+    };
+    document.getElementById('k10eight').onclick = async () => {
+      lock(['k10roll','k10eight','k10thirty'], true);
+      for (let t = 0; t < 8; t++) { await k10once(200); await sleep(40); }
+      lock(['k10roll','k10eight','k10thirty'], false);
+    };
+    document.getElementById('k10thirty').onclick = async () => {
+      lock(['k10roll','k10eight','k10thirty'], true);
+      for (let t = 0; t < 30; t++) { await k10once(110); await sleep(20); }
+      lock(['k10roll','k10eight','k10thirty'], false);
+    };
+    document.getElementById('k10reset').onclick = () => {
+      k10.n = 0; k10.sixes = 0; k10.streak = 0;
+      document.getElementById('k10led').innerHTML = '';
+      k10paint(); k10why();
+    };
+
+    /* K11 remaining paths */
+    const PATHS = ['AAA','AAB','ABA','ABB','BAA','BAB','BBA','BBB'];
+    const k11box = document.getElementById('k11paths');
+    PATHS.forEach((p) => {
+      const el = document.createElement('div');
+      el.className = 'path';
+      el.dataset.p = p;
+      el.textContent = p;
+      k11box.appendChild(el);
+    });
+    const k11tree = document.getElementById('k11tree');
+    function drawTree() {
+      const nodes = [
+        [180, 16, '·', ''],
+        [90, 52, 'A', 'A'], [270, 52, 'B', 'B'],
+        [50, 88, 'AA', 'AA'], [130, 88, 'AB', 'AB'], [230, 88, 'BA', 'BA'], [310, 88, 'BB', 'BB'],
+        [30, 124, 'AAA', 'AAA'], [70, 124, 'AAB', 'AAB'], [110, 124, 'ABA', 'ABA'], [150, 124, 'ABB', 'ABB'],
+        [210, 124, 'BAA', 'BAA'], [250, 124, 'BAB', 'BAB'], [290, 124, 'BBA', 'BBA'], [330, 124, 'BBB', 'BBB']
+      ];
+      const edges = [[0,1],[0,2],[1,3],[1,4],[2,5],[2,6],[3,7],[3,8],[4,9],[4,10],[5,11],[5,12],[6,13],[6,14]];
+      const pref = k11.path;
+      let svg = '';
+      edges.forEach(([a, b]) => {
+        const dead = pref && !nodes[b][3].startsWith(pref) && nodes[b][3] !== '';
+        svg += '<line x1="' + nodes[a][0] + '" y1="' + nodes[a][1] + '" x2="' + nodes[b][0] + '" y2="' + nodes[b][1] + '" stroke="' + (dead ? '#2A2A30' : '#C4A25C') + '" stroke-width="1"/>';
+      });
+      nodes.forEach(([, , lab, code], i) => {
+        const x = nodes[i][0], y = nodes[i][1];
+        const dead = code && pref && !code.startsWith(pref);
+        const hit = k11.needA <= 0 && code.startsWith(pref || 'A') && code[0] === 'A';
+        const bust = k11.needB <= 0 && code === 'BBB';
+        const fill = bust ? '#DC5F5F' : hit ? '#6EC896' : dead ? '#16161C' : '#16161C';
+        const stroke = bust || hit ? fill : (dead ? '#2A2A30' : '#C4A25C');
+        svg += '<circle cx="' + x + '" cy="' + y + '" r="9" fill="' + fill + '" stroke="' + stroke + '"/>';
+        svg += '<text x="' + x + '" y="' + (y + 3) + '" text-anchor="middle" fill="' + (dead ? '#706E7A' : '#E0DEE8') + '">' + lab + '</text>';
+      });
+      if (k11tree) k11tree.innerHTML = svg;
+    }
+    const k11 = { needA: 1, needB: 3, path: '', A: 0, B: 0, games: 0 };
+    const k11walk = [
+      { t: '1 · Scoreboard', w: 'Stopped 5–3 of 6. Pacioli pays 5:3 — yesterday. That is sunk cost.' },
+      { t: '2 · Work left', w: 'A needs 1 more game. B needs 3 in a row. Cardano asked this (right) and paid with triangles (wrong, 6:1).' },
+      { t: '3 · Eight branches', w: 'Three leftover games, two outcomes: 2³ = 8 equally likely leaves. The tree on the left is that circuit.' },
+      { t: '4 · Count BBB', w: 'Only BBB lets B finish. The other seven leaves are A — even A then anything, or B then A.' },
+      { t: '5 · 7 : 1', w: 'Match odds 7:1 for A. Not 5:3, not 6:1. Play the remaining games to watch the tree prune.' }
+    ];
+    const k11sb = document.getElementById('k11steps');
+    k11walk.forEach((s, i) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (i === 0 ? ' on' : '');
+      b.type = 'button';
+      b.textContent = s.t;
+      b.onclick = () => {
+        [...k11sb.children].forEach((c, n) => c.classList.toggle('on', n === i));
+        document.getElementById('k11stepwhy').textContent = s.w;
+      };
+      k11sb.appendChild(b);
+    });
+    document.getElementById('k11stepwhy').textContent = k11walk[0].w;
+    function k11paintPaths() {
+      [...k11box.children].forEach((el) => {
+        const p = el.dataset.p;
+        const pref = k11.path;
+        el.className = 'path';
+        const matches = !pref || p.slice(0, pref.length) === pref;
+        if (pref && !matches) el.classList.add('dead');
+        else if (pref && matches) el.classList.add('alive');
+        if (k11.needA <= 0 && matches) el.classList.add('hit');
+        if (k11.needB <= 0 && p === 'BBB') { el.classList.remove('hit'); el.classList.add('bust'); }
+      });
+      drawTree();
+    }
+    function k11scoreline() {
+      document.getElementById('k11score').textContent =
+        k11.needA <= 0 ? 'A takes the match · path ' + k11.path
+        : k11.needB <= 0 ? 'B takes the match · path ' + (k11.path || 'BBB')
+        : 'This match · A needs ' + k11.needA + ' · B needs ' + k11.needB + ' · path ' + (k11.path || '—');
+      document.getElementById('k11obs').textContent = k11.A + ' : ' + k11.B;
+    }
+    function k11why() {
+      paintSci('k11sci', 'k11sciL', k11.A + k11.B);
+      const el = document.getElementById('k11why');
+      const total = k11.A + k11.B;
+      if (total === 0 && !k11.path) {
+        el.textContent = 'Pot is already on the table — you are splitting, not staking more. Only BBB gives B the match. The other seven paths are A. That is 7:1, not 5:3, not 6:1.';
+        return;
+      }
+      if (k11.needB <= 0) {
+        el.textContent = 'BBB happened. The 1-in-8 path. Pacioli would still have paid 5:3. One B-win does not make 5:3 just.';
+        return;
+      }
+      if (k11.needA <= 0) {
+        el.textContent = 'A finished. Remaining work was 1 vs 3; A only needed one game. Tokens already burned (5–3) did not earn this.';
+        return;
+      }
+      if (total >= 6) {
+        const ratio = k11.B === 0 ? '∞' : (k11.A / k11.B).toFixed(1);
+        el.textContent = 'After ' + total + ' replays, observed A:B = ' + k11.A + ':' + k11.B + ' (≈ ' + ratio + ':1). Walking toward 7:1. An interrupted swarm splits leftover budget this way.';
+        return;
+      }
+      el.textContent = 'Path so far: ' + (k11.path || '—') + '. Seven of eight leftover sequences still belong to A.';
+    }
+    function k11resetMatch() {
+      k11.needA = 1; k11.needB = 3; k11.path = '';
+      k11paintPaths(); k11scoreline();
+    }
+    function k11apply(letter) {
+      k11.path += letter;
+      k11.games += 1;
+      if (letter === 'A') k11.needA -= 1; else k11.needB -= 1;
+      if (k11.needA <= 0) k11.A += 1;
+      if (k11.needB <= 0) k11.B += 1;
+      k11paintPaths(); k11scoreline(); k11why();
+      prepend(document.getElementById('k11led'),
+        '<span>' + k11.games + '</span><span>' + letter + '</span><span class="' + (letter==='A'?'ok':'crit') + '">' + letter + '</span><span>' + (k11.needA<=0 ? 'A match' : k11.needB<=0 ? 'B match' : 'needs ' + k11.needA + '/' + k11.needB) + '</span>');
+    }
+    hydrateDie(document.getElementById('k11die'));
+    k11paintPaths(); k11scoreline();
+    async function k11once(ms) {
+      if (k11.needA <= 0 || k11.needB <= 0) k11resetMatch();
+      const face = await rollDie(document.getElementById('k11die'), ms == null ? 400 : ms);
+      const letter = face <= 3 ? 'A' : 'B';
+      const die = document.getElementById('k11die');
+      die.classList.toggle('win', letter === 'A');
+      die.classList.toggle('lose', letter === 'B');
+      k11apply(letter);
+    }
+    async function k11finish(ms, gap) {
+      if (k11.needA <= 0 || k11.needB <= 0) k11resetMatch();
+      while (k11.needA > 0 && k11.needB > 0) {
+        await k11once(ms);
+        await sleep(gap == null ? 140 : gap);
+      }
+    }
+    document.getElementById('k11roll').onclick = async () => {
+      lock(['k11roll','k11match','k11eight'], true);
+      await k11once();
+      lock(['k11roll','k11match','k11eight'], false);
+    };
+    document.getElementById('k11match').onclick = async () => {
+      lock(['k11roll','k11match','k11eight'], true);
+      await k11finish();
+      lock(['k11roll','k11match','k11eight'], false);
+    };
+    document.getElementById('k11eight').onclick = async () => {
+      lock(['k11roll','k11match','k11eight'], true);
+      for (let m = 0; m < 8; m++) {
+        k11resetMatch();
+        await k11finish(180, 40);
+        await sleep(50);
+      }
+      lock(['k11roll','k11match','k11eight'], false);
+    };
+    document.getElementById('k11reset').onclick = () => {
+      k11.A = 0; k11.B = 0; k11.games = 0;
+      document.getElementById('k11led').innerHTML = '';
+      k11resetMatch(); k11why();
+    };
+
+    /* K11 sidecar topology (slide K11) */
+    const nodes13 = {
+      HASH: { x: 70, y: 70, fill: '#C4A25C', json: '{\n  "node": "sha256:9f3c…e21",\n  "kind": "EffectVector",\n  "payload": {\n    "risk": 0.4, "fairness": 0.3,\n    "privacy": 0.2, "novelty": 0.5,\n    "security": 0.1\n  },\n  "magnitude": 0.735\n}' },
+      PAYLOAD: { x: 200, y: 40, fill: '#6EC896', json: '{\n  "faces": 5,\n  "locked": true,\n  "note": "genesis — do not add a sixth face"\n}' },
+      SIDECAR: { x: 200, y: 120, fill: '#DCAF55', json: '{\n  "circuit": "incomplete:no eval set",\n  "odds": null,\n  "edge": null,\n  "stake": { "unit": "attention" },\n  "ruin": { "p_bust": null },\n  "calibration": { "n": 1, "claim_type": "fortuna" },\n  "aequitas": {\n    "equal_info": false,\n    "equal_tools": false,\n    "equal_eval": false,\n    "equal_stake": true\n  }\n}' },
+      LOCKED: { x: 340, y: 70, fill: '#DC5F5F', json: '{\n  "will_not": [\n    "sixth face in genesis",\n    "rename breaker to circuitus",\n    "call fairness aequitas without the check",\n    "ROTM as a prior",\n    "invent dollar savings from $0.024",\n    "auto-promote"\n  ],\n  "will_publish": [\n    "score-contract JSON",\n    "equality flags",\n    "edge index",\n    "ruin beside the breaker",\n    "remaining-work split",\n    "n + interval"\n  ]\n}' }
+    };
+    const g13 = document.getElementById('k13g');
+    function draw13() {
+      if (!g13) return;
+      let svg = '';
+      svg += '<line x1="70" y1="70" x2="200" y2="40" stroke="#C4A25C" stroke-width="1.2"/>';
+      svg += '<line x1="70" y1="70" x2="200" y2="120" stroke="#C4A25C" stroke-width="1.2"/>';
+      svg += '<line x1="200" y1="120" x2="340" y2="70" stroke="#2A2A30" stroke-dasharray="4 3"/>';
+      Object.entries(nodes13).forEach(([name, n]) => {
+        svg += '<rect x="' + (n.x - 42) + '" y="' + (n.y - 16) + '" width="84" height="32" rx="3" fill="#0E0E12" stroke="' + n.fill + '" data-n="' + name + '"/>';
+        svg += '<text x="' + n.x + '" y="' + (n.y + 4) + '" text-anchor="middle" fill="' + n.fill + '" data-n="' + name + '">' + name + '</text>';
+      });
+      g13.innerHTML = svg;
+    }
+    function show13(name) {
+      document.getElementById('k13lab').textContent = name;
+      document.getElementById('k13json').textContent = nodes13[name].json;
+      [...document.getElementById('k13chips').children].forEach((c) => c.classList.toggle('on', c.textContent === name));
+    }
+    if (g13) {
+      draw13();
+      const chips13 = document.getElementById('k13chips');
+      Object.keys(nodes13).forEach((name) => {
+        const b = document.createElement('button');
+        b.className = 'chip';
+        b.textContent = name;
+        b.onclick = () => show13(name);
+        if (chips13) chips13.appendChild(b);
+      });
+      g13.addEventListener('click', (e) => {
+        const n = e.target.getAttribute('data-n');
+        if (n) show13(n);
+      });
+      show13('SIDECAR');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# Overlay admission (ADR-098). Keep overlay_ready false until prefixes,
+# absolute working_dir, and unique PC ports are proven in a merge fixture.
+id: weftos
+prefix: weft-
+namespace: weftos
+pc_http: 18090
+pc_mcp: 18091
+root: /Users/mathewbeane/weftos
+overlay_ready: false
+reason: "leaf names not globally unique yet; mcp_server is per-instance"

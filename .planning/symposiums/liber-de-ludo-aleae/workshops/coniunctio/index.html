@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Room Coniunctio — landings</title>
+  <style>
+    :root { --bg:#08080A; --panel:#16161C; --ink:#E0DEE8; --dim:#AAA8B4; --faint:#706E7A; --accent:#C4A25C; --ok:#6EC896; --crit:#DC5F5F; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    html,body { height:100%; background:var(--bg); color:var(--ink); font-family:Georgia,serif; overflow:hidden; }
+    .slide { display:none; height:100%; padding:5vh 6vw 8vh; flex-direction:column; border-left:3px solid var(--accent); }
+    .slide.on { display:flex; }
+    .ey { font-family:ui-monospace,Menlo,monospace; color:var(--accent); letter-spacing:.14em; font-size:.72rem; }
+    h1 { font-size:1.85rem; max-width:22ch; margin:.5rem 0; }
+    p, td { color:var(--dim); line-height:1.45; }
+    p { max-width:58ch; }
+    table { width:100%; max-width:52rem; border-collapse:collapse; margin-top:1rem; font-size:.92rem; }
+    th,td { text-align:left; padding:.4rem .3rem; border-bottom:1px solid rgba(255,255,255,.08); }
+    th { color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:.72rem; }
+    a { color:var(--accent); }
+    .so { margin-top:.55rem; color:var(--ink); }
+    .so::before { content:"So what. "; color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:.7rem; letter-spacing:.08em; }
+    .term { border-bottom:1px dotted var(--accent); cursor:help; background:rgba(196,162,92,.08); }
+    #tip { position:fixed; z-index:80; max-width:min(26rem,86vw); background:#16161C; color:#E0DEE8; border:1px solid #C4A25C; border-radius:4px; padding:.5rem .65rem; font-size:.86rem; opacity:0; pointer-events:none; }
+    #tip.on { opacity:1; }
+    .bar { position:fixed; bottom:1.2rem; left:6vw; right:6vw; font-family:ui-monospace,Menlo,monospace; font-size:.68rem; color:var(--faint); display:flex; }
+    .bar b { margin-left:auto; color:var(--accent); font-weight:500; }
+    .help { position:fixed; top:.8rem; right:1rem; font-family:ui-monospace,Menlo,monospace; font-size:.62rem; color:var(--faint); }
+    .glossbox { position:fixed; top:0; right:0; width:min(26rem,92vw); height:100%; background:#0E0E12; border-left:1px solid var(--accent); padding:1.1rem; overflow:auto; transform:translateX(100%); transition:transform .2s; z-index:20; }
+    body.gloss-open .glossbox { transform:none; }
+    .glossbox dt { color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:.78rem; margin-top:.7rem; }
+    .glossbox dd { color:var(--dim); font-size:.86rem; margin:0; }
+    .support { margin-top:.5rem; font-size:.82rem; color:var(--faint); }
+    .support strong { color:var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="help">← → · <a href="../../index.html" style="color:var(--accent);">Lobby</a> · <button type="button" id="glossBtn" style="font:inherit;color:var(--accent);background:transparent;border:1px solid var(--accent);border-radius:3px;cursor:pointer;">Glossary</button></div>
+  <div id="tip" role="tooltip"></div>
+  <aside class="glossbox">
+    <h2>Glossary</h2>
+    <dl>
+      <dt>landing</dt><dd>A Nova primitive attached to a named Vetus gap. Four tests: gap, no genesis break, not Cardano’s error, both parents cited.</dd>
+      <dt>sidecar</dt><dd>Extra fields next to an existing score. Not a rewrite of the locked struct.</dd>
+      <dt>LDA-ADR</dt><dd>Local symposium decision. Not a central WeftOS ADR until graduated.</dd>
+      <dt>genesis</dt><dd>Locked founding rules. EffectVector’s five faces live here.</dd>
+      <dt>circuitus</dt><dd>Sample space — all equally possible outcomes.</dd>
+      <dt>aequitas</dt><dd>Equal conditions of info, tools, stakes, light.</dd>
+      <dt>ROTM</dt><dd>Reasoning On The Mean: treating n×p as a probability.</dd>
+      <dt>EffectVector</dt><dd>Five impact numbers on a privileged action.</dd>
+      <dt>MetaHarness</dt><dd>Optional harness-readiness scorer.</dd>
+      <dt>house edge</dt><dd>Expected loss per unit stake when the payout is worse than fair.</dd>
+      <dt>WEFT-322</dt><dd>Cost / token stop-loss. Not a sample space.</dd>
+      <dt>ADR-034</dt><dd>Decision record that locked the live five faces.</dd>
+      <dt>Plane</dt><dd>The project work board. No ticket until one sidecar eval exists.</dd>
+      <dt>claim_type</dt><dd>scientia (method), fortuna (luck), or mixed.</dd>
+    </dl>
+  </aside>
+
+  <section class="slide on"><div class="ey">CONIUNCTIO · 1</div>
+    <h1>A primitive lands only on a named gap</h1>
+    <p>Nova spoke first (book only). Vetus spoke second (walls only). This room attaches a primitive only when all four hold: named gap, no genesis break, not Cardano’s error, both parents cited.</p>
+    <p class="so">Orphan claims are honorable. Forgeries are not.</p>
+  </section>
+
+  <section class="slide"><div class="ey">CONIUNCTIO · 2</div>
+    <h1>What landed</h1>
+    <table>
+      <tr><th>Primitive</th><th>Vetus gap (already named)</th><th>LDA</th></tr>
+      <tr><td><span class="term" title="Sample space">circuitus</span></td><td>every score silent on sample space</td><td>001</td></tr>
+      <tr><td><span class="term" title="Equal-conditions check">aequitas check</span></td><td>fairness vibe; counsel drift</td><td>002</td></tr>
+      <tr><td>odds / edge</td><td>no house-edge index</td><td>003</td></tr>
+      <tr><td>ruin</td><td>breaker exists, is stop-loss</td><td>004</td></tr>
+      <tr><td>remaining work</td><td>delegation is a classifier</td><td>005</td></tr>
+    </table>
+    <p class="so">These are sidecar fields, not a sixth genesis face.</p>
+  </section>
+
+  <section class="slide"><div class="ey">CONIUNCTIO · 3</div>
+    <h1>What did not land</h1>
+    <p>Calling the cost stop-loss (WEFT-322) a circuitus. Calling EffectVector.fairness aequitas without the check. Treating ROTM as a “prior.” Inventing dollar savings from the $0.024 MetaHarness cost tag. Auto-promote.</p>
+    <p class="so">Pretty forgeries fail the four tests.</p>
+  </section>
+
+  <section class="slide"><div class="ey">CONIUNCTIO · 4</div>
+    <h1>The sidecar contract</h1>
+    <p>Publish beside a score: circuit, favorable, odds, stake, edge, ruin, calibration (n, interval), claim_type (method / luck / mixed), equal_conditions (same info, tools, eval, stake). If a field is empty, print the hole.</p>
+    <p class="so">Shipping the hole is the honesty. That is LDA-003 as a die in the explorer.</p>
+    <pre id="sidejson" style="margin-top:.7rem;max-width:42rem;background:#0E0E12;border:1px solid rgba(255,255,255,.08);padding:.6rem .7rem;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--dim);white-space:pre-wrap;"></pre>
+    <p class="support"><strong>Try.</strong> Open <a href="../../demos/circuit-ev.html">circuit-ev.html</a>. <strong>See.</strong> Edge appear when payout ≠ fair. <strong>Why.</strong> That is LDA-003 as a die.</p>
+  </section>
+
+  <section class="slide"><div class="ey">CONIUNCTIO · 5</div>
+    <h1>Three moves</h1>
+    <table>
+      <tr><th>#</th><th>Move</th></tr>
+      <tr><td>1</td><td>Align the governance-counsel briefing to ADR-034 (one five-die).</td></tr>
+      <tr><td>2</td><td>Sidecar the next MetaHarness throw: name n, circuit, interval.</td></tr>
+      <tr><td>3</td><td>Leave genesis and the Plane board alone until 2 is done once.</td></tr>
+    </table>
+    <p class="so">Do these three before anyone files a central architecture decision. Minutes: <a href="../../panels/P3-coniunctio.md">P3-coniunctio.md</a>.</p>
+  </section>
+
+  <div class="bar">ROOM CONIUNCTIO · BOTH PARENTS CITED<b id="n">1 / 5</b></div>
+  <script>
+    const tip=document.getElementById('tip');
+    const showTip=el=>{ const t=el.getAttribute('data-tip')||el.getAttribute('title'); if(!t) return; el.removeAttribute('title'); el.setAttribute('data-tip',t); tip.textContent=t; tip.classList.add('on'); const r=el.getBoundingClientRect(); tip.style.left=Math.min(r.left,innerWidth-280)+'px'; tip.style.top=(r.bottom+8)+'px'; };
+    document.addEventListener('mouseover',e=>{ const el=e.target.closest('.term'); if(el) showTip(el); });
+    document.addEventListener('mouseout',e=>{ if(e.target.closest('.term')&&!e.relatedTarget?.closest?.('.term')) tip.classList.remove('on'); });
+    document.addEventListener('click',e=>{ const el=e.target.closest('.term'); if(el){ showTip(el); return;} if(!e.target.closest('#tip')) tip.classList.remove('on'); });
+    document.getElementById('glossBtn').onclick=()=>document.body.classList.toggle('gloss-open');
+    const s=[...document.querySelectorAll('.slide')]; let i=0;
+    const show=n=>{ i=(n+s.length)%s.length; s.forEach((x,k)=>x.classList.toggle('on',k===i)); document.getElementById('n').textContent=(i+1)+' / '+s.length; };
+    document.getElementById('sidejson').textContent = JSON.stringify({
+      circuit:"incomplete:no eval set",
+      favorable:null,
+      odds:null,
+      edge:null,
+      stake:{unit:"attention"},
+      ruin:{p_bust:null, note:"breaker is stop-loss, not this field"},
+      calibration:{n:1, interval:null, claim_type:"fortuna"},
+      aequitas:{equal_info:false, equal_tools:false, equal_eval:false, equal_stake:true}
+    }, null, 2);
+    document.addEventListener('keydown',e=>{
+      if(['ArrowRight',' '].includes(e.key)) {e.preventDefault(); show(i+1);}
+      if(e.key==='ArrowLeft') show(i-1);
+      if(e.key==='g'||e.key==='G') document.body.classList.toggle('gloss-open');
+      if(e.key==='Escape') document.body.classList.remove('gloss-open');
+    });
+  </script>
+</body>
+</html>

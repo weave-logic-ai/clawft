@@ -32,6 +32,8 @@ evolution** (ADR-096 draft). The `weft` runtime must still run without it.
 ## Related docs
 
 - `docs/adr/adr-096-metaharness-foundation.md`  
+- `docs/adr/adr-098-environment-process-compose.md`  
+- `docs/guides/agent-harness-triple-loop.md`  
 - `docs/research/metaharness-foundation.md`  
 - `docs/research/graph-views.md` (fusion operational model)  
 - `docs/research/ruv-worldgraph-vs-weftos.md`  

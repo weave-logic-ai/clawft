@@ -1,0 +1,74 @@
+---
+title: Agent Harness
+description: Add the triple loop (research, development, ops) with a master controller. Per-project process-compose; no environment overlay yet.
+---
+
+How WeftOS runs incoming work the way Forge does: a **master controller**,
+three standing loops, one Plane board, jobs in process-compose.
+
+The long form (agents grep this):
+[`docs/guides/agent-harness-triple-loop.md`](https://github.com/weave-logic-ai/weftos/blob/0.8-metaharness/docs/guides/agent-harness-triple-loop.md).
+Decision: [ADR-098](/docs/weftos/decisions) (environment pane is **planned only**).
+
+## Triple loop
+
+```
+                    master controller (lead)
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+   1. research loop     2. development loop   3. ops / compose
+   (always on)          (plan + do ≥ 90)      (desired state)
+          │                   │                   │
+          └────────── one board (Plane) ──────────┘
+```
+
+| Loop | Every turn | Command |
+|---|---|---|
+| **Research** | Never skip | `node scripts/metaharness/crosscut.mjs` + `scripts/plane-dag.sh ready` |
+| **Development** | When ready exists | `plane-dag.sh claim` → implement → `done` |
+| **Ops** | When servers/jobs move | This repo `process-compose` on **:18090** / **:18091** |
+
+Score is its own subtask: `scripts/metaharness/score.sh`.
+
+The lead **routes**. Named implementers do the work. Do not wait for
+Ruflo to write code. Do not start
+`loop-runner.mjs --forever` unless asked.
+
+## Add it to a repo
+
+| Path | Role |
+|---|---|
+| `AGENTS.md` | Master + lanes |
+| `.grok/rules/agent-harness.md` | Host rule |
+| `process-compose.yaml` | Servers + `job_*` tools |
+| `compose/desired.yaml` | Up/down flags |
+| `compose/manifest.yaml` | Overlay admission (`overlay_ready: false` until prefixed) |
+| `compose/ports.yaml` | Ports this repo claims |
+
+Jobs are YAML processes with `disabled: true` and `mcp.type: tool`.
+No ad-hoc Python for score / gate / plane-ready.
+
+## Why there is no machine-wide pane yet
+
+process-compose merges like **docker-compose** (`-f a -f b`, last name
+wins; paths relative to the first file). It is not terraform. Two
+projects that both define `web` become one process. Two `mcp_server`
+blocks share one port.
+
+Verified on v1.120.0: merge of two files each with `web` produced **3**
+processes, not 4.
+
+Until every leaf is `overlay_ready` (unique prefix, absolute
+`working_dir`, reserved PC ports), **do not** glob yamls into one
+instance. See ADR-098.
+
+## Ports (this machine)
+
+| Project | PC HTTP | PC MCP |
+|---|---|---|
+| Forge | `:18080` | `:18081` |
+| WeftOS | `:18090` | `:18091` |
+
+WeftOS kernel stays `:8080`. Docs in this yaml use `:4000` so they do
+not steal Forge Next on `:3000`.

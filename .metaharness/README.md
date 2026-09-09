@@ -47,6 +47,7 @@ as `mcp-server-harness` via shallow inventory. Always run `score.sh` (both).
 - **Policy** (ViewSpec, retention, substrate denylist, soft-edge thresholds)
   is promote-gated (ADR-097).
 - Grok: `.grok/rules/metaharness.md`
+- Triple loop (research / development / ops): `docs/guides/agent-harness-triple-loop.md`, ADR-098
 
 ## Do not
 

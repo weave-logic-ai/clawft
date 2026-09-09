@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 240" width="720" height="240" role="img" aria-labelledby="t3 d3">
+  <title id="t3">Three dice — partitions are not the circuit</title>
+  <desc id="d3">Sums 9 and 12 have 25 ways; 10 and 11 have 27. Circuit is 216.</desc>
+  <rect width="720" height="240" fill="#08080A"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="360" y="28" text-anchor="middle" fill="#C4A25C" font-size="12" letter-spacing=".12em">CH. 13 · CIRCUIT = 216</text>
+    <g id="bars">
+      <rect x="80" y="70" width="44" height="100" fill="#C4A25C"/>
+      <rect x="230" y="62" width="44" height="108" fill="#6EC896"/>
+      <rect x="380" y="62" width="44" height="108" fill="#6EC896"/>
+      <rect x="530" y="70" width="44" height="100" fill="#C4A25C"/>
+    </g>
+    <text x="102" y="190" text-anchor="middle" fill="#E0DEE8" font-size="13">9</text>
+    <text x="252" y="190" text-anchor="middle" fill="#E0DEE8" font-size="13">10</text>
+    <text x="402" y="190" text-anchor="middle" fill="#E0DEE8" font-size="13">11</text>
+    <text x="552" y="190" text-anchor="middle" fill="#E0DEE8" font-size="13">12</text>
+    <text x="102" y="62" text-anchor="middle" fill="#AAA8B4" font-size="12">25</text>
+    <text x="252" y="54" text-anchor="middle" fill="#AAA8B4" font-size="12">27</text>
+    <text x="402" y="54" text-anchor="middle" fill="#AAA8B4" font-size="12">27</text>
+    <text x="552" y="62" text-anchor="middle" fill="#AAA8B4" font-size="12">25</text>
+    <text x="360" y="224" text-anchor="middle" fill="#706E7A" font-size="12">Six partitions each is not six ways each.</text>
+  </g>
+</svg>

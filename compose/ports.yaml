@@ -1,0 +1,7 @@
+# Ports this repo claims. Kernel is UDS ~/.clawft/kernel.sock (not TCP 8080).
+project: weftos
+claims:
+  - { port: 18090, use: process-compose-http }
+  - { port: 18091, use: process-compose-mcp-sse }
+  - { port: 4000, use: weft-docs, notes: "fumadocs; avoid :3000 (Forge Next)" }
+  - { port: 8081, use: weft-serve, notes: "scripts/build.sh serve alt" }

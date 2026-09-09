@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Circuit EV — Liber de Ludo Aleae demo</title>
+  <style>
+    :root {
+      --bg: #08080A; --panel: #16161C; --ink: #E0DEE8; --dim: #AAA8B4;
+      --faint: #706E7A; --accent: #C4A25C; --ok: #6EC896; --crit: #DC5F5F; --warn: #DCAF55;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: system-ui, "Segoe UI", Inter, sans-serif;
+      min-height: 100vh; padding: 2rem 1.25rem 4rem;
+    }
+    h1 { font-size: 1.45rem; font-weight: 650; max-width: 22ch; }
+    .lede { color: var(--dim); max-width: 56ch; line-height: 1.45; }
+    .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+    .eyebrow { color: var(--accent); letter-spacing: .14em; font-size: .72rem; text-transform: uppercase; }
+    .grid { display: grid; gap: 1rem; margin-top: 1.5rem; }
+    @media (min-width: 900px) { .grid.two { grid-template-columns: 1.1fr .9fr; } }
+    .card {
+      background: var(--panel); border: 1px solid rgba(255,255,255,.09);
+      border-radius: 4px; padding: 1rem 1.1rem;
+    }
+    label { display: block; color: var(--faint); font-size: .78rem; margin: .7rem 0 .25rem; }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    .faces { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .face {
+      width: 42px; height: 42px; border-radius: 4px; border: 1px solid rgba(255,255,255,.16);
+      background: #0E0E12; color: var(--ink); cursor: pointer; font-weight: 600;
+    }
+    .face.on { border-color: var(--accent); background: rgba(196,162,92,.18); color: var(--accent); }
+    .stat { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+    .ok { color: var(--ok); } .crit { color: var(--crit); } .warn { color: var(--warn); }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: .35rem 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+    th { color: var(--faint); font-weight: 500; }
+    .felt {
+      margin-top: 1.2rem; background: #0E0E12; border: 1px solid rgba(255,255,255,.09);
+      border-radius: 4px; padding: 1rem 1.1rem;
+    }
+    .die {
+      width: 56px; height: 56px; background: #E0DEE8; border-radius: 7px;
+      display: grid; grid-template: repeat(3,1fr)/repeat(3,1fr); padding: 7px;
+      box-shadow: 0 10px 18px rgba(0,0,0,.45);
+    }
+    .die .pip { width: 7px; height: 7px; border-radius: 50%; background: #16161C; justify-self: center; align-self: center; opacity: 0; }
+    .die[data-n="1"] .pip:nth-child(5),
+    .die[data-n="2"] .pip:nth-child(1), .die[data-n="2"] .pip:nth-child(9),
+    .die[data-n="3"] .pip:nth-child(1), .die[data-n="3"] .pip:nth-child(5), .die[data-n="3"] .pip:nth-child(9),
+    .die[data-n="4"] .pip:nth-child(1), .die[data-n="4"] .pip:nth-child(3), .die[data-n="4"] .pip:nth-child(7), .die[data-n="4"] .pip:nth-child(9),
+    .die[data-n="5"] .pip:nth-child(1), .die[data-n="5"] .pip:nth-child(3), .die[data-n="5"] .pip:nth-child(5), .die[data-n="5"] .pip:nth-child(7), .die[data-n="5"] .pip:nth-child(9),
+    .die[data-n="6"] .pip:nth-child(1), .die[data-n="6"] .pip:nth-child(3), .die[data-n="6"] .pip:nth-child(4), .die[data-n="6"] .pip:nth-child(6), .die[data-n="6"] .pip:nth-child(7), .die[data-n="6"] .pip:nth-child(9) { opacity: 1; }
+    .die.spin { animation: tumble .45s ease; }
+    @keyframes tumble { 0%{transform:rotate(-20deg) scale(.9)} 50%{transform:rotate(14deg) scale(1.1)} 100%{transform:none} }
+    .playbar { display:flex; gap:.4rem; flex-wrap:wrap; margin:.7rem 0; }
+    .playbar button {
+      font-family: ui-monospace, Menlo, monospace; border-radius: 4px; cursor: pointer;
+      border: 1px solid rgba(255,255,255,.14); background: #16161C; color: var(--ink); padding: .4rem .7rem;
+    }
+    .playbar button.go { border-color: var(--accent); color: var(--accent); }
+    .ledger { list-style:none; padding:0; margin:.5rem 0 0; font-family: ui-monospace, Menlo, monospace; font-size:.78rem; color: var(--dim); max-height: 10rem; overflow:auto; }
+    .ledger li { display:grid; grid-template-columns: 1.6rem 1.4rem 2.4rem 1fr; gap:.4rem; padding:.2rem 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .why { border-left: 3px solid var(--accent); padding:.3rem .6rem; margin-top:.7rem; color: var(--ink); }
+    .purses { display:grid; gap:.35rem; margin-top:.6rem; font-family: ui-monospace, Menlo, monospace; font-size:.78rem; color: var(--dim); }
+    footer { margin-top: 2rem; color: var(--faint); font-size: .78rem; }
+  </style>
+</head>
+<body>
+  <p class="eyebrow mono">Demo · E1 / E2 · Room Coniunctio</p>
+  <h1>Count the circuit, then price the wager</h1>
+  <p class="lede">A fair six-die. Pick the faces you call favorable (a win). Set the payout the table offers (how many units you receive besides your stake back). Cardano’s rule: wagers in proportion to the <strong>circuit</strong> (all six faces). Anything else is <strong>house edge</strong> — even if the die is honest. This is a teaching toy, not a gambling product.</p>
+  <p class="lede"><strong>Try.</strong> Leave 6 selected, drag payout to 4. <strong>See.</strong> EV goes negative; house edge ≈ 16.7%. <strong>Why.</strong> A router that bills a hard-model price for an easy task is this table.</p>
+
+  <div class="grid two">
+    <section class="card">
+      <h2 class="mono" style="font-size:.8rem;color:var(--accent);letter-spacing:.08em;">CIRCUITUS · 6 FACES</h2>
+      <p class="lede" style="margin:.4rem 0 1rem;">Click faces that count as a win.</p>
+      <div class="faces" id="faces"></div>
+      <label>Payout if you win (to 1), besides stake returned</label>
+      <input id="payout" type="range" min="1" max="10" step="1" value="5"/>
+      <p class="mono" id="payoutLabel" style="color:var(--dim)">5 : 1</p>
+      <label>Stake</label>
+      <input id="stake" type="range" min="1" max="20" value="1"/>
+      <p class="mono" id="stakeLabel" style="color:var(--dim)">1 unit</p>
+    </section>
+    <section class="card">
+      <h2 class="mono" style="font-size:.8rem;color:var(--accent);letter-spacing:.08em;">THE CAST</h2>
+      <table>
+        <tr><th>Favorable r</th><td id="r">1</td></tr>
+        <tr><th>Unfavorable s</th><td id="s">5</td></tr>
+        <tr><th>Odds (fair)</th><td id="odds">1 : 5</td></tr>
+        <tr><th>p</th><td id="p">1/6</td></tr>
+        <tr><th>EV</th><td><span class="stat" id="ev">0.00</span></td></tr>
+        <tr><th>House edge</th><td><span class="stat" id="edge">0%</span></td></tr>
+        <tr><th>Verdict</th><td id="verdict">Equal conditions</td></tr>
+      </table>
+      <p class="lede" id="rotm" style="margin-top:1rem;"></p>
+    </section>
+  </div>
+  <section class="felt">
+    <h2 class="mono" style="font-size:.8rem;color:var(--accent);letter-spacing:.08em;">PLAY EIGHT TURNS · SAME DIE, TWO BOOKS</h2>
+    <p class="lede">Stake 1 of 12. Fair pays <span class="mono">s:r</span>. Offered pays the slider. Limited risk: a teaching purse, not the treasury.</p>
+    <div class="die" id="playdie" data-n="6"></div>
+    <div class="playbar">
+      <button type="button" class="go" id="roll">Roll</button>
+      <button type="button" id="eight">Play 8</button>
+      <button type="button" id="reset">Reset</button>
+    </div>
+    <div class="purses">
+      <div>Fair purse <strong id="pfair">12</strong></div>
+      <div>Offered purse <strong id="poff">12</strong></div>
+    </div>
+    <ol class="ledger" id="pled"></ol>
+    <p class="why" id="pwhy">Leave 6 selected, payout at 4. Play 8. Fair jitters; offered leaks 16.7% in expectation — even when the first two are sixes.</p>
+  </section>
+  <footer class="mono">WeftOS symposium · Liber de Ludo Aleae · not a gambling product · circuit ≠ circuit-breaker</footer>
+  <script>
+    const facesEl = document.getElementById('faces');
+    const on = new Set([6]);
+    for (let n = 1; n <= 6; n++) {
+      const b = document.createElement('button');
+      b.className = 'face' + (on.has(n) ? ' on' : '');
+      b.textContent = n;
+      b.onclick = () => { on.has(n) ? on.delete(n) : on.add(n); b.classList.toggle('on'); render(); };
+      facesEl.appendChild(b);
+    }
+    const $ = id => document.getElementById(id);
+    function render() {
+      const r = on.size;
+      const s = 6 - r;
+      const payout = +$('payout').value;
+      const stake = +$('stake').value;
+      $('payoutLabel').textContent = payout + ' : 1';
+      $('stakeLabel').textContent = stake + ' unit' + (stake > 1 ? 's' : '');
+      $('r').textContent = r;
+      $('s').textContent = s;
+      $('odds').textContent = r + ' : ' + s;
+      $('p').textContent = r + '/6';
+      const p = r / 6;
+      const ev = p * payout * stake + (1 - p) * (-stake);
+      const edge = ev < 0 ? (-ev / stake) : 0;
+      $('ev').textContent = ev.toFixed(3);
+      $('ev').className = 'stat ' + (Math.abs(ev) < 1e-9 ? 'ok' : ev < 0 ? 'crit' : 'ok');
+      $('edge').textContent = (edge * 100).toFixed(1) + '%';
+      $('edge').className = 'stat ' + (Math.abs(edge) < 1e-9 ? 'ok' : edge > 0 ? 'crit' : 'ok');
+      $('verdict').textContent = r === 0 ? 'No favorable face — refuse'
+        : Math.abs(edge) < 1e-9 ? 'Equal conditions · EV = 0'
+        : edge > 0 ? 'House table · refuse or disclose'
+        : 'Player edge · the table is the mark';
+      const rotm = 3 * (r / 6);
+      const real = 1 - Math.pow(1 - r / 6, 3);
+      $('rotm').innerHTML = 'ROTM trap (3 throws): claims <span class="warn">' + rotm.toFixed(2) +
+        '</span> vs circuit <span class="ok">' + real.toFixed(3) + '</span>. Never treat np as P.';
+    }
+    $('payout').oninput = $('stake').oninput = render;
+    render();
+
+    const pdie = $('playdie');
+    for (let i = 0; i < 9; i++) {
+      const s = document.createElement('span');
+      s.className = 'pip';
+      pdie.appendChild(s);
+    }
+    const play = { fair: 12, off: 12, n: 0 };
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+    function rollDie() {
+      pdie.classList.add('spin');
+      return new Promise((resolve) => {
+        const t0 = performance.now();
+        const tick = (t) => {
+          pdie.dataset.n = String(1 + Math.floor(Math.random() * 6));
+          if (t - t0 < 450) requestAnimationFrame(tick);
+          else {
+            const n = 1 + Math.floor(Math.random() * 6);
+            pdie.dataset.n = String(n);
+            pdie.classList.remove('spin');
+            resolve(n);
+          }
+        };
+        requestAnimationFrame(tick);
+      });
+    }
+    function paintPlay() {
+      $('pfair').textContent = play.fair.toFixed(1);
+      $('poff').textContent = play.off.toFixed(1);
+    }
+    async function once() {
+      const r = on.size, s = 6 - r;
+      if (r === 0) { $('pwhy').textContent = 'No favorable face — refuse.'; return; }
+      const face = await rollDie();
+      const win = on.has(face);
+      const fairPay = s / r;
+      const offered = +$('payout').value;
+      const dF = win ? fairPay : -1;
+      const dO = win ? offered : -1;
+      play.fair = Math.max(0, play.fair + dF);
+      play.off = Math.max(0, play.off + dO);
+      play.n += 1;
+      const li = document.createElement('li');
+      li.innerHTML = '<span>' + play.n + '</span><span>' + face + '</span><span class="' + (win?'ok':'crit') + '">' + (win?'win':'lose') + '</span><span>fair ' + (dF>=0?'+':'') + dF.toFixed(1) + ' · offered ' + (dO>=0?'+':'') + dO + '</span>';
+      $('pled').insertBefore(li, $('pled').firstChild);
+      paintPlay();
+      const ev = (r/6)*offered + (s/6)*(-1);
+      $('pwhy').textContent = play.n + ' turns. Same luck, two contracts. Offered EV = ' + ev.toFixed(3) + ' per unit' +
+        (offered === 4 && r === 1 ? ' (16.7% house edge, not 20%).' : '.');
+    }
+    $('roll').onclick = once;
+    $('eight').onclick = async () => { for (let i = 0; i < 8; i++) { await once(); await sleep(120); } };
+    $('reset').onclick = () => {
+      play.fair = 12; play.off = 12; play.n = 0;
+      $('pled').innerHTML = '';
+      paintPlay();
+      $('pwhy').textContent = 'Purses reset. Stake 1 of 12 — limited risk.';
+    };
+  </script>
+</body>
+</html>
